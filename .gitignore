@@ -1,0 +1,15 @@
+# Build artifacts
+dist/
+node_modules/
+*.tsbuildinfo
+
+# Local data and caches
+*.log
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

@@ -1,0 +1,24 @@
+import { describe, expect, it } from 'vitest'
+import { QIONGQI_CLI_USAGE, runAgentCommand } from './agent-cli.js'
+
+describe('Qiongqi agent CLI text', () => {
+  it('uses qiongqi naming in the top-level usage text', () => {
+    expect(QIONGQI_CLI_USAGE).toContain('qiongqi <command> [options]')
+    expect(QIONGQI_CLI_USAGE).not.toContain('kun <command>')
+  })
+
+  it('uses qiongqi naming in command errors', async () => {
+    let stderr = ''
+
+    const code = await runAgentCommand('run', ['--data-dir', '/tmp/qiongqi-data'], {
+      stdout: { write: () => undefined },
+      stderr: { write: (chunk) => { stderr += chunk } },
+      env: {},
+      cwd: () => '/tmp/workspace'
+    })
+
+    expect(code).toBe(64)
+    expect(stderr).toContain('qiongqi run: missing prompt')
+    expect(stderr).not.toContain('kun run')
+  })
+})

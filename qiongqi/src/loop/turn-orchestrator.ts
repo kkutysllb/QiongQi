@@ -1,0 +1,436 @@
+/**
+ * TurnOrchestrator is the thin coordinator that replaced the monolithic
+ * `AgentLoop`. It owns the turn lifecycle (goal timer, steering drain,
+ * pipeline setup, error enrichment) and drives a bounded `for` loop that
+ * delegates each step to:
+ *
+ *   PromptBuilder   -> assemble the ModelRequest (+ budget gate, compaction,
+ *                      tool-catalog drift, token economy)
+ *   ModelStepRunner -> stream the model response (+ deltas, usage, tool_call
+ *                      materialisation)
+ *   ContinuationPolicy -> decide stop / continue / failed / materialise_plan
+ *   ToolCallCoordinator -> dispatch tool calls (approval, batching, storm)
+ *
+ * Behaviour is preserved verbatim from the legacy `AgentLoop.runTurn` /
+ * `AgentLoop.loop` / `AgentLoop.modelStep` orchestration shell.
+ */
+
+import type { ModelClient } from '../ports/model-client.js'
+import type { ToolHost, GuiPlanContext } from '../ports/tool-host.js'
+import type { ThreadStore } from '../ports/thread-store.js'
+import type { SessionStore } from '../ports/session-store.js'
+import type { ApprovalGate } from '../ports/approval-gate.js'
+import type { UserInputGate, UserInputResolution } from '../ports/user-input-gate.js'
+import type { UsageService } from '../services/usage-service.js'
+import type { TurnService } from '../services/turn-service.js'
+import type { RuntimeEventRecorder } from '../services/runtime-event-recorder.js'
+import type { IdGenerator } from '../ports/id-generator.js'
+import type { ModelCapabilityMetadata } from '../contracts/capabilities.js'
+import type { TurnItem } from '../contracts/items.js'
+import type { ThreadGoal } from '../contracts/threads.js'
+import type { ImmutablePrefix } from '../cache/immutable-prefix.js'
+import { ContextCompactor } from './context-compactor.js'
+import { InflightTracker } from './inflight-tracker.js'
+import { SteeringQueue } from './steering-queue.js'
+import type { ContextCompactionConfig } from './model-context-profile.js'
+import type { SkillRuntime } from '../skills/skill-runtime.js'
+import type { SkillPluginHost } from '../skills/plugin-host.js'
+import type { AttachmentStore } from '../attachments/attachment-store.js'
+import type { MemoryStore } from '../memory/memory-store.js'
+import type { TokenEconomyConfig } from './token-economy.js'
+import type { ToolStormBreakerOptions } from './tool-storm-breaker.js'
+import { touchThread } from '../domain/thread.js'
+import { makeErrorItem } from '../domain/item.js'
+import { CREATE_PLAN_TOOL_NAME } from '../adapters/tool/create-plan-tool.js'
+import { createImmutablePrefix } from '../cache/immutable-prefix.js'
+import { recordPipelineStage } from './loop-events.js'
+import { type GoalElapsedTimer } from './loop-helpers.js'
+import { ToolCallCoordinator } from './tool-call-coordinator.js'
+import { ModelStepRunner } from './model-step-runner.js'
+import { PromptBuilder } from './prompt-builder.js'
+import { decideContinuation } from './continuation-policy.js'
+
+export type TurnOrchestratorOptions = {
+  threadStore: ThreadStore
+  sessionStore: SessionStore
+  approvalGate: ApprovalGate
+  userInputGate: UserInputGate
+  model: ModelClient
+  toolHost: ToolHost
+  usage: UsageService
+  events: RuntimeEventRecorder
+  turns: TurnService
+  inflight: InflightTracker
+  steering: SteeringQueue
+  compactor: ContextCompactor
+  prefix: ImmutablePrefix
+  ids: IdGenerator
+  nowIso: () => string
+  nowMs?: () => number
+  modelCapabilities?: (model: string) => ModelCapabilityMetadata
+  skillRuntime?: SkillRuntime
+  skillPluginHost?: SkillPluginHost
+  attachmentStore?: AttachmentStore
+  memoryStore?: MemoryStore
+  tokenEconomy?: TokenEconomyConfig
+  contextCompaction?: ContextCompactionConfig
+  toolStorm?: ToolStormBreakerOptions & { enabled?: boolean }
+  toolArgumentRepair?: {
+    maxStringBytes?: number
+  }
+  /**
+   * Optional fallback GUI plan context for embedders that run the loop
+   * without persisted turn metadata. Normal serve mode reads GUI plan
+   * context from the active turn record.
+   */
+  activePlanContext?: GuiPlanContext
+  /**
+   * Optional callback to mutate the active plan context (e.g. when the
+   * loop records a successful `create_plan` result). The default is a
+   * no-op for callers that don't track plan state.
+   */
+  onActivePlanContextChange?: (context: GuiPlanContext | undefined) => void
+  onPlanWritten?: (input: {
+    threadId: string
+    turnId: string
+    planId: string
+    relativePath: string
+    markdown: string
+  }) => Promise<void>
+}
+
+type AwaitUserInputFn = (
+  threadId: string,
+  turnId: string,
+  input: {
+    id: string
+    itemId: string
+    prompt: string
+    questions: Array<{
+      header: string
+      id: string
+      question: string
+      options: Array<{ label: string; description: string }>
+    }>
+  },
+  signal: AbortSignal
+) => Promise<UserInputResolution>
+
+/**
+ * Turn-scoped state machine. `runTurn(threadId, turnId)` advances a turn
+ * until it completes, fails, is aborted, or blocks on approval / user input.
+ * Every iteration has hard boundaries: the AbortSignal, the per-thread cost
+ * budget (checked at the top of each step by PromptBuilder), and inflight
+ * resource cleanup in the coordinator.
+ */
+export class TurnOrchestrator {
+  private readonly opts: TurnOrchestratorOptions
+  private readonly coordinator: ToolCallCoordinator
+  private readonly modelStepRunner: ModelStepRunner
+  private readonly promptBuilder: PromptBuilder
+
+  constructor(opts: TurnOrchestratorOptions) {
+    this.opts = opts
+    const awaitUserInput: AwaitUserInputFn = (threadId, turnId, input, signal) =>
+      this.coordinator.awaitUserInput(threadId, turnId, input, signal)
+    this.coordinator = new ToolCallCoordinator({
+      toolHost: opts.toolHost,
+      approvalGate: opts.approvalGate,
+      userInputGate: opts.userInputGate,
+      inflight: opts.inflight,
+      events: opts.events,
+      turns: opts.turns,
+      ids: opts.ids,
+      nowIso: opts.nowIso,
+      memoryStoreEnabled: Boolean(opts.memoryStore),
+      ...(opts.toolStorm ? { toolStorm: opts.toolStorm } : {}),
+      ...(opts.onPlanWritten ? { onPlanWritten: opts.onPlanWritten } : {})
+    })
+    this.modelStepRunner = new ModelStepRunner({
+      model: opts.model,
+      events: opts.events,
+      turns: opts.turns,
+      usage: opts.usage,
+      ids: opts.ids,
+      ...(opts.toolArgumentRepair ? { toolArgumentRepair: opts.toolArgumentRepair } : {})
+    })
+    this.promptBuilder = new PromptBuilder({
+      threadStore: opts.threadStore,
+      sessionStore: opts.sessionStore,
+      events: opts.events,
+      turns: opts.turns,
+      usage: opts.usage,
+      model: opts.model,
+      toolHost: opts.toolHost,
+      compactor: opts.compactor,
+      prefix: opts.prefix,
+      ids: opts.ids,
+      nowIso: opts.nowIso,
+      ...(opts.modelCapabilities ? { modelCapabilities: opts.modelCapabilities } : {}),
+      ...(opts.skillRuntime ? { skillRuntime: opts.skillRuntime } : {}),
+      ...(opts.skillPluginHost ? { skillPluginHost: opts.skillPluginHost } : {}),
+      ...(opts.attachmentStore ? { attachmentStore: opts.attachmentStore } : {}),
+      ...(opts.memoryStore ? { memoryStore: opts.memoryStore } : {}),
+      ...(opts.tokenEconomy ? { tokenEconomy: opts.tokenEconomy } : {}),
+      ...(opts.contextCompaction ? { contextCompaction: opts.contextCompaction } : {}),
+      ...(opts.activePlanContext ? { activePlanContext: opts.activePlanContext } : {}),
+      ...(opts.onActivePlanContextChange ? { onActivePlanContextChange: opts.onActivePlanContextChange } : {}),
+      awaitUserInput
+    })
+  }
+
+  /**
+   * Run a turn end-to-end. The loop returns the final turn status
+   * (completed, failed, or aborted). All errors are caught and
+   * surfaced through the `error` runtime event.
+   */
+  async runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> {
+    const signal = this.opts.turns.getAbortController(turnId)
+    if (!signal) {
+      await this.failTurn(threadId, turnId, 'no abort controller for turn')
+      return 'failed'
+    }
+    if (signal.aborted) {
+      await this.opts.turns.finishTurn({ threadId, turnId, status: 'aborted' })
+      return 'aborted'
+    }
+    let goalTimer: GoalElapsedTimer | null = null
+    try {
+      goalTimer = await this.startGoalElapsedTimer(threadId)
+      await recordPipelineStage(this.opts.events, { threadId, turnId, stage: 'setup' })
+      this.coordinator.setupTurn(turnId)
+      await recordPipelineStage(this.opts.events, { threadId, turnId, stage: 'pre_start' })
+      await this.drainSteering(threadId, turnId, signal)
+      await recordPipelineStage(this.opts.events, { threadId, turnId, stage: 'post_start' })
+      const status = await this.loop(threadId, turnId, signal)
+      await this.opts.turns.finishTurn({ threadId, turnId, status })
+      return status
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error)
+      // Best-effort enrichment so the renderer can show "what failed where"
+      // instead of the bare "Qiongqi turn failed" string. See issue #26.
+      const modelInfo = this.opts.model && 'config' in this.opts.model
+        ? (this.opts.model as { config: { model?: string; baseUrl?: string } }).config
+        : undefined
+      const modelName = modelInfo?.model ?? 'unknown'
+      const provider = modelInfo?.baseUrl ?? 'unknown'
+      const stack = error instanceof Error
+        ? (error.stack?.split('\n').slice(0, 3).join(' | ') ?? '')
+        : ''
+      const message = [
+        '[Qiongqi turn failed]',
+        `turn=${turnId}`,
+        `thread=${threadId}`,
+        `model=${modelName}`,
+        `provider=${provider}`,
+        `error=${raw}`,
+        stack ? `stack=${stack}` : ''
+      ].filter(Boolean).join(' ')
+      await this.failTurn(threadId, turnId, message)
+      return 'failed'
+    } finally {
+      await this.finishGoalElapsedTimer(threadId, goalTimer)
+      this.promptBuilder.clearTurnAutoRoute(threadId, turnId)
+      this.coordinator.cleanupTurn(turnId)
+    }
+  }
+
+  private async failTurn(threadId: string, turnId: string, message: string): Promise<void> {
+    await this.opts.turns.finishTurn({ threadId, turnId, status: 'failed', error: message })
+  }
+
+  private nowMs(): number {
+    return this.opts.nowMs?.() ?? Date.now()
+  }
+
+  private async startGoalElapsedTimer(threadId: string): Promise<GoalElapsedTimer | null> {
+    const thread = await this.opts.threadStore.get(threadId)
+    const goal = thread?.goal
+    if (!goal || goal.status !== 'active') return null
+    return {
+      startedAtMs: this.nowMs(),
+      createdAt: goal.createdAt,
+      objective: goal.objective
+    }
+  }
+
+  private async finishGoalElapsedTimer(
+    threadId: string,
+    timer: GoalElapsedTimer | null
+  ): Promise<void> {
+    if (!timer) return
+    const elapsedSeconds = Math.floor(Math.max(0, this.nowMs() - timer.startedAtMs) / 1000)
+    if (elapsedSeconds <= 0) return
+
+    const current = await this.opts.threadStore.get(threadId)
+    const currentGoal = current?.goal
+    if (!current || !currentGoal) return
+    if (currentGoal.createdAt !== timer.createdAt || currentGoal.objective !== timer.objective) {
+      return
+    }
+
+    const now = this.opts.nowIso()
+    const goal: ThreadGoal = {
+      ...currentGoal,
+      timeUsedSeconds: (currentGoal.timeUsedSeconds ?? 0) + elapsedSeconds,
+      updatedAt: now
+    }
+    const updated = touchThread({ ...current, goal }, now)
+    await this.opts.threadStore.upsert(updated)
+    await this.opts.events.record({
+      kind: 'goal_updated',
+      threadId,
+      goal
+    })
+  }
+
+  private async drainSteering(threadId: string, turnId: string, signal: AbortSignal): Promise<void> {
+    const pending = this.opts.steering.drain()
+    if (pending.length === 0) return
+    for (const text of pending) {
+      const item: TurnItem = {
+        id: this.opts.ids.next('item_steered'),
+        turnId,
+        threadId,
+        role: 'user',
+        status: 'completed',
+        createdAt: this.opts.nowIso(),
+        finishedAt: this.opts.nowIso(),
+        kind: 'user_message',
+        text
+      }
+      await this.opts.turns.applyItem(threadId, item)
+    }
+    void signal
+  }
+
+  private async loop(
+    threadId: string,
+    turnId: string,
+    signal: AbortSignal
+  ): Promise<'completed' | 'failed' | 'aborted'> {
+    for (let step = 0; ; step += 1) {
+      if (signal.aborted) return 'aborted'
+      await this.drainSteering(threadId, turnId, signal)
+      const stepResult = await this.runStep(threadId, turnId, signal, step)
+      if (stepResult === 'stop') return 'completed'
+      if (stepResult === 'failed') return 'failed'
+      if (stepResult === 'aborted') return 'aborted'
+    }
+  }
+
+  private async runStep(
+    threadId: string,
+    turnId: string,
+    signal: AbortSignal,
+    stepIndex: number
+  ): Promise<'continue' | 'stop' | 'failed' | 'aborted'> {
+    const built = await this.promptBuilder.build({ threadId, turnId, signal, stepIndex })
+    if (built.kind === 'aborted') return 'aborted'
+    if (built.kind === 'stop') return 'stop'
+    const ctx = built.ctx
+
+    const stepResult = await this.modelStepRunner.run({
+      request: ctx.request,
+      threadId,
+      turnId,
+      signal,
+      toolProviderMetadata: ctx.toolProviderMetadata,
+      toolKinds: ctx.toolKinds,
+      recordPromptPressure: (tid, model, promptTokens) =>
+        this.promptBuilder.recordPromptPressure(tid, model, promptTokens)
+    })
+    if (stepResult.kind === 'aborted') return 'aborted'
+
+    const decision = decideContinuation({
+      stepResult,
+      ctx,
+      ids: this.opts.ids,
+      threadId,
+      turnId
+    })
+
+    switch (decision.action) {
+      case 'stop':
+        return 'stop'
+      case 'continue':
+        return 'continue'
+      case 'failed':
+        return 'failed'
+      case 'failed_with_error': {
+        await this.opts.events.record({
+          kind: 'error',
+          threadId,
+          turnId,
+          message: decision.errorMessage,
+          code: decision.errorCode
+        })
+        await this.opts.turns.applyItem(
+          threadId,
+          makeErrorItem({
+            id: this.opts.ids.next('item_error'),
+            turnId,
+            threadId,
+            message: decision.errorMessage,
+            code: decision.errorCode
+          })
+        )
+        return 'failed'
+      }
+      case 'materialize_plan': {
+        await this.opts.turns.applyItem(threadId, decision.planToolCallItem)
+        await this.opts.events.record({
+          kind: 'tool_call_ready',
+          threadId,
+          turnId,
+          itemId: decision.planToolCallItem.id,
+          callId: decision.planCall.callId,
+          toolName: CREATE_PLAN_TOOL_NAME,
+          readyCount: 1
+        })
+        const dispatched = await this.coordinator.dispatch({
+          calls: [decision.planCall],
+          threadId,
+          turnId,
+          workspace: ctx.thread?.workspace ?? '',
+          threadMode: ctx.effectiveMode,
+          ...(ctx.activePlanContext ? { activePlanContext: ctx.activePlanContext } : {}),
+          modelCapabilities: ctx.modelCapabilities,
+          activeSkillIds: ctx.activeSkillIds,
+          ...(ctx.allowedToolNames ? { allowedToolNames: ctx.allowedToolNames } : {}),
+          toolProviderKinds: ctx.toolProviderKinds,
+          approvalPolicy: ctx.approvalPolicy,
+          signal
+        })
+        if (dispatched === 'aborted') return 'aborted'
+        return 'continue'
+      }
+      case 'dispatch': {
+        const dispatched = await this.coordinator.dispatch({
+          calls: stepResult.completedToolCalls,
+          threadId,
+          turnId,
+          workspace: ctx.thread?.workspace ?? '',
+          threadMode: ctx.effectiveMode,
+          ...(ctx.activePlanContext ? { activePlanContext: ctx.activePlanContext } : {}),
+          modelCapabilities: ctx.modelCapabilities,
+          activeSkillIds: ctx.activeSkillIds,
+          ...(ctx.allowedToolNames ? { allowedToolNames: ctx.allowedToolNames } : {}),
+          toolProviderKinds: ctx.toolProviderKinds,
+          approvalPolicy: ctx.approvalPolicy,
+          signal
+        })
+        if (dispatched === 'aborted') return 'aborted'
+        return 'continue'
+      }
+    }
+  }
+
+  /** Convenience factory for tests: builds an orchestrator with sensible defaults. */
+  static defaultPrefix(): ImmutablePrefix {
+    return createImmutablePrefix({
+      systemPrompt: 'You are Qiongqi, a careful and helpful assistant.',
+      pinnedConstraints: ['user: preserve recent turns', 'project: keep responses concise']
+    })
+  }
+}
