@@ -1,7 +1,6 @@
 import type { ModelClient, ModelRequest, ModelStreamChunk, ModelToolSpec } from '@qiongqi/ports'
 import type { TurnItem } from '@qiongqi/contracts'
 import { emptyUsageSnapshot, type UsageSnapshot } from '@qiongqi/contracts'
-import { estimateDeepseekCacheSavings, estimateDeepseekCost } from './deepseek-pricing.js'
 import { isToolResultBridgeItem, repairModelHistoryItems } from '@qiongqi/domain'
 import { repairToolArguments } from './tool-argument-repair.js'
 import { isDeepSeekHost, probeDeepSeekReachable } from './model-error-probe.js'
@@ -11,13 +10,23 @@ import {
   normalizeModelEndpointFormat,
   type ModelEndpointFormat
 } from '@qiongqi/contracts'
+import {
+  defaultPricingProvider,
+  type PricingProvider
+} from './pricing/index.js'
 
 /**
- * Configuration for the compatible HTTP model client. Chat
- * completions remains the default, while custom providers can opt into
- * OpenAI Responses or Anthropic Messages request/response shapes.
+ * Configuration for the provider-agnostic model compatibility client.
+ *
+ * Chat completions remains the default, while custom providers can opt
+ * into OpenAI Responses or Anthropic Messages request/response shapes.
+ *
+ * Stage 1.3 renamed this type from `DeepseekCompatConfig` — the client
+ * works with any OpenAI-compatible endpoint, so the name now reflects
+ * that generality. The old name is re-exported as an alias for
+ * backward compatibility.
  */
-export type DeepseekCompatConfig = {
+export type ModelCompatConfig = {
   baseUrl: string
   apiKey: string
   model: string
@@ -33,7 +42,22 @@ export type DeepseekCompatConfig = {
   nonStreaming?: boolean
   /** Maximum idle time between streaming chunks before the turn fails. */
   streamIdleTimeoutMs?: number
+  /**
+   * Pricing provider for cost and cache-savings estimation. When
+   * omitted, the client uses the built-in default composite provider,
+   * which includes DeepSeek pricing. Pass a custom
+   * {@link PricingProvider} (or {@link CompositePricingProvider}) to
+   * support additional model vendors.
+   */
+  pricingProvider?: PricingProvider
 }
+
+/**
+ * Backward-compatibility alias. Prefer `ModelCompatConfig` in new code.
+ *
+ * @deprecated since stage 1.3 — use `ModelCompatConfig` instead.
+ */
+export type DeepseekCompatConfig = ModelCompatConfig
 
 type ChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool'
@@ -146,13 +170,15 @@ export class ModelCompatClient implements ModelClient {
   readonly provider = 'deepseek-compat'
   readonly model: string
 
-  private readonly config: DeepseekCompatConfig
+  private readonly config: ModelCompatConfig
   private readonly fetchImpl: typeof fetch
+  private readonly pricingProvider: PricingProvider
 
-  constructor(config: DeepseekCompatConfig) {
+  constructor(config: ModelCompatConfig) {
     this.config = config
     this.model = config.model
     this.fetchImpl = config.fetchImpl ?? fetch
+    this.pricingProvider = config.pricingProvider ?? defaultPricingProvider
   }
 
   /**
@@ -1200,14 +1226,14 @@ export class ModelCompatClient implements ModelClient {
     const cacheMiss = hasNativeCache ? nativeMiss : Math.max(promptTokens - cacheHit, 0)
     const cacheTotal = cacheHit + cacheMiss
     const cacheHitRate = cacheTotal === 0 ? null : cacheHit / cacheTotal
-    const estimatedCost = estimateDeepseekCost({
+    const estimatedCost = this.pricingProvider.estimateCost({
       model: this.config.model,
       providerHost: this.config.baseUrl,
       cacheHitTokens: cacheHit,
       cacheMissTokens: cacheMiss,
       outputTokens: completionTokens
     })
-    const estimatedSavings = estimateDeepseekCacheSavings({
+    const estimatedSavings = this.pricingProvider.estimateCacheSavings({
       model: this.config.model,
       providerHost: this.config.baseUrl,
       cacheHitTokens: cacheHit
@@ -1226,8 +1252,8 @@ export class ModelCompatClient implements ModelClient {
       turns: 1,
       costUsd: Number.isFinite(reportedCostUsd) ? reportedCostUsd : estimatedCost?.costUsd,
       costCny: Number.isFinite(reportedCostCny) ? reportedCostCny : estimatedCost?.costCny,
-      cacheSavingsUsd: estimatedSavings?.costUsd,
-      cacheSavingsCny: estimatedSavings?.costCny
+      cacheSavingsUsd: estimatedSavings?.cacheSavingsUsd,
+      cacheSavingsCny: estimatedSavings?.cacheSavingsCny
     }
   }
 
