@@ -49,7 +49,7 @@ export function parseServeOptions(
     configServe.tokenEconomy?.enabled ??
     configServe.tokenEconomyMode ??
     DEFAULT_SERVE_OPTIONS.tokenEconomyMode
-  const merged: ServeOptions = {
+  const merged: Record<string, unknown> = {
     ...DEFAULT_SERVE_OPTIONS,
     ...(loadedConfig ? { configPath: loadedConfig.path } : {}),
     host:
@@ -78,21 +78,8 @@ export function parseServeOptions(
           : env.QIONGQI_RUNTIME_TOKEN ??
             configServe.runtimeToken ??
             DEFAULT_SERVE_OPTIONS.runtimeToken,
-    apiKey:
-      typeof raw['api-key'] === 'string'
-        ? raw['api-key']
-        : typeof raw.apiKey === 'string'
-          ? raw.apiKey
-          : env.DEEPSEEK_API_KEY ?? configServe.apiKey ?? DEFAULT_SERVE_OPTIONS.apiKey,
-    baseUrl:
-      typeof raw['base-url'] === 'string'
-        ? raw['base-url']
-        : typeof raw.baseUrl === 'string'
-          ? raw.baseUrl
-          : env.QIONGQI_BASE_URL ??
-            env.DEEPSEEK_BASE_URL ??
-            configServe.baseUrl ??
-            DEFAULT_SERVE_OPTIONS.baseUrl,
+    apiKey: resolveApiKey(raw, env, configServe),
+    baseUrl: resolveBaseUrl(raw, env, configServe),
     endpointFormat:
       typeof raw['endpoint-format'] === 'string'
         ? raw['endpoint-format'] as ServeOptions['endpointFormat']
@@ -167,8 +154,8 @@ Options:
   --port <port>            HTTP port (default ${DEFAULT_SERVE_PORT})
   --data-dir <path>        Root directory for threads, events, and usage
   --runtime-token <token>  Bearer token for /v1/* requests
-  --api-key <key>          DeepSeek-compatible API key
-  --base-url <url>         DeepSeek-compatible base URL
+  --api-key <key>          Provider API key (required, or set QIONGQI_API_KEY)
+  --base-url <url>         Provider base URL (required, or set QIONGQI_BASE_URL)
   --endpoint-format <f>    chat_completions | responses | messages
   --model <model>          Default model id
   --preset <name>          Agent preset: coding (default) | generic
@@ -213,6 +200,21 @@ export function parseServeOptionsSafe(
     return { ok: true, options: parsed }
   } catch (error) {
     if (error instanceof z.ZodError) {
+      const requiredFields = error.issues.filter(
+        (issue) =>
+          issue.code === 'invalid_type' &&
+          (issue.path[0] === 'apiKey' || issue.path[0] === 'baseUrl')
+      )
+      if (requiredFields.length > 0) {
+        const labels = requiredFields.map((issue) =>
+          issue.path[0] === 'apiKey' ? '--api-key' : '--base-url'
+        )
+        return {
+          ok: false,
+          exitCode: ServeExitCode.config,
+          message: `serve requires ${labels.join(' and ')} <value> (pass the flag, set QIONGQI_API_KEY / QIONGQI_BASE_URL, or use a config file)`
+        }
+      }
       return {
         ok: false,
         exitCode: ServeExitCode.config,
@@ -223,6 +225,48 @@ export function parseServeOptionsSafe(
     const message = error instanceof Error ? error.message : String(error)
     return { ok: false, exitCode: ServeExitCode.config, message }
   }
+}
+
+/**
+ * Resolve the API key from CLI flags, env vars, or config.
+ *
+ * Priority: `--api-key` flag > `QIONGQI_API_KEY` env > legacy
+ * `DEEPSEEK_API_KEY` env (kept for backward compat) > config file.
+ * Returns `undefined` when nothing is set so the schema reports a
+ * required-field error.
+ */
+function resolveApiKey(
+  raw: Record<string, string | boolean>,
+  env: Record<string, string | undefined>,
+  configServe: NonNullable<LoadedQiongqiConfig['config']['serve']>
+): string | undefined {
+  const flagValue = stringFlag(raw, 'api-key') ?? stringFlag(raw, 'apiKey')
+  if (flagValue) return flagValue
+  const envValue = env.QIONGQI_API_KEY ?? env.DEEPSEEK_API_KEY
+  if (envValue) return envValue
+  if (configServe.apiKey) return configServe.apiKey
+  return undefined
+}
+
+/**
+ * Resolve the base URL from CLI flags, env vars, or config.
+ *
+ * Priority: `--base-url` flag > `QIONGQI_BASE_URL` env > legacy
+ * `DEEPSEEK_BASE_URL` env (kept for backward compat) > config file.
+ * Returns `undefined` when nothing is set so the schema reports a
+ * required-field error.
+ */
+function resolveBaseUrl(
+  raw: Record<string, string | boolean>,
+  env: Record<string, string | undefined>,
+  configServe: NonNullable<LoadedQiongqiConfig['config']['serve']>
+): string | undefined {
+  const flagValue = stringFlag(raw, 'base-url') ?? stringFlag(raw, 'baseUrl')
+  if (flagValue) return flagValue
+  const envValue = env.QIONGQI_BASE_URL ?? env.DEEPSEEK_BASE_URL
+  if (envValue) return envValue
+  if (configServe.baseUrl) return configServe.baseUrl
+  return undefined
 }
 
 function loadServeConfig(

@@ -134,6 +134,10 @@ describe('Qiongqi agent CLI commands', () => {
     const code = await runAgentCommand('exec', [
       '--data-dir',
       dataDir,
+      '--api-key',
+      'test-key',
+      '--base-url',
+      'https://example.invalid/v1',
       '--workspace',
       dataDir,
       '--list-tools',
@@ -155,6 +159,10 @@ describe('Qiongqi agent CLI commands', () => {
     const code = await runAgentCommand('exec', [
       '--data-dir',
       dataDir,
+      '--api-key',
+      'test-key',
+      '--base-url',
+      'https://example.invalid/v1',
       '--workspace',
       dataDir,
       '--approval-policy',
@@ -196,6 +204,10 @@ describe('Qiongqi agent CLI commands', () => {
     const code = await runAgentCommand('exec', [
       '--data-dir',
       dataDir,
+      '--api-key',
+      'test-key',
+      '--base-url',
+      'https://example.invalid/v1',
       '--workspace',
       dataDir,
       '--list-tools',
@@ -215,6 +227,10 @@ describe('Qiongqi agent CLI commands', () => {
     const code = await runAgentCommand('exec', [
       '--data-dir',
       dataDir,
+      '--api-key',
+      'test-key',
+      '--base-url',
+      'https://example.invalid/v1',
       'echo',
       '--args',
       'nope'
@@ -229,6 +245,10 @@ describe('Qiongqi agent CLI commands', () => {
     const code = await runAgentCommand('run', [
       '--data-dir',
       dataDir,
+      '--api-key',
+      'test-key',
+      '--base-url',
+      'https://example.invalid/v1',
       '--prompt',
       'hello',
       '--json'
@@ -245,6 +265,10 @@ describe('Qiongqi agent CLI commands', () => {
     const code = await runAgentCommand('run', [
       '--data-dir',
       dataDir,
+      '--api-key',
+      'test-key',
+      '--base-url',
+      'https://example.invalid/v1',
       '--prompt',
       'hello'
     ], c.io)
@@ -258,6 +282,10 @@ describe('Qiongqi agent CLI commands', () => {
     const code = await runAgentCommand('run', [
       '--data-dir',
       dataDir,
+      '--api-key',
+      'test-key',
+      '--base-url',
+      'https://example.invalid/v1',
       '--prompt',
       'hello',
       '--json'
@@ -272,6 +300,8 @@ describe('Qiongqi agent CLI commands', () => {
     await writeFile(configPath, JSON.stringify({
       serve: {
         dataDir,
+        apiKey: 'config-key',
+        baseUrl: 'https://config.invalid/v1',
         model: 'deepseek-v4-pro',
         approvalPolicy: 'auto'
       }

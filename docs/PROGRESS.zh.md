@@ -109,6 +109,13 @@
   - `serve-entry.ts` 改用 `createAgent`/`createCodingAgent` + `createHttpServer` 组合
   - 向后兼容：所有现有参数、环境变量、输出格式、QIONGQI_READY 握手不变
   - 端到端验证：默认 `agentName=Qiongqi Coding`，`--preset generic` → `agentName=Qiongqi`
+- [x] `baseUrl` / `apiKey` 改为必填：
+  - `ServeOptionsSchema` 中 `apiKey`/`baseUrl` 从 `.default(...)` 改为 `.min(1)`
+  - 移除旧的 `https://api.deepseek.com/beta` 默认值
+  - `DEFAULT_SERVE_OPTIONS` 排除 `baseUrl`/`apiKey`（无默认值）
+  - `parseServeOptionsSafe` 在缺失时给出友好提示（指明 CLI flag / 环境变量 / config 文件三选一）
+  - `resolveApiKey`/`resolveBaseUrl` 辅助函数统一来源解析
+  - 端到端验证：缺失时退出码 78 + 友好提示；提供后正常启动
 
 ### 1.6 测试迁移 ✅
 

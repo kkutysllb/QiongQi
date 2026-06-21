@@ -284,6 +284,10 @@ describe('cli', () => {
       '/tmp/ca',
       '--runtime-token',
       'abc',
+      '--api-key',
+      'test-key',
+      '--base-url',
+      'https://example.invalid/v1',
       '--model',
       'deepseek-chat',
       '--approval-policy',
@@ -305,6 +309,8 @@ describe('cli', () => {
       '--host=0.0.0.0',
       '--port=9090',
       '--data-dir=/srv/ca',
+      '--api-key=test-key',
+      '--base-url=https://example.invalid/v1',
       '--storage-backend=file'
     ])
     expect(parsed.host).toBe('0.0.0.0')
@@ -322,6 +328,8 @@ describe('cli', () => {
           host: '0.0.0.0',
           port: 7777,
           dataDir: join(dir, 'data'),
+          apiKey: 'config-api-key',
+          baseUrl: 'https://config.invalid/v1',
           model: 'deepseek-v4-flash',
           approvalPolicy: 'auto',
           tokenEconomy: {
@@ -588,6 +596,7 @@ describe('cli', () => {
     try {
       await writeFile(join(dataDir, 'config.json'), JSON.stringify({
         serve: {
+          apiKey: 'config-key',
           baseUrl: 'https://example.invalid/v1',
           model: 'deepseek-v4-flash'
         },
@@ -629,6 +638,8 @@ describe('cli', () => {
       port: 8899,
       dataDir: '/srv/ca',
       runtimeToken: '',
+      apiKey: 'test-key',
+      baseUrl: 'https://example.invalid/v1',
       model: 'deepseek-chat',
       approvalPolicy: 'on-request',
       sandboxMode: 'workspace-write',

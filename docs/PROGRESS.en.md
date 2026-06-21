@@ -110,6 +110,12 @@
   - `serve-entry.ts` switches to `createAgent`/`createCodingAgent` + `createHttpServer` composition
   - Backward compatible: all existing args, env vars, output formats, QIONGQI_READY handshake unchanged
   - E2E verified: default `agentName=Qiongqi Coding`, `--preset generic` → `agentName=Qiongqi`
+- [x] `baseUrl` / `apiKey` now required (remove DeepSeek default hard-coding):
+  - `ServeOptionsSchema` changed `apiKey`/`baseUrl` from `.default(...)` to `.min(1)`
+  - `DEFAULT_SERVE_OPTIONS` excludes `baseUrl`/`apiKey` (no defaults)
+  - `parseServeOptionsSafe` gives friendly message when missing (CLI flag / env var / config file)
+  - `resolveApiKey`/`resolveBaseUrl` helper functions unify source resolution
+  - E2E verified: missing → exit code 78 + friendly message; provided → boots normally
 
 ### 1.6 Test Migration ✅
 
