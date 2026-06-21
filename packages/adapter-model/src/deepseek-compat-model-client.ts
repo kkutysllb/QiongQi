@@ -128,15 +128,21 @@ const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 45_000
 const DEFAULT_MESSAGES_MAX_TOKENS = 4096
 
 /**
- * DeepSeek-compatible model client.
+ * Provider-agnostic model compatibility client.
  *
  * This adapter focuses on the streaming chat completions shape used
- * by the GUI today. It supports tool calls, cache hit/miss counters
- * (when the provider reports them), and abort-signal cancellation.
- * The client is deliberately small so the rest of the runtime can be
- * built around the `ModelClient` port.
+ * by OpenAI-compatible providers (DeepSeek, OpenAI, vLLM, etc.). It
+ * supports tool calls, cache hit/miss counters (when the provider
+ * reports them), and abort-signal cancellation. The client is
+ * deliberately small so the rest of the runtime can be built around
+ * the `ModelClient` port.
+ *
+ * Renamed from `DeepseekCompatModelClient` in stage 1.3 — the client
+ * works with any OpenAI-compatible endpoint, so the name now reflects
+ * that generality. The old name is re-exported as an alias for
+ * backward compatibility.
  */
-export class DeepseekCompatModelClient implements ModelClient {
+export class ModelCompatClient implements ModelClient {
   readonly provider = 'deepseek-compat'
   readonly model: string
 
@@ -1900,3 +1906,10 @@ function limitHistoryPreservingCompaction(history: TurnItem[], windowSize: numbe
   }
   return limited
 }
+
+/**
+ * Backward-compatibility alias. Prefer `ModelCompatClient` in new code.
+ *
+ * @deprecated since stage 1.3 — use `ModelCompatClient` instead.
+ */
+export const DeepseekCompatModelClient = ModelCompatClient

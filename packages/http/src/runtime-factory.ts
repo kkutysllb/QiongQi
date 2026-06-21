@@ -10,7 +10,7 @@ import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
 import { InMemoryEventBus } from '@qiongqi/adapter-storage'
 import { FileSessionStore, FileThreadStore } from '@qiongqi/adapter-storage'
 import { HybridSessionStore, HybridThreadStore } from '@qiongqi/adapter-storage'
-import { DeepseekCompatModelClient } from '@qiongqi/adapter-model'
+import { ModelCompatClient } from '@qiongqi/adapter-model'
 import { CapabilityRegistry } from '@qiongqi/adapter-tools'
 import { buildGoalLocalTools } from '@qiongqi/adapter-tools'
 import { buildTodoLocalTools } from '@qiongqi/adapter-tools'
@@ -66,6 +66,10 @@ import { FileMemoryStore } from '@qiongqi/memory'
 import { DelegationRuntime, FileDelegationStore } from '@qiongqi/delegation'
 import { createChildAgentExecutor } from '@qiongqi/delegation'
 
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
 export type QiongqiServeRuntimeOptions = {
   host: string
   port: number
@@ -105,20 +109,50 @@ export type QiongqiServeRuntimeOptions = {
    * and (in later stages) the AgentCard. Defaults to 'Qiongqi'.
    */
   agentName?: string
+  /**
+   * Explicit skill root directories for the plugin host. When omitted,
+   * the runtime checks `<dataDir>/builtin-skills` as a convenience for
+   * downstream packagers that drop a curated skill bundle there.
+   *
+   * Stage 1.3 decoupling: previously the runtime hard-coded
+   * `cwd/qiongqi/skills`; this parameter lets embedders pass skill
+   * roots explicitly without relying on process layout.
+   */
+  skillRoots?: string[]
 }
 
 export type QiongqiServeHandle = NodeHttpServerHandle & {
   runtime: ServerRuntime
 }
 
-/**
- * Composition root for serve mode. This is intentionally the only
- * place that wires concrete adapters to ports; domain, services, loop,
- * and HTTP handlers stay constructor-injected and testable.
- */
-export async function createQiongqiServeRuntime(
-  options: QiongqiServeRuntimeOptions
-): Promise<ServerRuntime> {
+// ---------------------------------------------------------------------------
+// createCore — infrastructure layer (stores, event bus, services)
+// ---------------------------------------------------------------------------
+
+/** Infrastructure assembled without model or tool knowledge. */
+export interface CoreRuntime {
+  sessionStore: SessionStore
+  threadStore: ThreadStore
+  eventBus: InMemoryEventBus
+  approvalGate: InMemoryApprovalGate
+  userInputGate: InMemoryUserInputGate
+  workspaceInspector: LocalWorkspaceInspector
+  usageService: UsageService
+  inflight: InflightTracker
+  steering: SteeringQueue
+  compactor: ContextCompactor
+  ids: RandomIdGenerator
+  nowIso: () => string
+  allocateSeq: (threadId: string) => number
+  events: RuntimeEventRecorder
+  turnService: TurnService
+  threadService: ThreadService
+  storesShutdown?: () => Promise<void>
+}
+
+export async function createCore(
+  options: Pick<QiongqiServeRuntimeOptions, 'dataDir' | 'storage' | 'contextCompaction' | 'models'>
+): Promise<CoreRuntime> {
   await mkdir(options.dataDir, { recursive: true })
   const eventBus = new InMemoryEventBus()
   const stores = await createPersistentStores({
@@ -126,8 +160,6 @@ export async function createQiongqiServeRuntime(
     storage: options.storage,
     nowIso: () => new Date().toISOString()
   })
-  const sessionStore = stores.sessionStore
-  const threadStore = stores.threadStore
   const approvalGate = new InMemoryApprovalGate()
   const userInputGate = new InMemoryUserInputGate()
   const workspaceInspector = new LocalWorkspaceInspector()
@@ -138,22 +170,13 @@ export async function createQiongqiServeRuntime(
     contextCompaction: options.contextCompaction,
     models: options.models
   })
-  const tokenEconomy = tokenEconomyConfigForOptions(options)
   const ids = new RandomIdGenerator()
   const nowIso = () => new Date().toISOString()
   const allocateSeq = (threadId: string) => eventBus.allocateSeq(threadId)
-  const events = new RuntimeEventRecorder({ eventBus, sessionStore, allocateSeq, nowIso })
-  const prefix = createImmutablePrefix({
-    systemPrompt: options.systemPrompt ?? QIONGQI_SYSTEM_PROMPT,
-    pinnedConstraints: options.pinnedConstraints ?? [
-      'system: preserve user intent across compaction',
-      'system: keep the HTTP/SSE contract stable for the GUI',
-      'system: keep the stable Qiongqi prefix byte-stable for prompt-cache reuse'
-    ]
-  })
+  const events = new RuntimeEventRecorder({ eventBus, sessionStore: stores.sessionStore, allocateSeq, nowIso })
   const turnService = new TurnService({
-    threadStore,
-    sessionStore,
+    threadStore: stores.threadStore,
+    sessionStore: stores.sessionStore,
     events,
     inflight,
     steering,
@@ -161,33 +184,100 @@ export async function createQiongqiServeRuntime(
     ids,
     nowIso
   })
-  const threadService = new ThreadService({ threadStore, sessionStore, events, ids, nowIso })
-  await seedUsageCarryover({ threadStore, sessionStore, usageService })
-  const modelClient = new DeepseekCompatModelClient({
+  const threadService = new ThreadService({
+    threadStore: stores.threadStore,
+    sessionStore: stores.sessionStore,
+    events,
+    ids,
+    nowIso
+  })
+  await seedUsageCarryover({
+    threadStore: stores.threadStore,
+    sessionStore: stores.sessionStore,
+    usageService
+  })
+  return {
+    sessionStore: stores.sessionStore,
+    threadStore: stores.threadStore,
+    eventBus,
+    approvalGate,
+    userInputGate,
+    workspaceInspector,
+    usageService,
+    inflight,
+    steering,
+    compactor,
+    ids,
+    nowIso,
+    allocateSeq,
+    events,
+    turnService,
+    threadService,
+    storesShutdown: stores.shutdown
+  }
+}
+
+// ---------------------------------------------------------------------------
+// createModelAdapter — model client + capability profiles
+// ---------------------------------------------------------------------------
+
+export interface ModelAdapter {
+  client: ModelCompatClient
+  profiles: ReturnType<typeof modelContextProfilesFromConfig>
+  modelCapabilities: (model: string) => ReturnType<typeof modelCapabilitiesForModel>
+}
+
+export function createModelAdapter(
+  options: Pick<
+    QiongqiServeRuntimeOptions,
+    'baseUrl' | 'apiKey' | 'endpointFormat' | 'model' | 'contextCompaction' | 'models'
+  >
+): ModelAdapter {
+  const client = new ModelCompatClient({
     baseUrl: options.baseUrl,
     apiKey: options.apiKey,
     endpointFormat: options.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT,
     model: options.model
   })
-  const modelProfiles = modelContextProfilesFromConfig({
+  const profiles = modelContextProfilesFromConfig({
     contextCompaction: options.contextCompaction,
     models: options.models
   })
-  const reviewService = new ReviewService({
-    threadStore,
-    turns: turnService,
-    model: modelClient,
-    defaultModel: options.model,
-    nowIso,
-    modelCapabilities: (model) => modelCapabilitiesForModel(model, modelProfiles),
-    ...(options.models ? { models: options.models } : {}),
-    ...(options.contextCompaction ? { contextCompaction: options.contextCompaction } : {}),
-    ...(tokenEconomy ? { tokenEconomy } : {}),
-    ...(options.runtime ? { runtime: options.runtime } : {})
-  })
+  return {
+    client,
+    profiles,
+    modelCapabilities: (model: string) => modelCapabilitiesForModel(model, profiles)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// createToolMatrix — tool providers, registry, delegation, skills
+// ---------------------------------------------------------------------------
+
+export interface ToolMatrix {
+  registry: CapabilityRegistry
+  toolHost: LocalToolHost
+  mcpProviders: Awaited<ReturnType<typeof buildMcpToolProviders>>
+  webProviders: ReturnType<typeof buildWebToolProviders>
+  skillRuntime: SkillRuntime
+  skillPluginHost: SkillPluginHost
+  delegationRuntime: DelegationRuntime | undefined
+  attachmentStore: FileAttachmentStore | undefined
+  memoryStore: FileMemoryStore | undefined
+}
+
+export async function createToolMatrix(
+  options: Pick<
+    QiongqiServeRuntimeOptions,
+    'dataDir' | 'capabilities' | 'approvalPolicy' | 'sandboxMode' | 'model' | 'models' | 'contextCompaction' | 'runtime' | 'skillRoots' | 'tokenEconomyMode' | 'tokenEconomy'
+  >,
+  core: CoreRuntime,
+  model: ModelAdapter
+): Promise<ToolMatrix> {
+  const nowIso = core.nowIso
   const skillRuntime = await SkillRuntime.create(options.capabilities?.skills)
   const skillPluginHost = await SkillPluginHost.create(options.capabilities?.skills, {
-    builtinRoot: await resolveBuiltinSkillRoot(options.dataDir)
+    builtinRoot: await resolveBuiltinSkillRoot(options.dataDir, options.skillRoots)
   })
   const skillMcpServers = collectSkillMcpServers(
     skillPluginHost.list(),
@@ -233,22 +323,23 @@ export async function createQiongqiServeRuntime(
   ]
   const childRegistry = new CapabilityRegistry(baseToolProviders)
   const childToolHost = new LocalToolHost({ registry: childRegistry, readTracker: true })
+  const tokenEconomy = tokenEconomyConfigForOptions(options)
   const delegationRuntime = options.capabilities?.subagents.enabled
     ? new DelegationRuntime({
         config: options.capabilities.subagents,
         store: new FileDelegationStore(join(options.dataDir, 'child-runs')),
-        events,
+        events: core.events,
         nowIso,
         executor: createChildAgentExecutor({
-          model: modelClient,
+          model: model.client,
           toolHost: childToolHost,
-          prefix,
+          prefix: createImmutablePrefix({ systemPrompt: QIONGQI_SYSTEM_PROMPT }),
           defaultModel: options.model,
           models: options.models,
           contextCompaction: options.contextCompaction,
           approvalPolicy: options.approvalPolicy,
           sandboxMode: options.sandboxMode,
-          modelCapabilities: (model) => modelCapabilitiesForModel(model, modelProfiles),
+          modelCapabilities: model.modelCapabilities,
           skillRuntime,
           skillPluginHost,
           tokenEconomy,
@@ -257,45 +348,10 @@ export async function createQiongqiServeRuntime(
           nowIso
         }),
         recordExternalUsage: (threadId, usage) => {
-          usageService.record(threadId, usage)
+          core.usageService.record(threadId, usage)
         }
       })
     : undefined
-  const capabilities = buildRuntimeCapabilityManifest({
-    config: options.capabilities,
-    model: modelCapabilitiesForModel(options.model, modelProfiles),
-    mcp: {
-      configuredServers: Object.keys(options.capabilities?.mcp.servers ?? {}).length,
-      connectedServers: mcpProviders.connectedServers,
-      toolCount: mcpProviders.toolCount,
-      lastError: mcpProviders.diagnostics.find((diagnostic) => diagnostic.lastError)?.lastError,
-      search: {
-        active: mcpProviders.search.active,
-        indexedToolCount: mcpProviders.search.indexedToolCount,
-        advertisedToolCount: mcpProviders.search.advertisedToolCount
-      }
-    },
-    web: {
-      fetchAvailable: webProviders.fetchAvailable,
-      searchAvailable: webProviders.searchAvailable,
-      provider: webProviders.provider,
-      reason: webProviders.diagnostics.find((diagnostic) => diagnostic.reason)?.reason
-    },
-    skills: {
-      configuredRoots: options.capabilities?.skills.roots.length,
-      discoveredSkills: skillRuntime.count(),
-      reason: skillRuntime.diagnostics().validationErrors[0]?.message
-    },
-    attachments: {
-      available: Boolean(attachmentStore)
-    },
-    memory: {
-      available: Boolean(memoryStore)
-    },
-    subagents: {
-      available: Boolean(delegationRuntime)
-    }
-  })
   const registry = new CapabilityRegistry([
     ...baseToolProviders,
     {
@@ -303,20 +359,17 @@ export async function createQiongqiServeRuntime(
       kind: 'gui' as const,
       enabled: true,
       available: true,
-      tools: buildGoalLocalTools(threadService)
+      tools: buildGoalLocalTools(core.threadService)
     },
     {
       id: 'todo',
       kind: 'gui' as const,
       enabled: true,
       available: true,
-      tools: buildTodoLocalTools(threadService)
+      tools: buildTodoLocalTools(core.threadService)
     },
     ...buildDelegationToolProviders(delegationRuntime),
     ...(() => {
-      // Declarative skill tools delegate execution to the matching built-in
-      // tool (e.g. a `bash`-template tool runs its declared command via the
-      // real bash tool). The skills themselves never execute arbitrary code.
       const builtinBash = createBashLocalTool()
       const skillExecutor: SkillToolExecutor = async (template, args, context) => {
         if (template === 'bash') {
@@ -324,8 +377,6 @@ export async function createQiongqiServeRuntime(
           if (!command) return { output: 'skill bash tool declared no command', isError: true }
           return builtinBash.execute({ action: 'run', command }, context)
         }
-        // read/grep/find/ls/edit/write templates could be supported similarly;
-        // for v1 only `bash` is wired (the common case, e.g. run_tests).
         return { output: `skill template ${template} is not executable in v1`, isError: true }
       }
       const provider = buildSkillToolProvider(
@@ -337,33 +388,121 @@ export async function createQiongqiServeRuntime(
     })()
   ])
   const toolHost = new LocalToolHost({ registry, readTracker: true })
-  const loop = new TurnOrchestrator({
-    threadStore,
-    sessionStore,
-    approvalGate,
-    userInputGate,
-    model: modelClient,
+  return {
+    registry,
     toolHost,
-    usage: usageService,
-    events,
-    turns: turnService,
-    inflight,
-    steering,
-    compactor,
-    prefix,
-    ids,
-    nowIso,
-    modelCapabilities: (model) => modelCapabilitiesForModel(model, modelProfiles),
+    mcpProviders,
+    webProviders,
     skillRuntime,
     skillPluginHost,
+    delegationRuntime,
+    attachmentStore,
+    memoryStore
+  }
+}
+
+// ---------------------------------------------------------------------------
+// createAgent — full runtime assembly (composition root)
+// ---------------------------------------------------------------------------
+
+/**
+ * Assemble a full Qiongqi serve runtime from core, model adapter, and
+ * tool matrix sub-components. This is the top-level composition root
+ * — the only place that wires concrete adapters to ports.
+ *
+ * Stage 1.3 splits the original 500-line monolith into:
+ *   - {@link createCore} (stores, events, services)
+ *   - {@link createModelAdapter} (model client + profiles)
+ *   - {@link createToolMatrix} (tools, skills, delegation)
+ *   - {@link createAgent} (this function — orchestration loop)
+ */
+export async function createAgent(
+  options: QiongqiServeRuntimeOptions
+): Promise<ServerRuntime> {
+  const core = await createCore(options)
+  const model = createModelAdapter(options)
+  const tools = await createToolMatrix(options, core, model)
+  return assembleRuntime({ options, core, model, tools })
+}
+
+/**
+ * Original entry point — delegates to {@link createAgent}.
+ * Kept for backward compatibility with existing import sites.
+ */
+export async function createQiongqiServeRuntime(
+  options: QiongqiServeRuntimeOptions
+): Promise<ServerRuntime> {
+  return createAgent(options)
+}
+
+// ---------------------------------------------------------------------------
+// Internal assembly helpers
+// ---------------------------------------------------------------------------
+
+function tokenEconomyConfigForOptions(
+  options: Pick<QiongqiServeRuntimeOptions, 'tokenEconomyMode' | 'tokenEconomy'>
+): TokenEconomyConfig {
+  return {
+    ...(options.tokenEconomy ?? {}),
+    enabled: options.tokenEconomy?.enabled ?? options.tokenEconomyMode
+  }
+}
+
+function assembleRuntime(input: {
+  options: QiongqiServeRuntimeOptions
+  core: CoreRuntime
+  model: ModelAdapter
+  tools: ToolMatrix
+}): ServerRuntime {
+  const { options, core, model, tools } = input
+  const prefix = createImmutablePrefix({
+    systemPrompt: options.systemPrompt ?? QIONGQI_SYSTEM_PROMPT,
+    pinnedConstraints: options.pinnedConstraints ?? [
+      'system: preserve user intent across compaction',
+      'system: keep the HTTP/SSE contract stable for the GUI',
+      'system: keep the stable Qiongqi prefix byte-stable for prompt-cache reuse'
+    ]
+  })
+  const tokenEconomy = tokenEconomyConfigForOptions(options)
+  const reviewService = new ReviewService({
+    threadStore: core.threadStore,
+    turns: core.turnService,
+    model: model.client,
+    defaultModel: options.model,
+    nowIso: core.nowIso,
+    modelCapabilities: model.modelCapabilities,
+    ...(options.models ? { models: options.models } : {}),
+    ...(options.contextCompaction ? { contextCompaction: options.contextCompaction } : {}),
+    ...(tokenEconomy ? { tokenEconomy } : {}),
+    ...(options.runtime ? { runtime: options.runtime } : {})
+  })
+  const loop = new TurnOrchestrator({
+    threadStore: core.threadStore,
+    sessionStore: core.sessionStore,
+    approvalGate: core.approvalGate,
+    userInputGate: core.userInputGate,
+    model: model.client,
+    toolHost: tools.toolHost,
+    usage: core.usageService,
+    events: core.events,
+    turns: core.turnService,
+    inflight: core.inflight,
+    steering: core.steering,
+    compactor: core.compactor,
+    prefix,
+    ids: core.ids,
+    nowIso: core.nowIso,
+    modelCapabilities: model.modelCapabilities,
+    skillRuntime: tools.skillRuntime,
+    skillPluginHost: tools.skillPluginHost,
     tokenEconomy,
     contextCompaction: options.contextCompaction,
     ...(options.runtime?.toolStorm ? { toolStorm: options.runtime.toolStorm } : {}),
     ...(options.runtime?.toolArgumentRepair ? { toolArgumentRepair: options.runtime.toolArgumentRepair } : {}),
-    ...(attachmentStore ? { attachmentStore } : {}),
-    ...(memoryStore ? { memoryStore } : {}),
+    ...(tools.attachmentStore ? { attachmentStore: tools.attachmentStore } : {}),
+    ...(tools.memoryStore ? { memoryStore: tools.memoryStore } : {}),
     onPlanWritten: async ({ threadId, planId, relativePath, markdown }) => {
-      await threadService.syncTodosFromPlan(threadId, {
+      await core.threadService.syncTodosFromPlan(threadId, {
         planId,
         relativePath,
         markdown,
@@ -371,31 +510,60 @@ export async function createQiongqiServeRuntime(
       })
     }
   })
-  const startedAt = options.startedAt ?? nowIso()
+  const capabilities = buildRuntimeCapabilityManifest({
+    config: options.capabilities,
+    model: model.modelCapabilities(options.model),
+    mcp: {
+      configuredServers: Object.keys(options.capabilities?.mcp.servers ?? {}).length,
+      connectedServers: tools.mcpProviders.connectedServers,
+      toolCount: tools.mcpProviders.toolCount,
+      lastError: tools.mcpProviders.diagnostics.find((d) => d.lastError)?.lastError,
+      search: {
+        active: tools.mcpProviders.search.active,
+        indexedToolCount: tools.mcpProviders.search.indexedToolCount,
+        advertisedToolCount: tools.mcpProviders.search.advertisedToolCount
+      }
+    },
+    web: {
+      fetchAvailable: tools.webProviders.fetchAvailable,
+      searchAvailable: tools.webProviders.searchAvailable,
+      provider: tools.webProviders.provider,
+      reason: tools.webProviders.diagnostics.find((d) => d.reason)?.reason
+    },
+    skills: {
+      configuredRoots: options.capabilities?.skills.roots.length,
+      discoveredSkills: tools.skillRuntime.count(),
+      reason: tools.skillRuntime.diagnostics().validationErrors[0]?.message
+    },
+    attachments: { available: Boolean(tools.attachmentStore) },
+    memory: { available: Boolean(tools.memoryStore) },
+    subagents: { available: Boolean(tools.delegationRuntime) }
+  })
+  const startedAt = options.startedAt ?? core.nowIso()
   return {
-    threadService,
-    turnService,
+    threadService: core.threadService,
+    turnService: core.turnService,
     reviewService,
-    usageService,
-    eventBus,
-    sessionStore,
-    events,
-    approvalGate,
-    userInputGate,
-    workspaceInspector,
-    toolHost,
-    ...(attachmentStore ? { attachmentStore } : {}),
-    ...(memoryStore ? { memoryStore } : {}),
+    usageService: core.usageService,
+    eventBus: core.eventBus,
+    sessionStore: core.sessionStore,
+    events: core.events,
+    approvalGate: core.approvalGate,
+    userInputGate: core.userInputGate,
+    workspaceInspector: core.workspaceInspector,
+    toolHost: tools.toolHost,
+    ...(tools.attachmentStore ? { attachmentStore: tools.attachmentStore } : {}),
+    ...(tools.memoryStore ? { memoryStore: tools.memoryStore } : {}),
     runTurn(threadId, turnId) {
       return loop.runTurn(threadId, turnId)
     },
-    runReview(input) {
+    runReview(input: Parameters<ReviewService['runReview']>[0]) {
       return reviewService.runReview(input)
     },
     runtimeToken: options.runtimeToken,
     insecure: options.insecure,
-    allocateSeq,
-    nowIso,
+    allocateSeq: core.allocateSeq,
+    nowIso: core.nowIso,
     info: () => ({
       agentName: options.agentName ?? 'Qiongqi',
       host: options.host,
@@ -413,36 +581,27 @@ export async function createQiongqiServeRuntime(
       capabilities
     }),
     toolDiagnostics: async () => ({
-      providers: registry.diagnostics(),
-      mcpServers: mcpProviders.diagnostics,
-      mcpSearch: mcpProviders.search,
-      webProviders: webProviders.diagnostics,
-      skills: skillRuntime.diagnostics(),
-      attachments: attachmentStore
-        ? await attachmentStore.diagnostics()
+      providers: tools.registry.diagnostics(),
+      mcpServers: tools.mcpProviders.diagnostics,
+      mcpSearch: tools.mcpProviders.search,
+      webProviders: tools.webProviders.diagnostics,
+      skills: tools.skillRuntime.diagnostics(),
+      attachments: tools.attachmentStore
+        ? await tools.attachmentStore.diagnostics()
         : { enabled: false, rootDir: '', count: 0, totalBytes: 0 },
-      memory: memoryStore
-        ? await memoryStore.diagnostics()
+      memory: tools.memoryStore
+        ? await tools.memoryStore.diagnostics()
         : { enabled: false, rootDir: '', activeCount: 0, tombstoneCount: 0, lastInjectedIds: [] }
     }),
-    skills: () => skillRuntime.diagnostics(),
-    skillsV2: () => skillPluginHost.diagnostics(),
+    skills: () => tools.skillRuntime.diagnostics(),
+    skillsV2: () => tools.skillPluginHost.diagnostics(),
     shutdown: async () => {
       try {
-        await mcpProviders.close()
+        await tools.mcpProviders.close()
       } finally {
-        await stores.shutdown?.()
+        await core.storesShutdown?.()
       }
     }
-  }
-}
-
-function tokenEconomyConfigForOptions(
-  options: Pick<QiongqiServeRuntimeOptions, 'tokenEconomyMode' | 'tokenEconomy'>
-): TokenEconomyConfig {
-  return {
-    ...(options.tokenEconomy ?? {}),
-    enabled: options.tokenEconomy?.enabled ?? options.tokenEconomyMode
   }
 }
 
@@ -520,17 +679,20 @@ export async function startQiongqiServe(
 /**
  * Locate an optional packager-installed skill bundle.
  *
- * Qiongqi is a general-purpose framework: it ships NO domain-specific
- * skills by default. Industry presets (coding, finance, creative, ...)
- * are delivered as separate packages and must be wired in explicitly
- * via `capabilities.skills.roots` in the config.
- *
- * The only implicit lookup is `<dataDir>/builtin-skills`, which lets a
- * downstream packager drop a curated skill bundle into the data dir
- * without touching the config. Returns undefined when absent so the
+ * Stage 1.3 decoupling: callers can now pass explicit `skillRoots`
+ * via options. When not provided, the runtime falls back to checking
+ * `<dataDir>/builtin-skills` as a convenience for downstream
+ * packagers. Returns undefined when neither is available so the
  * runtime simply starts with an empty skill registry.
  */
-async function resolveBuiltinSkillRoot(dataDir: string): Promise<string | undefined> {
+async function resolveBuiltinSkillRoot(
+  dataDir: string,
+  skillRoots?: string[]
+): Promise<string | undefined> {
+  if (skillRoots && skillRoots.length > 0) {
+    const first = skillRoots.find((root) => existsSync(root))
+    if (first) return first
+  }
   const packaged = join(dataDir, 'builtin-skills')
   return existsSync(packaged) ? packaged : undefined
 }

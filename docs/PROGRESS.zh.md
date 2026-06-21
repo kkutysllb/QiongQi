@@ -6,7 +6,7 @@
 > English version: [`PROGRESS.en.md`](./PROGRESS.en.md)
 
 **最后更新**：2026-06-21
-**当前阶段**：阶段 1 进行中（1.1–1.2 已完成，1.3–1.8 待办）
+**当前阶段**：阶段 1 进行中（1.1–1.3 已完成，1.4–1.8 待办）
 
 ---
 
@@ -60,12 +60,17 @@
 - `review-service.ts` 从 `services` 移到 `http`（打破 loop↔services 值循环）
 - `defaultLocalTools` 改为延迟函数 `getDefaultLocalTools()`（打破 adapter-tools 循环初始化）
 
-### 1.3 关键改造点 ⏳
+### 1.3 关键改造点 ✅
 
-- [ ] 系统提示词参数化（`createAgent({ systemPrompt })`）
-- [ ] 模型客户端重命名（`ModelCompatClient`）
-- [ ] Skills 路径解耦（`createAgent({ skillRoots })`）
-- [ ] Composition Root 拆分（`createCore()` / `createModelAdapter()` / `createToolMatrix()` / `createAgent()`）
+- [x] 系统提示词参数化（`QiongqiServeRuntimeOptions.systemPrompt` + fallback 到 `QIONGQI_SYSTEM_PROMPT`）
+- [x] 模型客户端重命名（`DeepseekCompatModelClient` → `ModelCompatClient`，保留旧名别名向后兼容）
+- [x] Skills 路径解耦（新增 `skillRoots?: string[]` 参数，移除硬编码 `cwd/qiongqi/skills`）
+- [x] Composition Root 拆分：
+  - `createCore()` — 存储、事件总线、Thread/Turn/Usage 服务
+  - `createModelAdapter()` — ModelCompatClient + 能力配置
+  - `createToolMatrix()` — 工具注册表、技能、委派运行时
+  - `createAgent()` — 编排循环（TurnOrchestrator 组装）
+  - `createQiongqiServeRuntime()` 保留为向后兼容别名
 
 ### 1.4 新 API 形状 ⏳
 

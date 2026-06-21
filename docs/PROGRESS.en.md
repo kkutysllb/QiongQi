@@ -7,7 +7,7 @@
 > 中文版本：[`PROGRESS.zh.md`](./PROGRESS.zh.md)
 
 **Last Updated**: 2026-06-21
-**Current Stage**: Stage 1 in progress (1.1–1.2 complete, 1.3–1.8 pending)
+**Current Stage**: Stage 1 in progress (1.1–1.3 complete, 1.4–1.8 pending)
 
 ---
 
@@ -61,12 +61,17 @@
 - `review-service.ts` moved from `services` to `http` (breaks loop↔services value cycle)
 - `defaultLocalTools` changed to lazy function `getDefaultLocalTools()` (breaks adapter-tools circular init)
 
-### 1.3 Key Refactoring Points ⏳
+### 1.3 Key Refactoring Points ✅
 
-- [ ] System prompt parameterization (`createAgent({ systemPrompt })`)
-- [ ] Model client rename (`ModelCompatClient`)
-- [ ] Skills path decoupling (`createAgent({ skillRoots })`)
-- [ ] Composition Root split (`createCore()` / `createModelAdapter()` / `createToolMatrix()` / `createAgent()`)
+- [x] System prompt parameterization (`QiongqiServeRuntimeOptions.systemPrompt` + fallback to `QIONGQI_SYSTEM_PROMPT`)
+- [x] Model client rename (`DeepseekCompatModelClient` → `ModelCompatClient`, old name kept as deprecated alias)
+- [x] Skills path decoupling (new `skillRoots?: string[]` parameter, removed hardcoded `cwd/qiongqi/skills`)
+- [x] Composition Root split:
+  - `createCore()` — stores, event bus, Thread/Turn/Usage services
+  - `createModelAdapter()` — ModelCompatClient + capability profiles
+  - `createToolMatrix()` — tool registry, skills, delegation runtime
+  - `createAgent()` — orchestration loop (TurnOrchestrator assembly)
+  - `createQiongqiServeRuntime()` kept as backward-compatible alias
 
 ### 1.4 New API Shape ⏳
 
