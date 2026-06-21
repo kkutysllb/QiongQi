@@ -129,7 +129,15 @@ export type QiongqiServeHandle = NodeHttpServerHandle & {
 // createCore — infrastructure layer (stores, event bus, services)
 // ---------------------------------------------------------------------------
 
-/** Infrastructure assembled without model or tool knowledge. */
+/**
+ * Infrastructure layer assembled without any model or tool knowledge.
+ *
+ * Returned by {@link createCore}. Contains the stores (thread/session),
+ * event bus, approval & user-input gates, usage tracker, and the
+ * Thread/Turn/Review services. Embedders that want full control can
+ * construct a `CoreRuntime` manually (or mock it) and pass it to
+ * {@link createToolMatrix} + {@link assembleRuntime} directly.
+ */
 export interface CoreRuntime {
   sessionStore: SessionStore
   threadStore: ThreadStore
@@ -150,6 +158,29 @@ export interface CoreRuntime {
   storesShutdown?: () => Promise<void>
 }
 
+/**
+ * Build the infrastructure layer: persistent stores, event bus, and
+ * the Thread/Turn/Usage services.
+ *
+ * This is the lowest of the three composition sub-components. It has
+ * no dependency on the model client or the tool matrix, so embedders
+ * can use it standalone for testing, for headless turn execution, or
+ * to swap the model/tool layers without touching storage.
+ *
+ * The function is idempotent with respect to the data directory — it
+ * creates the directory if missing and rehydrates usage carryover
+ * from existing events.
+ *
+ * @param options.dataDir - Directory for persistent state. Created if
+ *   missing.
+ * @param options.storage - Optional storage backend override
+ *   (`'file'` or `'hybrid'`). Defaults to file-based JSONL.
+ * @param options.contextCompaction - Passed through to the
+ *   {@link ContextCompactor} so compaction thresholds match the
+ *   model layer.
+ * @param options.models - Per-model overrides used by the compactor
+ *   to derive context windows.
+ */
 export async function createCore(
   options: Pick<QiongqiServeRuntimeOptions, 'dataDir' | 'storage' | 'contextCompaction' | 'models'>
 ): Promise<CoreRuntime> {
@@ -221,12 +252,30 @@ export async function createCore(
 // createModelAdapter — model client + capability profiles
 // ---------------------------------------------------------------------------
 
+/**
+ * Model layer: the HTTP client and capability profiles derived from
+ * the user-supplied configuration.
+ *
+ * Returned by {@link createModelAdapter}. The `modelCapabilities`
+ * function lets downstream code ask “does this model support vision /
+ * tool calls / streaming?” without re-parsing the config.
+ */
 export interface ModelAdapter {
   client: ModelCompatClient
   profiles: ReturnType<typeof modelContextProfilesFromConfig>
   modelCapabilities: (model: string) => ReturnType<typeof modelCapabilitiesForModel>
 }
 
+/**
+ * Construct the model client and capability profiles.
+ *
+ * Creates a {@link ModelCompatClient} wired to the supplied
+ * `baseUrl` / `apiKey` / `endpointFormat`, plus the context-window
+ * and capability profiles derived from the `models` config.
+ *
+ * This sub-component is synchronous (no I/O) so embedders can call it
+ * in hot paths or tests without awaiting.
+ */
 export function createModelAdapter(
   options: Pick<
     QiongqiServeRuntimeOptions,
@@ -254,6 +303,14 @@ export function createModelAdapter(
 // createToolMatrix — tool providers, registry, delegation, skills
 // ---------------------------------------------------------------------------
 
+/**
+ * Tool layer: registry, local tool host, MCP/web providers, skill
+ * runtime, delegation runtime, and optional attachment/memory stores.
+ *
+ * Returned by {@link createToolMatrix}. Embedders that only need a
+ * subset (e.g. no delegation, no skills) can construct a `ToolMatrix`
+ * manually and pass it to {@link assembleRuntime}.
+ */
 export interface ToolMatrix {
   registry: CapabilityRegistry
   toolHost: LocalToolHost
@@ -266,6 +323,24 @@ export interface ToolMatrix {
   memoryStore: FileMemoryStore | undefined
 }
 
+/**
+ * Build the tool layer: registry, local tool host, MCP/web providers,
+ * skill runtime, delegation runtime, and optional attachment/memory
+ * stores.
+ *
+ * This sub-component depends on both {@link CoreRuntime} (for event
+ * recording, usage tracking) and {@link ModelAdapter} (for delegation
+ * to child agents). It is async because MCP servers may need to
+ * handshake before their tools are available.
+ *
+ * @param options.capabilities - The capability manifest controlling
+ *   which tool providers are enabled (MCP, web, memory, attachments,
+ *   subagents, skills).
+ * @param options.skillRoots - Explicit skill directories. See
+ *   {@link QiongqiServeRuntimeOptions.skillRoots}.
+ * @param core - The {@link CoreRuntime} from {@link createCore}.
+ * @param model - The {@link ModelAdapter} from {@link createModelAdapter}.
+ */
 export async function createToolMatrix(
   options: Pick<
     QiongqiServeRuntimeOptions,
@@ -407,14 +482,61 @@ export async function createToolMatrix(
 
 /**
  * Assemble a full Qiongqi serve runtime from core, model adapter, and
- * tool matrix sub-components. This is the top-level composition root
- * — the only place that wires concrete adapters to ports.
+ * tool matrix sub-components.
+ *
+ * This is the top-level composition root — the only place that wires
+ * concrete adapters to ports. Returns a {@link ServerRuntime} which
+ * can then be mounted via {@link createHttpServer} or used directly
+ * for programmatic turn execution.
+ *
+ * # Quick start
+ *
+ * ```ts
+ * import { createAgent, createHttpServer } from '@qiongqi/http'
+ *
+ * // 1. Build the agent (no network I/O yet)
+ * const agent = await createAgent({
+ *   host: '127.0.0.1',
+ *   port: 8899,
+ *   dataDir: '~/.qiongqi/data',
+ *   runtimeToken: process.env.QIONGQI_TOKEN!,
+ *   apiKey: process.env.DEEPSEEK_API_KEY!,
+ *   baseUrl: 'https://api.deepseek.com',
+ *   model: 'deepseek-chat',
+ *   approvalPolicy: 'on-request',
+ *   sandboxMode: 'workspace',
+ *   tokenEconomyMode: true,
+ *   insecure: false
+ * })
+ *
+ * // 2. (Optional) override the system prompt
+ * // agent.info().model === 'deepseek-chat'
+ *
+ * // 3. Mount the HTTP server
+ * const server = await createHttpServer({
+ *   agent,
+ *   host: '127.0.0.1',
+ *   port: 8899
+ * })
+ * ```
+ *
+ * # Composition sub-components
  *
  * Stage 1.3 splits the original 500-line monolith into:
- *   - {@link createCore} (stores, events, services)
- *   - {@link createModelAdapter} (model client + profiles)
- *   - {@link createToolMatrix} (tools, skills, delegation)
- *   - {@link createAgent} (this function — orchestration loop)
+ *   - {@link createCore} — stores, event bus, Thread/Turn/Usage services
+ *   - {@link createModelAdapter} — model client + capability profiles
+ *   - {@link createToolMatrix} — tool registry, skills, delegation runtime
+ *   - {@link createAgent} — this function — full orchestration loop
+ *
+ * Embedders that only need a subset (e.g. just the stores + model
+ * without the tool matrix) can call the sub-components directly and
+ * assemble their own runtime shape.
+ *
+ * @param options - Flat configuration object. See
+ *   {@link QiongqiServeRuntimeOptions} for every field.
+ * @returns A ready-to-use {@link ServerRuntime}. Call
+ *   {@link createHttpServer} to mount it on a TCP port, or invoke
+ *   `agent.runTurn()` / `agent.runReview()` programmatically.
  */
 export async function createAgent(
   options: QiongqiServeRuntimeOptions
@@ -426,8 +548,11 @@ export async function createAgent(
 }
 
 /**
- * Original entry point — delegates to {@link createAgent}.
- * Kept for backward compatibility with existing import sites.
+ * Backward-compatible alias for {@link createAgent}.
+ *
+ * @deprecated since stage 1.4 — prefer `createAgent`. The old name is
+ *   retained so existing call sites (CLI, presets, tests) can migrate
+ *   incrementally.
  */
 export async function createQiongqiServeRuntime(
   options: QiongqiServeRuntimeOptions
@@ -653,27 +778,88 @@ export async function seedUsageCarryover(input: {
   }))
 }
 
-export async function startQiongqiServe(
-  options: QiongqiServeRuntimeOptions
+/**
+ * Options for {@link createHttpServer}.
+ */
+export type CreateHttpServerOptions = {
+  /**
+   * The already-assembled runtime to mount. Obtain it from
+   * {@link createAgent}, a preset like `createCodingAgent`, or by
+   * composing {@link createCore}/{@link createModelAdapter}/
+   * {@link createToolMatrix} directly.
+   */
+  agent: ServerRuntime
+  /** Bind host. Defaults to `'127.0.0.1'`. */
+  host?: string
+  /** Bind port. `0` lets the OS pick an ephemeral port. */
+  port: number
+}
+
+/**
+ * Mount a {@link ServerRuntime} on a Node.js HTTP server.
+ *
+ * This is the transport counterpart to {@link createAgent}: the agent
+ * owns the runtime (turn loop, tools, stores), this function owns the
+ * TCP listener. Splitting the two lets embedders:
+ *
+ * - Start the agent once, then restart only the HTTP layer on a
+ *   different port (e.g. for hot-reload of TLS certs).
+ * - Run an agent headlessly (no HTTP at all) by calling
+ *   `agent.runTurn()` directly.
+ * - Plug the same agent into a custom transport (WebSocket, IPC,
+ *   etc.) without the HTTP machinery.
+ *
+ * @example
+ * ```ts
+ * const agent = await createAgent({ ... })
+ * const handle = await createHttpServer({ agent, host: '127.0.0.1', port: 8899 })
+ * // ... serve traffic ...
+ * await handle.close()   // closes HTTP + calls agent.shutdown()
+ * ```
+ *
+ * @returns A {@link QiongqiServeHandle} that owns both the HTTP
+ *   server and the runtime lifecycle. `handle.close()` will stop the
+ *   listener and invoke `agent.shutdown()`.
+ */
+export async function createHttpServer(
+  options: CreateHttpServerOptions
 ): Promise<QiongqiServeHandle> {
-  const runtime = await createQiongqiServeRuntime(options)
-  const router = buildRouter(runtime)
+  const router = buildRouter(options.agent)
   const server = await startNodeHttpServer({
     router,
-    host: options.host,
+    host: options.host ?? '127.0.0.1',
     port: options.port
   })
   return {
     ...server,
-    runtime,
+    runtime: options.agent,
     close: async () => {
       try {
         await server.close()
       } finally {
-        await runtime.shutdown?.()
+        await options.agent.shutdown?.()
       }
     }
   }
+}
+
+/**
+ * Original one-shot entry point: build the runtime AND start the HTTP
+ * server in a single call.
+ *
+ * @deprecated since stage 1.4 — prefer the split `createAgent` +
+ *   {@link createHttpServer} pair. This function is retained for CLI
+ *   backward compatibility and delegates to the split pair internally.
+ */
+export async function startQiongqiServe(
+  options: QiongqiServeRuntimeOptions
+): Promise<QiongqiServeHandle> {
+  const runtime = await createAgent(options)
+  return createHttpServer({
+    agent: runtime,
+    host: options.host,
+    port: options.port
+  })
 }
 
 /**

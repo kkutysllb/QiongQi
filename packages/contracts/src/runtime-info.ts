@@ -5,6 +5,8 @@ import { MODEL_ENDPOINT_FORMATS } from './model-endpoint-format.js'
 
 export const RuntimeInfoResponse = z
   .object({
+    /** Display name for this agent instance. Stage 1.3 addition. */
+    agentName: z.string().optional(),
     host: z.string(),
     port: z.number().int().min(0).max(65_535),
     dataDir: z.string().min(1),

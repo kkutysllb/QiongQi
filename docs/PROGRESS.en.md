@@ -86,10 +86,18 @@
   - `DeepseekCompatConfig` → `ModelCompatConfig` (old name kept as alias)
   - `deepseek-pricing.ts` logic migrated to `pricing/deepseek-pricing.ts` (original file deleted)
 
-### 1.4 New API Shape ⏳
+### 1.4 New API Shape ✅
 
-- [ ] `createAgent` / `createHttpServer` public API implementation
-- [ ] JSDoc documentation
+- [x] `createHttpServer` public API (split agent assembly vs HTTP mount):
+  - New `createHttpServer(options: { agent, host?, port })`
+  - `startQiongqiServe` refactored into `createAgent` + `createHttpServer` composition (backward compatible)
+  - `createQiongqiServeRuntime` / `startQiongqiServe` marked `@deprecated`
+- [x] JSDoc documentation:
+  - `createAgent` — full Quick start example + @param/@returns + sub-component references
+  - `createCore` / `createModelAdapter` / `createToolMatrix` — responsibility descriptions + @param
+  - `CoreRuntime` / `ModelAdapter` / `ToolMatrix` interface JSDoc
+  - `CreateHttpServerOptions` + `createHttpServer` example and use cases
+- [x] Fix `RuntimeInfoResponse` schema regression (`agentName` field added in 1.3 was not synced to contracts zod schema)
 
 ### 1.5 CLI Entry Rewrite ⏳
 

@@ -85,10 +85,18 @@
   - `DeepseekCompatConfig` → `ModelCompatConfig`（保留旧名为别名）
   - `deepseek-pricing.ts` 逻辑迁移到 `pricing/deepseek-pricing.ts`（原文件已删除）
 
-### 1.4 新 API 形状 ⏳
+### 1.4 新 API 形状 ✅
 
-- [ ] `createAgent` / `createHttpServer` 公共 API 实现
-- [ ] JSDoc 文档
+- [x] `createHttpServer` 公共 API 实现（拆分 agent 构建 vs HTTP 挂载）：
+  - 新增 `createHttpServer(options: { agent, host?, port })`
+  - `startQiongqiServe` 重构为 `createAgent` + `createHttpServer` 的组合（向后兼容）
+  - `createQiongqiServeRuntime` / `startQiongqiServe` 标记为 `@deprecated`
+- [x] JSDoc 文档补全：
+  - `createAgent` — 完整 Quick start 示例 + @param/@returns + 子组件引用
+  - `createCore` / `createModelAdapter` / `createToolMatrix` — 职责说明 + @param
+  - `CoreRuntime` / `ModelAdapter` / `ToolMatrix` 接口 JSDoc
+  - `CreateHttpServerOptions` + `createHttpServer` 示例与使用场景
+- [x] 修复 `RuntimeInfoResponse` schema 回归（1.3 加入的 `agentName` 字段未同步到 contracts 的 zod schema）
 
 ### 1.5 CLI 入口重写 ⏳
 
