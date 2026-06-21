@@ -7,13 +7,14 @@ import {
   modelContextProfilesFromConfig
 } from '@qiongqi/loop'
 import type { ToolHostContext } from '@qiongqi/ports'
-import { createQiongqiServeRuntime } from '@qiongqi/http'
+import { createAgent } from '@qiongqi/http'
 import type { ServerRuntime } from '@qiongqi/http'
+import { createCodingAgent } from '@qiongqi/preset-coding'
 import {
   parseServeOptionsSafe,
   ServeExitCode
 } from './serve.js'
-import type { ServeOptions } from './cli-options.js'
+import type { ServeOptions, ServePreset } from './cli-options.js'
 
 type WritableLike = {
   write(chunk: string): unknown
@@ -308,8 +309,25 @@ function parseSharedOptions(argv: readonly string[], io: CliIo): SharedOptionsRe
   }
 }
 
+/**
+ * Resolve the runtime factory for the given preset.
+ *
+ * Stage 1.5: the CLI defaults to the `coding` preset so `qiongqi serve`
+ * and friends produce a coding-focused agent out of the box. Callers
+ * that want the plain Qiongqi runtime can pass `--preset generic` or
+ * set `QIONGQI_PRESET=generic`.
+ */
+function resolveRuntimeFactory(
+  preset: ServePreset
+): (options: ServeOptions) => Promise<ServerRuntime> {
+  if (preset === 'generic') return createAgent
+  return createCodingAgent
+}
+
 function createRuntime(options: ServeOptions, io: CliIo): Promise<ServerRuntime> {
-  return io.createRuntime ? io.createRuntime(options) : createQiongqiServeRuntime(options)
+  if (io.createRuntime) return io.createRuntime(options)
+  const factory = resolveRuntimeFactory(options.preset)
+  return factory(options)
 }
 
 async function shutdownRuntime(

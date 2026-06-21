@@ -136,7 +136,12 @@ export function parseServeOptions(
     models: loadedConfig?.config.models,
     contextCompaction: loadedConfig?.config.contextCompaction,
     runtime: loadedConfig?.config.runtime,
-    capabilities: loadedConfig?.config.capabilities ?? DEFAULT_SERVE_OPTIONS.capabilities
+    capabilities: loadedConfig?.config.capabilities ?? DEFAULT_SERVE_OPTIONS.capabilities,
+    preset:
+      typeof raw.preset === 'string'
+        ? (raw.preset as ServeOptions['preset'])
+        : env.QIONGQI_PRESET as ServeOptions['preset'] | undefined ??
+          DEFAULT_SERVE_OPTIONS.preset
   }
   return ServeOptionsSchema.parse(merged)
 }
@@ -166,6 +171,7 @@ Options:
   --base-url <url>         DeepSeek-compatible base URL
   --endpoint-format <f>    chat_completions | responses | messages
   --model <model>          Default model id
+  --preset <name>          Agent preset: coding (default) | generic
   --approval-policy <p>    on-request | untrusted | never | auto | suggest
   --sandbox-mode <mode>    read-only | workspace-write | danger-full-access | external-sandbox
   --token-economy          Compress safe tool context before model calls

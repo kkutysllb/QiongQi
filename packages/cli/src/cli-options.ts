@@ -28,6 +28,20 @@ export const DEFAULT_SERVE_PORT = 8899
 export const DEFAULT_SERVE_MODEL = DEFAULT_QIONGQI_MODEL
 
 /**
+ * Built-in agent presets available via `--preset`.
+ *
+ * - `coding` — injects the coding-focused system prompt and pinned
+ *   constraints from `@qiongqi/preset-coding`. This is the default
+ *   because the CLI's primary use case is driving an IDE coding
+ *   assistant.
+ * - `generic` — uses the plain Qiongqi system prompt with no
+ *   industry-specific specialisation. Use this when you want a
+ *   domain-neutral agent or when you supply your own `systemPrompt`.
+ */
+export const SERVE_PRESETS = ['coding', 'generic'] as const
+export type ServePreset = (typeof SERVE_PRESETS)[number]
+
+/**
  * Validated CLI options for `qiongqi serve`.
  *
  * `host` and `port` decide the bind address. `dataDir` is the on-disk root
@@ -54,7 +68,12 @@ export const ServeOptionsSchema = z.object({
   models: ModelConfigSchema.optional(),
   contextCompaction: ContextCompactionConfigSchema.optional(),
   runtime: RuntimeTuningConfigSchema.optional(),
-  capabilities: QiongqiCapabilitiesConfig.default(DEFAULT_QIONGQI_CAPABILITIES_CONFIG)
+  capabilities: QiongqiCapabilitiesConfig.default(DEFAULT_QIONGQI_CAPABILITIES_CONFIG),
+  /**
+   * Which built-in preset to use for the system prompt and pinned
+   * constraints. Defaults to `'coding'`. See {@link SERVE_PRESETS}.
+   */
+  preset: z.enum(SERVE_PRESETS).default('coding')
 })
 export type ServeOptions = z.infer<typeof ServeOptionsSchema>
 
@@ -72,5 +91,6 @@ export const DEFAULT_SERVE_OPTIONS: ServeOptions = {
   tokenEconomyMode: false,
   insecure: false,
   storage: DEFAULT_STORAGE_CONFIG,
-  capabilities: DEFAULT_QIONGQI_CAPABILITIES_CONFIG
+  capabilities: DEFAULT_QIONGQI_CAPABILITIES_CONFIG,
+  preset: 'coding'
 }

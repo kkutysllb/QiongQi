@@ -11,13 +11,35 @@ import {
   runAgentCommand,
   splitQiongqiCliCommand
 } from './agent-cli.js'
-import { startQiongqiServe } from '@qiongqi/http'
+import { createAgent, createHttpServer } from '@qiongqi/http'
+import type { ServerRuntime } from '@qiongqi/http'
+import { createCodingAgent } from '@qiongqi/preset-coding'
+import type { ServePreset } from './cli-options.js'
+import type { ServeOptions } from './cli-options.js'
 
 export const QIONGQI_READY_PREFIX = 'QIONGQI_READY '
 
 /**
+ * Resolve the runtime factory for the given preset.
+ *
+ * Mirrors {@link resolveRuntimeFactory} in agent-cli.ts but kept
+ * local so the serve entrypoint has no dependency on the run/chat/exec
+ * dispatcher. Both resolve to the same factories.
+ */
+function resolveServeRuntimeFactory(
+  preset: ServePreset
+): (options: ServeOptions) => Promise<ServerRuntime> {
+  if (preset === 'generic') return createAgent
+  return createCodingAgent
+}
+
+/**
  * Serve-mode command. Kept separate from the dispatcher so GUI startup
  * still has the exact same QIONGQI_READY handshake behavior.
+ *
+ * Stage 1.5: defaults to the `coding` preset via
+ * {@link resolveServeRuntimeFactory}. Pass `--preset generic` for the
+ * plain Qiongqi runtime.
  */
 async function serveMain(argv: readonly string[]): Promise<number> {
   if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) {
@@ -32,7 +54,13 @@ async function serveMain(argv: readonly string[]): Promise<number> {
     }
     return parsed.exitCode
   }
-  const handle = await startQiongqiServe(parsed.options)
+  const factory = resolveServeRuntimeFactory(parsed.options.preset)
+  const runtime = await factory(parsed.options)
+  const handle = await createHttpServer({
+    agent: runtime,
+    host: parsed.options.host,
+    port: parsed.options.port
+  })
   const info = handle.runtime.info()
   const startupInfo = {
     service: 'qiongqi',

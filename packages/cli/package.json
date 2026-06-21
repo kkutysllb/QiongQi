@@ -24,6 +24,7 @@
     "@qiongqi/adapter-tools": "workspace:*",
     "@qiongqi/ports": "workspace:*",
     "@qiongqi/loop": "workspace:*",
+    "@qiongqi/preset-coding": "workspace:*",
     "zod": "^4.4.3"
   },
   "devDependencies": {

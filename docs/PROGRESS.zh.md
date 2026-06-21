@@ -98,9 +98,17 @@
   - `CreateHttpServerOptions` + `createHttpServer` 示例与使用场景
 - [x] 修复 `RuntimeInfoResponse` schema 回归（1.3 加入的 `agentName` 字段未同步到 contracts 的 zod schema）
 
-### 1.5 CLI 入口重写 ⏳
+### 1.5 CLI 入口重写 ✅
 
-- [ ] `qiongqi serve` 默认走 `createCodingAgent`（preset-coding 组装）
+- [x] CLI 默认走 `createCodingAgent`（preset-coding 组装）：
+  - `cli/package.json` 新增 `@qiongqi/preset-coding` 依赖
+  - `ServeOptionsSchema` 新增 `preset` 字段（默认 `'coding'`）
+  - `SERVE_PRESETS = ['coding', 'generic']` 枚举导出
+  - `parseServeOptions` 解析 `--preset` 选项 + `QIONGQI_PRESET` 环境变量
+  - `resolveRuntimeFactory(preset)` 统一工厂选择（serve/run/chat/exec 共用）
+  - `serve-entry.ts` 改用 `createAgent`/`createCodingAgent` + `createHttpServer` 组合
+  - 向后兼容：所有现有参数、环境变量、输出格式、QIONGQI_READY 握手不变
+  - 端到端验证：默认 `agentName=Qiongqi Coding`，`--preset generic` → `agentName=Qiongqi`
 
 ### 1.6 测试迁移 ✅
 

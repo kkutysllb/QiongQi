@@ -139,6 +139,9 @@ importers:
       '@qiongqi/ports':
         specifier: workspace:*
         version: link:../ports
+      '@qiongqi/preset-coding':
+        specifier: workspace:*
+        version: link:../preset-coding
       zod:
         specifier: ^4.4.3
         version: 4.4.3

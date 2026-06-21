@@ -99,9 +99,17 @@
   - `CreateHttpServerOptions` + `createHttpServer` example and use cases
 - [x] Fix `RuntimeInfoResponse` schema regression (`agentName` field added in 1.3 was not synced to contracts zod schema)
 
-### 1.5 CLI Entry Rewrite ⏳
+### 1.5 CLI Entry Rewrite ✅
 
-- [ ] `qiongqi serve` defaults to `createCodingAgent` (preset-coding assembly)
+- [x] CLI defaults to `createCodingAgent` (preset-coding assembly):
+  - `cli/package.json` adds `@qiongqi/preset-coding` dependency
+  - `ServeOptionsSchema` adds `preset` field (default `'coding'`)
+  - `SERVE_PRESETS = ['coding', 'generic']` enum export
+  - `parseServeOptions` parses `--preset` flag + `QIONGQI_PRESET` env var
+  - `resolveRuntimeFactory(preset)` unified factory selection (shared by serve/run/chat/exec)
+  - `serve-entry.ts` switches to `createAgent`/`createCodingAgent` + `createHttpServer` composition
+  - Backward compatible: all existing args, env vars, output formats, QIONGQI_READY handshake unchanged
+  - E2E verified: default `agentName=Qiongqi Coding`, `--preset generic` → `agentName=Qiongqi`
 
 ### 1.6 Test Migration ✅
 
