@@ -72,6 +72,19 @@
   - `createToolMatrix()` — tool registry, skills, delegation runtime
   - `createAgent()` — orchestration loop (TurnOrchestrator assembly)
   - `createQiongqiServeRuntime()` kept as backward-compatible alias
+- [x] PricingProvider abstraction (decouple DeepSeek hard-coding):
+  - New `packages/adapter-model/src/pricing/` subdirectory
+  - `types.ts`: `PricingProvider` interface + `CostEstimate` / `PricingInput` types
+  - `deepseek-pricing.ts`: `DeepseekPricingProvider` impl (DeepSeek official price table, returns null for non-DeepSeek hosts)
+  - `composite-pricing.ts`: `CompositePricingProvider` combinator (returns first non-null estimate in registration order)
+  - `index.ts`: barrel exports + `defaultPricingProvider` singleton
+  - `ModelCompatClient` accepts `pricingProvider` constructor param, defaults to Composite
+  - `mapUsage()` uses injected provider for cost/savings estimation
+  - New providers implement `PricingProvider` and register with Composite — no client changes needed
+- [x] Model client file rename:
+  - `deepseek-compat-model-client.ts` → `model-compat-client.ts`
+  - `DeepseekCompatConfig` → `ModelCompatConfig` (old name kept as alias)
+  - `deepseek-pricing.ts` logic migrated to `pricing/deepseek-pricing.ts` (original file deleted)
 
 ### 1.4 New API Shape ⏳
 

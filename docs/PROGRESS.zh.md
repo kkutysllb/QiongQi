@@ -71,6 +71,19 @@
   - `createToolMatrix()` — 工具注册表、技能、委派运行时
   - `createAgent()` — 编排循环（TurnOrchestrator 组装）
   - `createQiongqiServeRuntime()` 保留为向后兼容别名
+- [x] PricingProvider 抽象层（去 DeepSeek 硬编码）：
+  - 新增 `packages/adapter-model/src/pricing/` 子目录
+  - `types.ts`：`PricingProvider` 接口 + `CostEstimate` / `PricingInput` 类型
+  - `deepseek-pricing.ts`：`DeepseekPricingProvider` 实现（DeepSeek 官方定价表，非 DeepSeek host 返回 null）
+  - `composite-pricing.ts`：`CompositePricingProvider` 组合器（按注册顺序返回首个非 null 估算）
+  - `index.ts`：barrel exports + `defaultPricingProvider` 单例
+  - `ModelCompatClient` 通过构造参数 `pricingProvider` 注入，默认使用 Composite
+  - `mapUsage()` 改用注入的 provider 估算成本/节省
+  - 新增 Provider 可实现 `PricingProvider` 并注册到 Composite，无需修改客户端
+- [x] 模型客户端文件重命名：
+  - `deepseek-compat-model-client.ts` → `model-compat-client.ts`
+  - `DeepseekCompatConfig` → `ModelCompatConfig`（保留旧名为别名）
+  - `deepseek-pricing.ts` 逻辑迁移到 `pricing/deepseek-pricing.ts`（原文件已删除）
 
 ### 1.4 新 API 形状 ⏳
 
