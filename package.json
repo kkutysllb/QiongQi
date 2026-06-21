@@ -1,0 +1,22 @@
+{
+  "name": "qiongqi-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Qiongqi — 独立多 Agent 框架，骨架不变，血肉万变",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/cache.test.ts tests/contracts.test.ts tests/domain.test.ts tests/ports.test.ts",
+    "test:fast": "vitest run --exclude '**/builtin-tools.test.ts'",
+    "typecheck": "pnpm -r run typecheck"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4",
+    "@types/node": "^26.0.0"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "engines": {
+    "node": ">=20"
+  }
+}
