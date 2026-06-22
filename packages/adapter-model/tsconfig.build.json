@@ -68,6 +68,12 @@
       ],
       "@qiongqi/skills": [
         "../skills/src"
+      ],
+      "@qiongqi/adapter-fs": [
+        "../adapter-fs/src"
+      ],
+      "@qiongqi/tool-infra": [
+        "../tool-infra/src"
       ]
     }
   },

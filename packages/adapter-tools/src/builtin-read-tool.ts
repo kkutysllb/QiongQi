@@ -1,5 +1,5 @@
 import { LocalToolHost, type LocalTool } from './local-tool-host.js'
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from './truncate.js'
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from '@qiongqi/adapter-fs'
 import type { ReadLocalToolOptions, TextSlice } from './builtin-tool-types.js'
 import { defaultReadLocalToolOperations } from './builtin-tool-operations.js'
 import {

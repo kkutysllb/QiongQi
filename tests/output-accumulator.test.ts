@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { OutputAccumulator } from '@qiongqi/adapter-tools'
+import { OutputAccumulator } from '@qiongqi/tool-infra'
 
 function createAccumulator(): OutputAccumulator {
   return new OutputAccumulator({

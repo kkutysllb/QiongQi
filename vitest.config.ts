@@ -5,6 +5,7 @@ const pkgNames = [
   'contracts', 'domain', 'ports', 'cache', 'loop', 'services',
   'adapter-model', 'adapter-storage', 'adapter-tools', 'skills',
   'memory', 'attachments', 'delegation', 'http', 'cli',
+  'adapter-fs', 'tool-infra', 'preset-coding',
 ]
 
 const alias = {}

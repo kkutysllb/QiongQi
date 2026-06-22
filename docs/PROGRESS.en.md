@@ -255,3 +255,6 @@
 - [ ] `A2APeerAdapter` — covered by HttpPeerTransport
 - [ ] Cross-vendor interoperability verification
 - [ ] End-to-end cross-instance collaboration verification
+
+| `@qiongqi/adapter-fs` | File-system capabilities (read/write/edit/grep/find/ls/bash) | ✅ | New |
+| `@qiongqi/tool-infra` | Tool infrastructure (hooks/rate-limit/mutation-queue) | ✅ | New |

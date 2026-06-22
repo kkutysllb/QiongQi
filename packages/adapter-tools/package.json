@@ -19,6 +19,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@qiongqi/adapter-fs": "workspace:*",
+    "@qiongqi/tool-infra": "workspace:*",
     "@qiongqi/contracts": "workspace:*",
     "@qiongqi/domain": "workspace:*",
     "@qiongqi/ports": "workspace:*",

@@ -9,8 +9,8 @@ import {
   normalizeToLF,
   restoreLineEndings,
   stripBom
-} from './edit-diff.js'
-import { withFileMutationQueue } from './file-mutation-queue.js'
+} from '@qiongqi/adapter-fs'
+import { withFileMutationQueue } from '@qiongqi/tool-infra'
 import type { EditLocalToolOptions, WriteLocalToolOptions } from './builtin-tool-types.js'
 import { defaultEditLocalToolOperations, defaultWriteLocalToolOperations } from './builtin-tool-operations.js'
 import { parseEditInstructions, resolveWorkspacePath, withToolBoundary } from './builtin-tool-utils.js'

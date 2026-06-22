@@ -15,6 +15,19 @@ importers:
         specifier: ^3.2.4
         version: 3.2.6(@types/node@26.0.0)(lightningcss@1.32.0)
 
+  packages/adapter-fs:
+    dependencies:
+      diff:
+        specifier: ^8.0.4
+        version: 8.0.4
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.0.0
+      typescript:
+        specifier: ^5.8.2
+        version: 5.9.3
+
   packages/adapter-model:
     dependencies:
       '@qiongqi/contracts':
@@ -64,6 +77,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
+      '@qiongqi/adapter-fs':
+        specifier: workspace:*
+        version: link:../adapter-fs
       '@qiongqi/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -82,6 +98,9 @@ importers:
       '@qiongqi/services':
         specifier: workspace:*
         version: link:../services
+      '@qiongqi/tool-infra':
+        specifier: workspace:*
+        version: link:../tool-infra
       diff:
         specifier: ^8.0.4
         version: 8.0.4
@@ -376,6 +395,9 @@ importers:
       '@qiongqi/ports':
         specifier: workspace:*
         version: link:../ports
+      '@qiongqi/tool-infra':
+        specifier: workspace:*
+        version: link:../tool-infra
     devDependencies:
       '@types/node':
         specifier: ^26.0.0
@@ -398,6 +420,19 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.0.0
+      typescript:
+        specifier: ^5.8.2
+        version: 5.9.3
+
+  packages/tool-infra:
+    dependencies:
+      '@qiongqi/adapter-fs':
+        specifier: workspace:*
+        version: link:../adapter-fs
     devDependencies:
       '@types/node':
         specifier: ^26.0.0

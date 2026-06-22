@@ -27,7 +27,9 @@
       "@qiongqi/delegation": ["packages/delegation/src"],
       "@qiongqi/http": ["packages/http/src"],
       "@qiongqi/cli": ["packages/cli/src"],
-      "@qiongqi/preset-coding": ["packages/preset-coding/src"]
+      "@qiongqi/preset-coding": ["packages/preset-coding/src"],
+      "@qiongqi/adapter-fs": ["packages/adapter-fs/src"],
+      "@qiongqi/tool-infra": ["packages/tool-infra/src"]
     }
   },
   "include": ["tests"],

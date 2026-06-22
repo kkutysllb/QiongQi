@@ -1,21 +1,14 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "noEmit": false,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "outDir": "dist",
+    "noEmit": false,
     "paths": {
-      "@qiongqi/adapter-fs": [
-        "../adapter-fs/src"
-      ],
       "@qiongqi/tool-infra": [
         "../tool-infra/src"
       ]
     }
-  },
-  "include": [
-    "src"
-  ]
+  }
 }

@@ -1,7 +1,7 @@
 {
-  "name": "@qiongqi/services",
+  "name": "@qiongqi/adapter-fs",
   "version": "0.1.0",
-  "description": "Qiongqi services package",
+  "description": "Qiongqi file-system adapter — pure I/O, no Agent concepts",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
@@ -19,13 +19,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@qiongqi/contracts": "workspace:*",
-    "@qiongqi/domain": "workspace:*",
-    "@qiongqi/ports": "workspace:*",
-    "@qiongqi/loop": "workspace:*",
-    "@qiongqi/adapter-tools": "workspace:*",
-    "@qiongqi/tool-infra": "workspace:*",
-    "@qiongqi/cache": "workspace:*"
+    "diff": "^8.0.4"
   },
   "devDependencies": {
     "typescript": "^5.8.2",

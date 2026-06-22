@@ -1,7 +1,7 @@
 {
-  "name": "@qiongqi/services",
+  "name": "@qiongqi/tool-infra",
   "version": "0.1.0",
-  "description": "Qiongqi services package",
+  "description": "Qiongqi tool infrastructure — hooks, rate-limit, mutation-queue, output accumulator",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {
@@ -19,13 +19,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@qiongqi/contracts": "workspace:*",
-    "@qiongqi/domain": "workspace:*",
-    "@qiongqi/ports": "workspace:*",
-    "@qiongqi/loop": "workspace:*",
-    "@qiongqi/adapter-tools": "workspace:*",
-    "@qiongqi/tool-infra": "workspace:*",
-    "@qiongqi/cache": "workspace:*"
+    "@qiongqi/adapter-fs": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.8.2",

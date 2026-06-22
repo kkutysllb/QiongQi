@@ -19,7 +19,7 @@ import {
 } from './tool-hooks.js'
 import {
   normalizeRateLimitedToolOutput
-} from './tool-rate-limit.js'
+} from '@qiongqi/tool-infra'
 import {
   normalizeReadTrackerOptions,
   ReadTracker,

@@ -257,3 +257,6 @@
 - [ ] `A2APeerAdapter` — 已由 HttpPeerTransport 覆盖
 - [ ] 跨厂商互操作验证
 - [ ] 端到端跨实例协作验证
+
+| `@qiongqi/adapter-fs` | 文件系统基础能力（read/write/edit/grep/find/ls/bash） | ✅ | 新增 |
+| `@qiongqi/tool-infra` | 工具执行基础设施（hooks/rate-limit/mutation-queue） | ✅ | 新增 |

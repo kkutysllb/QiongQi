@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { withFileMutationQueue } from '@qiongqi/adapter-tools'
+import { withFileMutationQueue } from '@qiongqi/tool-infra'
 
 const lockRoot = join(tmpdir(), 'kun-file-mutation-locks')
 

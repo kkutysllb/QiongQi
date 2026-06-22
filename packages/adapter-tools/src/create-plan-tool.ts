@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, readdir, rename, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, normalize, relative } from 'node:path'
 import { LocalToolHost, type LocalTool } from './local-tool-host.js'
-import { withFileMutationQueue } from './file-mutation-queue.js'
+import { withFileMutationQueue } from '@qiongqi/tool-infra'
 import type { ToolHostContext } from '@qiongqi/ports'
 import {
   GUI_PLAN_RELATIVE_DIR,

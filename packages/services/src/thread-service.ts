@@ -25,7 +25,7 @@ import { createThreadRecord, toThreadSummary, touchThread } from '@qiongqi/domai
 import type { AgentSession } from '@qiongqi/domain'
 import { repairModelHistoryItems } from '@qiongqi/domain'
 import type { RuntimeEventRecorder } from './runtime-event-recorder.js'
-import { withFileMutationQueue } from '@qiongqi/adapter-tools'
+import { withFileMutationQueue } from '@qiongqi/tool-infra'
 import { DEFAULT_QIONGQI_MODEL } from '@qiongqi/contracts'
 import { isGuiPlanRelativePath } from '@qiongqi/contracts'
 import {
