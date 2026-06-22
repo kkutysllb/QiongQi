@@ -220,8 +220,11 @@
 - [x] `QiongqiServeRuntimeOptions.orchestrationMode` dual-run flag
   - `classic` default, `evented` uses EventedTurnOrchestrator + FileTurnStateStore
 - [x] Full test suite 433/433 passing (classic mode)
-- [ ] Component publish/subscribe pattern (further decouple step components)
-- [ ] End-to-end recovery verification (kill -9 + restart recovery)
+- [x] `TurnEventBus` + `runStepViaEventBus` (`packages/loop/src/turn-event-bus.ts`):
+  - Lightweight in-process event bus, subscribe by `TurnStepEvent.kind`
+  - `runStepViaEventBus` — event-driven step execution (replaces sequential calls)
+  - `EventedTurnOrchestrator` supports `TurnEventBus` injection, dual-mode operation
+- [ ] End-to-end recovery verification (kill -9 + restart recovery) — needs real API key
 
 ---
 

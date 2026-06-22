@@ -1,5 +1,6 @@
 import type { TurnOrchestratorOptions } from './turn-orchestrator.js'
 import { runOrchestratorStep } from './turn-orchestrator.js'
+import { runStepViaEventBus, type TurnEventBus } from './turn-event-bus.js'
 import type { TurnStateV1, TurnStateSerializer, TurnStepEvent } from './turn-event-types.js'
 import type { UserInputResolution } from '@qiongqi/ports'
 import { ToolCallCoordinator } from './tool-call-coordinator.js'
@@ -37,10 +38,12 @@ export class EventedTurnOrchestrator {
   private readonly coordinator: ToolCallCoordinator
   private readonly modelStepRunner: ModelStepRunner
   private readonly promptBuilder: PromptBuilder
+  private readonly eventBus?: TurnEventBus
 
-  constructor(opts: TurnOrchestratorOptions, serializer: TurnStateSerializer) {
+  constructor(opts: TurnOrchestratorOptions, serializer: TurnStateSerializer, eventBus?: TurnEventBus) {
     this.opts = opts
     this.serializer = serializer
+    this.eventBus = eventBus
     const awaitUserInput: AwaitUserInputFn = (threadId, turnId, input, signal) =>
       this.coordinator.awaitUserInput(threadId, turnId, input, signal)
     this.coordinator = new ToolCallCoordinator({
@@ -137,18 +140,30 @@ export class EventedTurnOrchestrator {
         }
         await this.serializer.save(stateBefore)
 
-        const stepStatus = await runOrchestratorStep({
-          threadId,
-          turnId,
-          signal,
-          stepIndex,
-          promptBuilder: this.promptBuilder,
-          modelStepRunner: this.modelStepRunner,
-          coordinator: this.coordinator,
-          events: this.opts.events,
-          turns: this.opts.turns,
-          ids: this.opts.ids
-        })
+        const stepStatus = this.eventBus
+          ? await runStepViaEventBus({
+              threadId, turnId, signal,
+              deps: {
+                promptBuilder: this.promptBuilder,
+                modelStepRunner: this.modelStepRunner,
+                coordinator: this.coordinator,
+                events: this.opts.events,
+                turns: this.opts.turns,
+                ids: this.opts.ids
+              }
+            }, stepIndex)
+          : await runOrchestratorStep({
+              threadId,
+              turnId,
+              signal,
+              stepIndex,
+              promptBuilder: this.promptBuilder,
+              modelStepRunner: this.modelStepRunner,
+              coordinator: this.coordinator,
+              events: this.opts.events,
+              turns: this.opts.turns,
+              ids: this.opts.ids
+            })
 
         if (stepStatus === 'stop') {
           status = 'completed'

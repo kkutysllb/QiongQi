@@ -220,8 +220,11 @@
 - [x] `QiongqiServeRuntimeOptions.orchestrationMode` 灰度选项
   - `classic` 默认，`evented` 走 EventedTurnOrchestrator + FileTurnStateStore
 - [x] 全量测试 433/433 通过（classic 模式）
-- [ ] 组件订阅发布模式（进一步解耦 step 组件）
-- [ ] 端到端恢复验证（kill -9 + 重启恢复）
+- [x] `TurnEventBus` + `runStepViaEventBus`（`packages/loop/src/turn-event-bus.ts`）：
+  - 轻量级进程内事件总线，支持按 `TurnStepEvent.kind` 注册订阅者
+  - `runStepViaEventBus` — 事件驱动的 step 执行函数（替代顺序调用）
+  - `EventedTurnOrchestrator` 支持 `TurnEventBus` 注入，双模式运行
+- [ ] 端到端恢复验证（kill -9 + 重启恢复）— 需要真实 API key
 
 ---
 
