@@ -239,7 +239,9 @@
 - [x] `POST /a2a/tasks/{id}/cancel` — cancel pending/working tasks
 - [x] `GET /a2a/tasks/{id}/artifacts` — retrieve turn items from task's thread
 - [x] `GET /a2a/tasks/{id}/subscribe` — SSE event stream (completed: immediate push, in-progress: polling+eventBus)
-- [ ] `A2APeerAdapter` (A2A client)
+- [x] `ArtifactSchema` + `mapItemsToArtifacts()` — A2A Artifact ↔ TurnItem bridge (`packages/contracts/src/a2a-artifact.ts`)
+  - assistant_text→text/markdown, tool_result→application/json, error→text/plain
+  - a2aCreateTask response includes `artifacts` array
+- [ ] `A2APeerAdapter` — covered by HttpPeerTransport
 - [ ] Cross-vendor interoperability verification
-- [ ] Artifact bridging
 - [ ] End-to-end cross-instance collaboration verification

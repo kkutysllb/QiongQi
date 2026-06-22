@@ -1,4 +1,5 @@
 import { PeerArtifactSchema, PeerTaskSchema } from '@qiongqi/contracts'
+import { mapItemsToArtifacts } from '@qiongqi/contracts'
 import { jsonResponse, type JsonResponse } from '../response.js'
 import { readJsonBody } from '../read-json-body.js'
 import type { ServerRuntime } from './server-runtime.js'
@@ -99,14 +100,15 @@ export async function a2aCreateTask(
     })
     await store.upsert(record)
 
-    // Also return PeerArtifact for backward compatibility with Stage-2 clients.
+    // Map items to A2A artifacts.
+    const artifacts = mapItemsToArtifacts(items)
     const artifact = PeerArtifactSchema.parse({
       peerCardId: runtime.agentCard?.id ?? 'unknown',
       status,
       ...(summary ? { summary } : {}),
       ...(errorItem ? { error: errorItem.message } : {})
     })
-    return jsonResponse({ task: record, artifact })
+    return jsonResponse({ task: record, artifact, artifacts })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     record = A2ATaskRecord.parse({ ...record, status: 'failed', error: message, updatedAt: new Date().toISOString() })
@@ -164,7 +166,8 @@ export async function a2aGetArtifacts(
     return { status: 404, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ error: 'task has no thread' }) }
   }
   const items = await runtime.sessionStore.loadItems(record.threadId)
-  return jsonResponse({ taskId, threadId: record.threadId, items })
+  const artifacts = mapItemsToArtifacts(items)
+  return jsonResponse({ taskId, threadId: record.threadId, artifacts })
 }
 
 /**

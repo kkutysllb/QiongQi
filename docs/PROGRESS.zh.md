@@ -239,7 +239,9 @@
 - [x] `POST /a2a/tasks/{id}/cancel` — 取消待处理/运行中任务
 - [x] `GET /a2a/tasks/{id}/artifacts` — 从任务关联 thread 获取 turn items
 - [x] `GET /a2a/tasks/{id}/subscribe` — SSE 事件流（已完成立即推送，进行中轮询+eventBus 订阅）
-- [ ] `A2APeerAdapter`（A2A client）
+- [x] `ArtifactSchema` + `mapItemsToArtifacts()` — A2A Artifact ↔ TurnItem 桥接（`packages/contracts/src/a2a-artifact.ts`）
+  - assistant_text→text/markdown, tool_result→application/json, error→text/plain
+  - a2aCreateTask 响应含 `artifacts` 数组
+- [ ] `A2APeerAdapter` — 已由 HttpPeerTransport 覆盖
 - [ ] 跨厂商互操作验证
-- [ ] Artifact 桥接
 - [ ] 端到端跨实例协作验证
