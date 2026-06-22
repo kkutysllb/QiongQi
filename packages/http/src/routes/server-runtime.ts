@@ -10,6 +10,8 @@ import type { WorkspaceInspector } from '@qiongqi/ports'
 import type { ToolHost, ToolProviderPolicy } from '@qiongqi/ports'
 import type { RuntimeEventRecorder } from '@qiongqi/services'
 import type { RuntimeInfoResponse, AgentCard } from '@qiongqi/contracts'
+import type { A2ATaskRecord } from '../a2a-task-model.js'
+import type { FileA2ATaskStore } from '../a2a-task-store.js'
 import type { McpServerDiagnostic } from '@qiongqi/adapter-tools'
 import type { McpSearchRuntimeDiagnostic } from '@qiongqi/adapter-tools'
 import type { WebProviderDiagnostic } from '@qiongqi/adapter-tools'
@@ -68,6 +70,8 @@ export type ServerRuntime = {
    * `/.well-known/agent-card.json` for A2A discovery.
    */
   agentCard?: AgentCard
+  /** Stage 4: A2A task store for persistence. */
+  a2aTaskStore?: FileA2ATaskStore
   toolDiagnostics?(): RuntimeToolDiagnostics | Promise<RuntimeToolDiagnostics>
   skills?(): SkillRuntimeDiagnostics | Promise<SkillRuntimeDiagnostics>
   /**

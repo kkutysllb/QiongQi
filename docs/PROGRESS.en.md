@@ -225,9 +225,20 @@
 
 ---
 
-## Stage 4: A2A Protocol Endpoint (Not Started)
+## Stage 4: A2A Protocol Endpoint 🔄
 
-- [ ] A2A endpoint implementation (`/a2a`)
-- [ ] `A2APeerAdapter`
+- [x] `A2ATaskRecord` data model (`packages/http/src/a2a-task-model.ts`)
+  - Task states: submitted → working → completed/failed/cancelled
+- [x] `FileA2ATaskStore` (`packages/http/src/a2a-task-store.ts`)
+  - Persists to `<dataDir>/a2a-tasks/<id>.json`
+- [x] A2A endpoint upgrade:
+  - `POST /a2a/tasks` — creates task, executes turn, returns task+artifact
+  - `GET /a2a/tasks/{id}` — queries task status
+  - Old `POST /a2a` backward-compatible (delegates to new endpoint)
+- [x] `ServerRuntime.a2aTaskStore` injection
+- [ ] SSE task progress subscription
+- [ ] Cancel, artifacts endpoints
+- [ ] `A2APeerAdapter` (A2A client)
+- [ ] Cross-vendor interoperability verification
 - [ ] Artifact bridging
 - [ ] End-to-end cross-instance collaboration verification

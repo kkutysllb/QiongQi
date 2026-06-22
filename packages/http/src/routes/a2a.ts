@@ -2,28 +2,33 @@ import { PeerArtifactSchema, PeerTaskSchema } from '@qiongqi/contracts'
 import { jsonResponse, type JsonResponse } from '../response.js'
 import { readJsonBody } from '../read-json-body.js'
 import type { ServerRuntime } from './server-runtime.js'
+import { A2ATaskRecord, type A2ATaskRecord as A2ATaskRecordType } from '../a2a-task-model.js'
+import type { FileA2ATaskStore } from '../a2a-task-store.js'
 
 /**
- * Stage 2: A2A (Agent-to-Agent) task submission endpoint.
+ * Stage 4: A2A (Agent-to-Agent) protocol endpoints.
  *
- * Receives a {@link PeerTask} from a remote peer and executes it by
- * creating a new thread + running one turn against this agent's
- * runtime. Returns a {@link PeerArtifact} with the turn result.
+ * Upgraded from the Stage-2 single POST /a2a to a proper A2A task
+ * lifecycle. Tasks are tracked in a {@link FileA2ATaskStore} so status
+ * can be queried after the initial HTTP connection closes.
  *
- * The endpoint is **authenticated** (unlike the AgentCard discovery
- * endpoint) — only trusted peers should be able to consume agent
- * resources. Authentication is the same bearer-token scheme used by
- * all `/v1/*` endpoints.
+ * ## Endpoints
  *
- * ## Protocol contract
+ * - `POST /a2a/tasks` — submit a task, run one turn, return artifact
+ * - `GET /a2a/tasks/{id}` — query task status
  *
- * - **Request**: `POST /a2a` with JSON body conforming to
- *   {@link PeerTaskSchema}.
- * - **Response**: `200` with {@link PeerArtifactSchema} on success;
- *   `400` on invalid body; `503` when runTurn is unavailable.
+ * Future: SSE subscription, cancel, artifacts (4.1 full protocol).
  */
-export async function a2aTaskHandler(
+
+/**
+ * POST /a2a/tasks — submit a peer task and execute one turn.
+ *
+ * Creates a {@link A2ATaskRecord}, runs the turn synchronously,
+ * updates the record with the result, and returns it.
+ */
+export async function a2aCreateTask(
   runtime: ServerRuntime,
+  store: FileA2ATaskStore,
   request: Request
 ): Promise<JsonResponse> {
   const body = await readJsonBody(request)
@@ -35,75 +40,91 @@ export async function a2aTaskHandler(
     return {
       status: 400,
       headers: { 'content-type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({
-        error: 'invalid peer task',
-        issues: parsedTask.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)
-      })
+      body: JSON.stringify({ error: 'invalid peer task', issues: parsedTask.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) })
     }
   }
   const task = parsedTask.data
-
   if (!runtime.runTurn) {
-    return {
-      status: 503,
-      headers: { 'content-type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ error: 'turn execution unavailable' })
-    }
+    return { status: 503, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ error: 'turn execution unavailable' }) }
   }
 
+  const id = `a2a_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  const now = new Date().toISOString()
+  let record: A2ATaskRecordType = A2ATaskRecord.parse({
+    id,
+    senderCardId: 'unknown',
+    prompt: task.prompt,
+    workspace: task.workspace,
+    model: task.model,
+    status: 'submitted',
+    createdAt: now,
+    updatedAt: now
+  })
+  await store.upsert(record)
+
   try {
-    // Create a temporary thread for the peer's task, run one turn,
-    // and collect the result. The thread is intentionally short-lived —
-    // peers don't persist state across A2A calls (they bring their own).
+    record = A2ATaskRecord.parse({ ...record, status: 'working', updatedAt: new Date().toISOString() })
+    await store.upsert(record)
+
     const thread = await runtime.threadService.create({
-      title: task.label ?? `A2A peer task: ${task.prompt.slice(0, 60)}`,
+      title: task.label ?? `A2A task: ${task.prompt.slice(0, 60)}`,
       workspace: task.workspace ?? '~',
       model: task.model ?? runtime.info().model ?? 'default',
       mode: 'agent',
       approvalPolicy: runtime.info().approvalPolicy ?? 'auto',
       sandboxMode: runtime.info().sandboxMode
     })
-
     const started = await runtime.turnService.startTurn({
       threadId: thread.id,
-      request: {
-        prompt: task.prompt,
-        model: task.model,
-        mode: 'agent'
-      }
+      request: { prompt: task.prompt, model: task.model, mode: 'agent' }
     })
-
     const status = await runtime.runTurn(thread.id, started.turnId)
-
-    // Collect the assistant text from the turn's items for the summary.
     const items = await runtime.sessionStore.loadItems(thread.id)
     const turnItems = items.filter((item) => item.turnId === started.turnId)
     const summary = turnItems
       .filter((item): item is Extract<typeof turnItems[0], { kind: 'assistant_text' }> => item.kind === 'assistant_text')
-      .map((item) => item.text.trim())
-      .filter(Boolean)
-      .join('\n\n')
-      .trim() || undefined
-
+      .map((item) => item.text.trim()).filter(Boolean).join('\n\n').trim() || undefined
     const errorItem = turnItems.find(
       (item): item is Extract<typeof turnItems[0], { kind: 'error' }> => item.kind === 'error'
     )
 
+    record = A2ATaskRecord.parse({
+      ...record,
+      threadId: thread.id,
+      turnId: started.turnId,
+      status: status === 'completed' ? 'completed' : 'failed',
+      ...(summary ? { summary } : {}),
+      ...(errorItem ? { error: errorItem.message } : {}),
+      updatedAt: new Date().toISOString()
+    })
+    await store.upsert(record)
+
+    // Also return PeerArtifact for backward compatibility with Stage-2 clients.
     const artifact = PeerArtifactSchema.parse({
       peerCardId: runtime.agentCard?.id ?? 'unknown',
       status,
       ...(summary ? { summary } : {}),
-      ...(errorItem ? { error: errorItem.message } : {}),
-      ...(status === 'failed' && !errorItem ? { error: 'Turn failed without error item' } : {})
+      ...(errorItem ? { error: errorItem.message } : {})
     })
-
-    return jsonResponse(artifact)
+    return jsonResponse({ task: record, artifact })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    return {
-      status: 500,
-      headers: { 'content-type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ error: message })
-    }
+    record = A2ATaskRecord.parse({ ...record, status: 'failed', error: message, updatedAt: new Date().toISOString() })
+    await store.upsert(record).catch(() => {})
+    return { status: 500, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ task: record, error: message }) }
   }
+}
+
+/**
+ * GET /a2a/tasks/{id} — query a task by id.
+ */
+export async function a2aGetTask(
+  store: FileA2ATaskStore,
+  taskId: string
+): Promise<JsonResponse> {
+  const record = await store.get(taskId)
+  if (!record) {
+    return { status: 404, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ error: 'task not found' }) }
+  }
+  return jsonResponse(record)
 }

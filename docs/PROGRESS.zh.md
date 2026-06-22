@@ -225,9 +225,20 @@
 
 ---
 
-## 阶段 4：A2A 协议端点（未开始）
+## 阶段 4：A2A 协议端点 🔄
 
-- [ ] A2A 端点实现（`/a2a`）
-- [ ] `A2APeerAdapter`
+- [x] `A2ATaskRecord` 数据模型（`packages/http/src/a2a-task-model.ts`）
+  - 任务状态：submitted → working → completed/failed/cancelled
+- [x] `FileA2ATaskStore`（`packages/http/src/a2a-task-store.ts`）
+  - 持久化到 `<dataDir>/a2a-tasks/<id>.json`
+- [x] A2A 端点升级：
+  - `POST /a2a/tasks` — 创建任务、执行 turn、返回 task+artifact
+  - `GET /a2a/tasks/{id}` — 查询任务状态
+  - 旧 `POST /a2a` 向后兼容（委托新端点）
+- [x] `ServerRuntime.a2aTaskStore` 注入
+- [ ] SSE 订阅任务进度
+- [ ] 取消、产物获取端点
+- [ ] `A2APeerAdapter`（A2A client）
+- [ ] 跨厂商互操作验证
 - [ ] Artifact 桥接
 - [ ] 端到端跨实例协作验证

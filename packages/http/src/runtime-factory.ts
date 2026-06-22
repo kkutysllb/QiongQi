@@ -37,6 +37,7 @@ import {
 import { TurnOrchestrator } from '@qiongqi/loop'
 import { EventedTurnOrchestrator } from '@qiongqi/loop'
 import { FileTurnStateStore } from '@qiongqi/loop'
+import { FileA2ATaskStore } from './a2a-task-store.js'
 import { ContextCompactor } from '@qiongqi/loop'
 import type { TokenEconomyConfig } from '@qiongqi/loop'
 import {
@@ -790,6 +791,8 @@ async function assembleRuntime(input: {
     ...(tools.memoryStore ? { memoryStore: tools.memoryStore } : {}),
     /** Stage 2: published at /.well-known/agent-card.json */
     agentCard,
+    /** Stage 4: A2A task persistence. */
+    a2aTaskStore: new FileA2ATaskStore(join(options.dataDir, 'a2a-tasks')),
     runTurn(threadId, turnId) {
       return loop.runTurn(threadId, turnId)
     },

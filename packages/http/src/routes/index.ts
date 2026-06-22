@@ -30,7 +30,7 @@ import { resumeSession } from './sessions.js'
 import { usageJsonResponse } from './usage.js'
 import { runtimeInfoJsonResponse, runtimeToolDiagnosticsJsonResponse } from './runtime-info.js'
 import { agentCardJsonResponse } from './agent-card.js'
-import { a2aTaskHandler } from './a2a.js'
+import { a2aCreateTask, a2aGetTask } from './a2a.js'
 import { listSkills } from './skills.js'
 import {
   attachmentDiagnostics,
@@ -53,7 +53,8 @@ import type { ServerRuntime } from './server-runtime.js'
  * Build the full router used by the HTTP server. The router exposes:
  * - `GET /health` (unauthenticated)
  * - `GET /.well-known/agent-card.json` (unauthenticated, Stage 2 A2A discovery)
- * - `POST /a2a` (auth, Stage 2 A2A task submission)
+ * - `POST /a2a/tasks` (auth, Stage 4 A2A task submission with status tracking)
+ * - `GET /a2a/tasks/:id` (auth, Stage 4 A2A task status query)
  * - `GET /v1/runtime/info` (auth)
  * - `GET /v1/runtime/tools` (auth)
  * - `GET /v1/skills` (auth)
@@ -84,10 +85,23 @@ export function buildRouter(runtime: ServerRuntime): Router {
   router.add('GET', '/health', () => healthJsonResponse())
   // Stage 2: A2A discovery — public, unauthenticated by RFC 8615 convention.
   router.add('GET', '/.well-known/agent-card.json', () => agentCardJsonResponse(runtime))
-  // Stage 2: A2A task submission — authenticated, peers submit tasks here.
+  // Stage 4: A2A task submission with status tracking.
+  router.add('POST', '/a2a/tasks', async (request) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
+    return a2aCreateTask(runtime, runtime.a2aTaskStore, request)
+  })
+  // Stage 4: query A2A task by id.
+  router.add('GET', '/a2a/tasks/:id', async (request, ctx) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
+    return a2aGetTask(runtime.a2aTaskStore, ctx.params.id)
+  })
+  // Backward-compatible endpoint (Stage 2).
   router.add('POST', '/a2a', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
-    return a2aTaskHandler(runtime, request)
+    if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
+    return a2aCreateTask(runtime, runtime.a2aTaskStore, request)
   })
   router.add('GET', '/v1/runtime/info', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
