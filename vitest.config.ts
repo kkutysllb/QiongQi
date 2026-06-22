@@ -8,9 +8,32 @@ const pkgNames = [
   'adapter-fs', 'tool-infra', 'preset-coding',
 ]
 
+// Maps each package to its semantic layer directory under packages/.
+// Keep in sync with docs/architecture.{zh,en}.md §3.3 layer definitions.
+const pkgLayer = {
+  'contracts': 'foundation',
+  'domain': 'domain-layer',
+  'ports': 'ports-layer',
+  'cache': 'infrastructure',
+  'attachments': 'infrastructure',
+  'adapter-fs': 'infrastructure',
+  'tool-infra': 'infrastructure',
+  'loop': 'engine',
+  'services': 'engine',
+  'adapter-storage': 'adapters',
+  'adapter-model': 'adapters',
+  'adapter-tools': 'adapters',
+  'skills': 'capabilities',
+  'memory': 'capabilities',
+  'delegation': 'delegation-layer',
+  'http': 'http-layer',
+  'cli': 'cli-layer',
+  'preset-coding': 'presets',
+}
+
 const alias = {}
 for (const name of pkgNames) {
-  alias[`@qiongqi/${name}`] = resolve(__dirname, 'packages', name, 'src')
+  alias[`@qiongqi/${name}`] = resolve(__dirname, 'packages', pkgLayer[name], name, 'src')
 }
 
 export default defineConfig({

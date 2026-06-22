@@ -6,7 +6,7 @@ import type { UsageSnapshot } from '@qiongqi/contracts'
 
 const atomicWriteFileMock = vi.hoisted(() => vi.fn())
 
-vi.mock('../packages/adapter-storage/src/atomic-write.js', () => ({
+vi.mock('../packages/adapters/adapter-storage/src/atomic-write.js', () => ({
   atomicWriteFile: atomicWriteFileMock
 }))
 

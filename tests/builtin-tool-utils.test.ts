@@ -182,7 +182,7 @@ describe('tool path normalization', () => {
   })
 
   it('normalizes ls relative paths', () => {
-    const fileStat = statSync(new URL('../packages/adapter-tools/src/builtin-tool-utils.ts', import.meta.url))
+    const fileStat = statSync(new URL('../packages/adapters/adapter-tools/src/builtin-tool-utils.ts', import.meta.url))
     const entry = makeListEntry('/workspace/src/index.ts', '/workspace', fileStat)
 
     expect(entry.relative_path).toBe('src/index.ts')
