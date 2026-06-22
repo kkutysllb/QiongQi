@@ -148,12 +148,19 @@
 - [x] `tests/builtin-skills.test.ts` path fixed (`qiongqi/skills` → `skills`)
 - [x] Post-cleanup full test suite 433/433 passing + end-to-end verification passed
 
-### 1.8 Deliverables ⏳
+### 1.8 Deliverables ✅
 
-- [x] 16 independent npm packages, each with `package.json` + `tsconfig.json`
-- [ ] `createAgent` / `createHttpServer` public API docs (JSDoc)
-- [x] preset-coding package verified
-- [x] Full test suite + end-to-end verification passed
+- [x] 16 independent npm packages, each with `package.json` + `tsconfig.json` + `tsconfig.build.json`:
+  - All packages have top-level `types: ./dist/index.d.ts` (compat for older TS / tools)
+  - All packages have `exports` with `types` + `import` sub-fields
+  - All packages generate correct `.d.ts` declarations (11~71 lines each)
+  - `cli` package adds `bin: { qiongqi: ./dist/serve-entry.js }` entry
+- [x] `createAgent` / `createHttpServer` public API docs (JSDoc) — see 1.4
+- [x] preset-coding package verified: external consumer simulation test passes (`createCodingAgent` / `CODING_SYSTEM_PROMPT` / `CODING_PINNED_CONSTRAINTS` exports work)
+- [x] Full test suite + end-to-end verification passed:
+  - 16 packages build green + 433/433 tests green + tsc 0 errors
+  - bin entry boots successfully (`agentName=Qiongqi Coding`)
+  - Health check / Runtime info / Thread CRUD all pass
 
 ---
 

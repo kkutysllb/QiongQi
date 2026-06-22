@@ -22,5 +22,6 @@
   "devDependencies": {
     "typescript": "^5.8.2"
   },
-  "private": true
+  "private": true,
+  "types": "./dist/index.d.ts"
 }

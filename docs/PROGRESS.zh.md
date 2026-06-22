@@ -148,12 +148,19 @@
 - [x] `tests/builtin-skills.test.ts` 路径修复（`qiongqi/skills` → `skills`）
 - [x] 清理后全量测试 433/433 通过 + 端到端验证通过
 
-### 1.8 交付物 ⏳
+### 1.8 交付物 ✅
 
-- [x] 16 个独立 npm 包，各自 `package.json` + `tsconfig.json`
-- [ ] `createAgent` / `createHttpServer` 公共 API 文档（JSDoc）
-- [x] preset-coding 包验证
-- [x] 全量测试 + 端到端验证通过
+- [x] 16 个独立 npm 包，各自 `package.json` + `tsconfig.json` + `tsconfig.build.json`：
+  - 所有包补全顶层 `types: ./dist/index.d.ts`（兼容旧 TS / 工具）
+  - 所有包 `exports` 包含 `types` + `import` 双子字段
+  - 所有包 `.d.ts` 类型声明文件正确生成（11~71 行不等）
+  - `cli` 包新增 `bin: { qiongqi: ./dist/serve-entry.js }` 入口
+- [x] `createAgent` / `createHttpServer` 公共 API 文档（JSDoc）见 1.4
+- [x] preset-coding 包验证：外部消费模拟测试通过（`createCodingAgent` / `CODING_SYSTEM_PROMPT` / `CODING_PINNED_CONSTRAINTS` 导出正常）
+- [x] 全量测试 + 端到端验证通过：
+  - 16 包构建全绿 + 433/433 测试全绿 + tsc 0 错误
+  - bin 入口启动成功（`agentName=Qiongqi Coding`）
+  - Health check / Runtime info / Thread CRUD 全通过
 
 ---
 
