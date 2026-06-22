@@ -5,8 +5,8 @@
 >
 > English version: [`PROGRESS.en.md`](./PROGRESS.en.md)
 
-**最后更新**：2026-06-21
-**当前阶段**：阶段 1 进行中（1.1–1.3 已完成，1.4–1.8 待办）
+**最后更新**：2026-06-22
+**当前阶段**：阶段 1–3 已完成 ✅，阶段 4 基本完成（跨厂商验证待外部 Agent）
 
 ---
 
@@ -40,7 +40,7 @@
 | `@qiongqi/domain` | Thread/Turn/Item/Event 实体 | ✅ | 完成 |
 | `@qiongqi/ports` | ModelClient/ToolHost/Stores 接口 | ✅ | 完成 |
 | `@qiongqi/cache` | LRU/TTL/ImmutablePrefix | ✅ | 完成 |
-| `@qiongqi/loop` | TurnOrchestrator/PromptBuilder/Policy | ✅ | 完成 |
+| `@qiongqi/loop` | TurnOrchestrator/PromptBuilder/Policy + EventedOrch | ✅ | 完成 |
 | `@qiongqi/services` | Thread/Turn/Usage/Review 服务 | ✅ | 完成 |
 | `@qiongqi/adapter-model` | ModelCompatClient | ✅ | 完成 |
 | `@qiongqi/adapter-tools` | bash/read/edit/grep + MCP provider | ✅ | 完成 |
@@ -48,7 +48,7 @@
 | `@qiongqi/skills` | SkillRuntime + PluginHost | ✅ | 完成 |
 | `@qiongqi/memory` | MemoryStore + provider | ✅ | 完成 |
 | `@qiongqi/attachments` | AttachmentStore | ✅ | 完成 |
-| `@qiongqi/delegation` | DelegationRuntime + ChildExecutor | ✅ | 完成 |
+| `@qiongqi/delegation` | DelegationRuntime + ChildExecutor + PeerRegistry | ✅ | 完成 |
 | `@qiongqi/http` | HTTP/SSE server + routes | ✅ | 完成 |
 | `@qiongqi/cli` | qiongqi 命令行入口 | ✅ | 完成 |
 | `@qiongqi/preset-coding` | 编码预设（系统提示词 + 默认配置） | ✅ | 完成 |

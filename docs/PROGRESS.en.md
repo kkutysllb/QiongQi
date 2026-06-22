@@ -41,7 +41,7 @@
 | `@qiongqi/domain` | Thread/Turn/Item/Event entities | ✅ | Done |
 | `@qiongqi/ports` | ModelClient/ToolHost/Stores interfaces | ✅ | Done |
 | `@qiongqi/cache` | LRU/TTL/ImmutablePrefix | ✅ | Done |
-| `@qiongqi/loop` | TurnOrchestrator/PromptBuilder/Policy | ✅ | Done |
+| `@qiongqi/loop` | TurnOrchestrator/PromptBuilder/Policy + EventedOrch | ✅ | Done |
 | `@qiongqi/services` | Thread/Turn/Usage/Review services | ✅ | Done |
 | `@qiongqi/adapter-model` | ModelCompatClient | ✅ | Done |
 | `@qiongqi/adapter-tools` | bash/read/edit/grep + MCP provider | ✅ | Done |
@@ -49,7 +49,7 @@
 | `@qiongqi/skills` | SkillRuntime + PluginHost | ✅ | Done |
 | `@qiongqi/memory` | MemoryStore + provider | ✅ | Done |
 | `@qiongqi/attachments` | AttachmentStore | ✅ | Done |
-| `@qiongqi/delegation` | DelegationRuntime + ChildExecutor | ✅ | Done |
+| `@qiongqi/delegation` | DelegationRuntime + ChildExecutor + PeerRegistry | ✅ | Done |
 | `@qiongqi/http` | HTTP/SSE server + routes | ✅ | Done |
 | `@qiongqi/cli` | qiongqi CLI entry point | ✅ | Done |
 | `@qiongqi/preset-coding` | Coding preset (system prompt + default config) | ✅ | Done |

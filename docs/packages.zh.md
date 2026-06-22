@@ -118,6 +118,10 @@ import type { ModelClient, ToolHost, ThreadStore } from '@qiongqi/ports'
 | `context-compactor` | `ContextCompactor` — 上下文压缩（软/硬阈值） |
 | `token-economy` | token 经济（工具描述/结果压缩） |
 | `tool-storm-breaker` | 工具风暴抑制（防止同回合重复调用） |
+| `turn-event-types` | `TurnStateV1` / `TurnStepEvent` / `TurnStateSerializer`（Stage 3） |
+| `turn-state-store` | `FileTurnStateStore` — 崩溃恢复持久化（Stage 3） |
+| `evented-turn-orchestrator` | `EventedTurnOrchestrator` — 事件驱动编排器（Stage 3） |
+| `turn-event-bus` | `TurnEventBus` — 进程内事件总线（Stage 3） |
 | `inflight-tracker` | `InflightTracker` — inflight 工具调用跟踪 |
 | `steering-queue` | `SteeringQueue` — 运行时转向消息队列 |
 | `auto-model-router` | 自动模型路由（根据任务选择模型） |
@@ -147,8 +151,8 @@ import type { ModelClient, ToolHost, ThreadStore } from '@qiongqi/ports'
 
 | 模块 | 内容 |
 |------|------|
-| `deepseek-compat-model-client` | `DeepSeekCompatModelClient` — OpenAI 兼容客户端（计划重命名为 `ModelCompatClient`） |
-| `deepseek-pricing` | DeepSeek 模型定价表 |
+| `model-compat-client` | `ModelCompatClient` — OpenAI 兼容模型客户端 |
+| `pricing/` | PricingProvider 抽象层（DeepseekPricingProvider + CompositePricingProvider） |
 | `model-error-probe` | 模型错误探测（分类重试策略） |
 | `tool-argument-repair` | 工具参数修复（JSON 畸形修正） |
 
@@ -249,6 +253,7 @@ import { AttachmentStore } from '@qiongqi/attachments'
 |------|------|
 | `delegation-runtime` | `DelegationRuntime` — 委派运行时 |
 | `child-agent-executor` | `ChildAgentExecutor` — 子代理执行器 |
+| `peer-registry` | `PeerRegistry` + `FilePeerStore` — Agent peer 注册表（Stage 2） |
 
 ---
 
@@ -260,14 +265,17 @@ import { AttachmentStore } from '@qiongqi/attachments'
 
 | 模块 | 内容 |
 |------|------|
-| `runtime-factory` | `startQiongqiServe()` — 运行时工厂（Composition Root） |
+| `runtime-factory` | `createAgent()` / `createHttpServer()` — Composition Root（Stage 1.4） |
 | `http-server` | HTTP 服务器核心 |
 | `node-http-server` | Node.js HTTP 服务器适配 |
 | `router` | `Router` — 路由器 |
-| `routes` | `buildRouter()` — 完整路由构建 |
+| `routes` | `buildRouter()` — 完整路由（含 A2A / AgentCard 等） |
 | `auth` | Bearer token 鉴权中间件 |
 | `sse` | SSE 流式响应 |
 | `review-service` | `ReviewService` — 代码审查服务 |
+| `http-peer-transport` | `HttpPeerTransport` — A2A HTTP 传输（Stage 2） |
+| `a2a-task-model` | `A2ATaskRecord` — A2A 任务数据模型（Stage 4） |
+| `a2a-task-store` | `FileA2ATaskStore` — A2A 任务持久化（Stage 4） |
 
 ---
 
@@ -294,7 +302,6 @@ qiongqi serve --data-dir ~/.qiongqi/data --api-key $KEY --port 8899
 **职责**：编码预设 — 组装软件工程 Agent（系统提示词 + 默认工具 + 技能挂载）。
 
 ```typescript
-// 阶段 1.4 完成后的目标 API（当前部分实现）
 import { createCodingAgent } from '@qiongqi/preset-coding'
 
 const agent = await createCodingAgent({

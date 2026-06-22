@@ -153,8 +153,8 @@ threads/turns/usage.
 
 | Module | Content |
 |--------|---------|
-| `deepseek-compat-model-client` | `DeepSeekCompatModelClient` — OpenAI-compatible client (planned rename to `ModelCompatClient`) |
-| `deepseek-pricing` | DeepSeek model pricing table |
+| `model-compat-client` | `ModelCompatClient` — OpenAI-compatible model client |
+| `pricing/` | PricingProvider abstraction (DeepseekPricingProvider + CompositePricingProvider) |
 | `model-error-probe` | Model error probing (retry strategy classification) |
 | `tool-argument-repair` | Tool argument repair (JSON malformation correction) |
 
@@ -256,6 +256,7 @@ import { AttachmentStore } from '@qiongqi/attachments'
 |--------|---------|
 | `delegation-runtime` | `DelegationRuntime` — delegation runtime |
 | `child-agent-executor` | `ChildAgentExecutor` — child agent executor |
+| `peer-registry` | `PeerRegistry` + `FilePeerStore` — agent peer registry (Stage 2) |
 
 ---
 
@@ -267,7 +268,7 @@ import { AttachmentStore } from '@qiongqi/attachments'
 
 | Module | Content |
 |--------|---------|
-| `runtime-factory` | `startQiongqiServe()` — runtime factory (Composition Root) |
+| `runtime-factory` | `createAgent()` / `createHttpServer()` — Composition Root (Stage 1.4) |
 | `http-server` | HTTP server core |
 | `node-http-server` | Node.js HTTP server adapter |
 | `router` | `Router` — router |
@@ -275,6 +276,9 @@ import { AttachmentStore } from '@qiongqi/attachments'
 | `auth` | Bearer token auth middleware |
 | `sse` | SSE streaming response |
 | `review-service` | `ReviewService` — code review service |
+| `http-peer-transport` | `HttpPeerTransport` — A2A HTTP transport (Stage 2) |
+| `a2a-task-model` | `A2ATaskRecord` — A2A task data model (Stage 4) |
+| `a2a-task-store` | `FileA2ATaskStore` — A2A task persistence (Stage 4) |
 
 ---
 
