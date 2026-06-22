@@ -128,3 +128,115 @@ export async function a2aGetTask(
   }
   return jsonResponse(record)
 }
+
+/**
+ * POST /a2a/tasks/{id}/cancel — cancel a pending or working task.
+ */
+export async function a2aCancelTask(
+  store: FileA2ATaskStore,
+  taskId: string
+): Promise<JsonResponse> {
+  const record = await store.get(taskId)
+  if (!record) {
+    return { status: 404, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ error: 'task not found' }) }
+  }
+  if (record.status === 'completed' || record.status === 'failed') {
+    return { status: 409, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ error: 'task already terminal', status: record.status }) }
+  }
+  const updated = A2ATaskRecord.parse({ ...record, status: 'cancelled', updatedAt: new Date().toISOString() })
+  await store.upsert(updated)
+  return jsonResponse(updated)
+}
+
+/**
+ * GET /a2a/tasks/{id}/artifacts — load turn items from the task's thread.
+ */
+export async function a2aGetArtifacts(
+  runtime: ServerRuntime,
+  store: FileA2ATaskStore,
+  taskId: string
+): Promise<JsonResponse> {
+  const record = await store.get(taskId)
+  if (!record) {
+    return { status: 404, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ error: 'task not found' }) }
+  }
+  if (!record.threadId) {
+    return { status: 404, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ error: 'task has no thread' }) }
+  }
+  const items = await runtime.sessionStore.loadItems(record.threadId)
+  return jsonResponse({ taskId, threadId: record.threadId, items })
+}
+
+/**
+ * GET /a2a/tasks/{id}/subscribe — SSE event stream for task progress.
+ *
+ * Subscribes to the runtime event bus for the task's thread and
+ * streams turn events as SSE. If the task is already completed,
+ * immediately sends the final state and closes.
+ */
+export function a2aSubscribeTask(
+  runtime: ServerRuntime,
+  store: FileA2ATaskStore,
+  taskId: string,
+  request: Request
+): Response {
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (data: unknown) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`))
+      }
+
+      const record = await store.get(taskId)
+      if (!record) {
+        send({ error: 'task not found' })
+        controller.close()
+        return
+      }
+
+      // If already terminal, send final state and close.
+      if (record.status === 'completed' || record.status === 'failed' || record.status === 'cancelled') {
+        send({ task: record })
+        send({ event: 'done' })
+        controller.close()
+        return
+      }
+
+      // Subscribe to runtime events for the task's thread.
+      if (record.threadId) {
+        const unsubscribe = runtime.eventBus.subscribe(record.threadId, (event) => {
+          send({ event })
+        })
+        // Poll for status changes (simplified — full async would need a callback).
+        const interval = setInterval(async () => {
+          const updated = await store.get(taskId)
+          if (updated && (updated.status === 'completed' || updated.status === 'failed' || updated.status === 'cancelled')) {
+            send({ task: updated })
+            send({ event: 'done' })
+            clearInterval(interval)
+            unsubscribe()
+            controller.close()
+          }
+        }, 1000)
+        // Clean up on abort.
+        request.signal?.addEventListener('abort', () => {
+          clearInterval(interval)
+          unsubscribe()
+          controller.close()
+        })
+      } else {
+        send({ task: record })
+        send({ event: 'done' })
+        controller.close()
+      }
+    }
+  })
+
+  return new Response(stream, {
+    headers: {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      'connection': 'keep-alive'
+    }
+  })
+}

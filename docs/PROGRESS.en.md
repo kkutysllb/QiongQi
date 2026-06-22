@@ -236,8 +236,9 @@
   - `GET /a2a/tasks/{id}` — queries task status
   - Old `POST /a2a` backward-compatible (delegates to new endpoint)
 - [x] `ServerRuntime.a2aTaskStore` injection
-- [ ] SSE task progress subscription
-- [ ] Cancel, artifacts endpoints
+- [x] `POST /a2a/tasks/{id}/cancel` — cancel pending/working tasks
+- [x] `GET /a2a/tasks/{id}/artifacts` — retrieve turn items from task's thread
+- [x] `GET /a2a/tasks/{id}/subscribe` — SSE event stream (completed: immediate push, in-progress: polling+eventBus)
 - [ ] `A2APeerAdapter` (A2A client)
 - [ ] Cross-vendor interoperability verification
 - [ ] Artifact bridging

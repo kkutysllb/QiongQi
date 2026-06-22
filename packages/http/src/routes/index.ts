@@ -30,7 +30,7 @@ import { resumeSession } from './sessions.js'
 import { usageJsonResponse } from './usage.js'
 import { runtimeInfoJsonResponse, runtimeToolDiagnosticsJsonResponse } from './runtime-info.js'
 import { agentCardJsonResponse } from './agent-card.js'
-import { a2aCreateTask, a2aGetTask } from './a2a.js'
+import { a2aCreateTask, a2aGetTask, a2aCancelTask, a2aGetArtifacts, a2aSubscribeTask } from './a2a.js'
 import { listSkills } from './skills.js'
 import {
   attachmentDiagnostics,
@@ -55,6 +55,9 @@ import type { ServerRuntime } from './server-runtime.js'
  * - `GET /.well-known/agent-card.json` (unauthenticated, Stage 2 A2A discovery)
  * - `POST /a2a/tasks` (auth, Stage 4 A2A task submission with status tracking)
  * - `GET /a2a/tasks/:id` (auth, Stage 4 A2A task status query)
+ * - `POST /a2a/tasks/:id/cancel` (auth, Stage 4 cancel task)
+ * - `GET /a2a/tasks/:id/artifacts` (auth, Stage 4 task artifacts)
+ * - `GET /a2a/tasks/:id/subscribe` (auth, Stage 4 SSE task progress)
  * - `GET /v1/runtime/info` (auth)
  * - `GET /v1/runtime/tools` (auth)
  * - `GET /v1/skills` (auth)
@@ -96,6 +99,24 @@ export function buildRouter(runtime: ServerRuntime): Router {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
     return a2aGetTask(runtime.a2aTaskStore, ctx.params.id)
+  })
+  // Stage 4: cancel a task.
+  router.add('POST', '/a2a/tasks/:id/cancel', async (request, ctx) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
+    return a2aCancelTask(runtime.a2aTaskStore, ctx.params.id)
+  })
+  // Stage 4: retrieve task artifacts (turn items).
+  router.add('GET', '/a2a/tasks/:id/artifacts', async (request, ctx) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
+    return a2aGetArtifacts(runtime, runtime.a2aTaskStore, ctx.params.id)
+  })
+  // Stage 4: SSE subscribe to task progress.
+  router.add('GET', '/a2a/tasks/:id/subscribe', (request, ctx) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
+    return a2aSubscribeTask(runtime, runtime.a2aTaskStore, ctx.params.id, request)
   })
   // Backward-compatible endpoint (Stage 2).
   router.add('POST', '/a2a', async (request) => {

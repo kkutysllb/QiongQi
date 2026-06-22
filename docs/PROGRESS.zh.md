@@ -236,8 +236,9 @@
   - `GET /a2a/tasks/{id}` — 查询任务状态
   - 旧 `POST /a2a` 向后兼容（委托新端点）
 - [x] `ServerRuntime.a2aTaskStore` 注入
-- [ ] SSE 订阅任务进度
-- [ ] 取消、产物获取端点
+- [x] `POST /a2a/tasks/{id}/cancel` — 取消待处理/运行中任务
+- [x] `GET /a2a/tasks/{id}/artifacts` — 从任务关联 thread 获取 turn items
+- [x] `GET /a2a/tasks/{id}/subscribe` — SSE 事件流（已完成立即推送，进行中轮询+eventBus 订阅）
 - [ ] `A2APeerAdapter`（A2A client）
 - [ ] 跨厂商互操作验证
 - [ ] Artifact 桥接
