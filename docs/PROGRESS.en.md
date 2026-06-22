@@ -199,12 +199,24 @@
 
 ---
 
-## Stage 3: TurnOrchestrator Event-Driven (Not Started)
+## Stage 3: TurnOrchestrator Event-Driven 🔄
 
-- [ ] `TurnStateGraph` (inspired by LangGraph)
-- [ ] Event bus refactoring
-- [ ] Crash recovery (durable state)
-- [ ] Gradual rollout strategy (A/B comparison)
+- [x] Event type system (`packages/loop/src/turn-event-types.ts`):
+  - `TurnStateV1` — serialisable turn state (version/threadId/turnId/stepIndex/events/items/status)
+  - `TurnStepEvent` — step-level event union type (step:start/prompt:built/model:ran/decision/tools:dispatched etc.)
+  - `TurnStateSerializer` — state persistence interface (save/load/delete/list)
+  - `OrchestrationMode = 'classic' | 'evented'` — dual-mode enum
+- [x] `FileTurnStateStore` (`packages/loop/src/turn-state-store.ts`):
+  - File-based `TurnStateSerializer` implementation
+  - Persists to `<dataDir>/<threadId>/turns/<turnId>/state.json`
+- [x] `EventedTurnOrchestrator` skeleton (`packages/loop/src/evented-turn-orchestrator.ts`):
+  - Composes existing `TurnOrchestrator`, adds turn-level state persistence
+  - Crash detection: stale state.json auto-cleaned
+  - Full event-driven loop deferred to next iteration
+- [x] `QiongqiServeRuntimeOptions.orchestrationMode` dual-run flag
+- [ ] Full event-driven loop (component publish/subscribe)
+- [ ] Crash recovery (resume from TurnStateV1)
+- [ ] End-to-end verification (classic vs evented consistency)
 - [ ] End-to-end recovery verification
 
 ---

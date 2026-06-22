@@ -28,12 +28,15 @@ import {
   type QiongqiCapabilitiesConfig
 } from '@qiongqi/contracts'
 import type { ApprovalPolicy, SandboxMode } from '@qiongqi/contracts'
+import type { OrchestrationMode } from '@qiongqi/loop'
 import {
   AgentCardSchema,
   type AgentCard,
   type SkillSummary
 } from '@qiongqi/contracts'
 import { TurnOrchestrator } from '@qiongqi/loop'
+import { EventedTurnOrchestrator } from '@qiongqi/loop'
+import { FileTurnStateStore } from '@qiongqi/loop'
 import { ContextCompactor } from '@qiongqi/loop'
 import type { TokenEconomyConfig } from '@qiongqi/loop'
 import {
@@ -137,6 +140,19 @@ export type QiongqiServeRuntimeOptions = {
    * with a different public URL).
    */
   agentCard?: AgentCard
+  /**
+   * Stage 3: orchestration mode for the turn loop.
+   *
+   * - `classic` (default) — the existing imperative
+   *   `TurnOrchestrator`, battle-tested, no behaviour change.
+   * - `evented` — the Stage-3 event-driven orchestrator with
+   *   `TurnState` persistence and crash recovery.
+   *
+   * This is a dual-run flag: both paths work, and the classic path
+   * remains the default until the evented path passes the full test
+   * suite.
+   */
+  orchestrationMode?: OrchestrationMode
 }
 
 export type QiongqiServeHandle = NodeHttpServerHandle & {

@@ -199,12 +199,24 @@
 
 ---
 
-## 阶段 3：TurnOrchestrator 事件化（未开始）
+## 阶段 3：TurnOrchestrator 事件化 🔄
 
-- [ ] `TurnStateGraph`（借鉴 LangGraph）
-- [ ] 事件总线重构
-- [ ] 崩溃恢复（durable state）
-- [ ] 灰度策略（A/B 对比）
+- [x] 事件化类型体系（`packages/loop/src/turn-event-types.ts`）：
+  - `TurnStateV1` — 可序列化 turn 状态（version/threadId/turnId/stepIndex/events/items/status）
+  - `TurnStepEvent` — 步级事件联合类型（step:start/prompt:built/model:ran/decision/tools:dispatched 等）
+  - `TurnStateSerializer` — 状态持久化接口（save/load/delete/list）
+  - `OrchestrationMode = 'classic' | 'evented'` — 双模式枚举
+- [x] `FileTurnStateStore`（`packages/loop/src/turn-state-store.ts`）：
+  - 基于文件的 `TurnStateSerializer` 实现
+  - 落盘到 `<dataDir>/<threadId>/turns/<turnId>/state.json`
+- [x] `EventedTurnOrchestrator` 骨架（`packages/loop/src/evented-turn-orchestrator.ts`）：
+  - 组合已有的 `TurnOrchestrator`，增加 turn 级状态持久化
+  - 崩溃检测：遗留 state.json 自动清理
+  - 完整事件驱动 loop 待后续迭代
+- [x] `QiongqiServeRuntimeOptions.orchestrationMode` 灰度选项
+- [ ] 完整事件驱动 loop（组件订阅发布）
+- [ ] 崩溃恢复（从 TurnStateV1 恢复未完成 turn）
+- [ ] 端到端验证（classic vs evented 一致性）
 - [ ] 端到端恢复验证
 
 ---
