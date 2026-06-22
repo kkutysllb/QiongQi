@@ -48,7 +48,7 @@
 | `@qiongqi/skills` | SkillRuntime + PluginHost | ✅ | 完成 |
 | `@qiongqi/memory` | MemoryStore + provider | ✅ | 完成 |
 | `@qiongqi/attachments` | AttachmentStore | ✅ | 完成 |
-| `@qiongqi/delegation` | DelegationRuntime + ChildExecutor + PeerRegistry | ✅ | 完成 |
+| `@qiongqi/delegation` | DelegationRuntime + PeerRegistry + SkillRegistry + TaskThreadMap | ✅ | 完成 |
 | `@qiongqi/http` | HTTP/SSE server + routes | ✅ | 完成 |
 | `@qiongqi/cli` | qiongqi 命令行入口 | ✅ | 完成 |
 | `@qiongqi/preset-coding` | 编码预设（系统提示词 + 默认配置） | ✅ | 完成 |
@@ -176,6 +176,8 @@
   - `RemotePeerTransport` 接口 — 远程 HTTP peer 传输（由 http 包实现，依赖反转）
   - `PeerRegistry` — 统一 `invokePeer(cardId, task)` 入口
   - `FilePeerStore` — 远程 peer 持久化到 `peers.json`
+- [x] `SkillRegistry`（`packages/delegation/src/skill-registry.ts`）：通用技能注册表，技能发现/注册/解绑/查询
+- [x] `TaskThreadMap`（`packages/delegation/src/task-thread-map.ts`）：Orchestrator 任务→子Agent线程映射，支持持久化恢复
 - [x] `GET /.well-known/agent-card.json` 端点：
   - 无需认证（RFC 8615 discovery 约定）
   - 自动构建或接受显式传入的 AgentCard
