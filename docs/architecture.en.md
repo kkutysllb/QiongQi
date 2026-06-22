@@ -263,6 +263,8 @@ Dependency direction is strictly one-way — any lower → upper reference is tr
 
 #### Layer 0 — Zero-dep Foundation
 
+> 📦 Detailed technical docs (Chinese): [`./packages/contracts.md`](./packages/contracts.md) · [`./packages/domain.md`](./packages/domain.md) · [`./packages/ports.md`](./packages/ports.md) · [`./packages/cache.md`](./packages/cache.md) · [`./packages/attachments.md`](./packages/attachments.md)
+
 **`@qiongqi/contracts`** — Zero dependencies. All Zod schemas and TypeScript types for HTTP/SSE interfaces, events, items, capability manifests, configs, and secret redaction.
 
 | Module | Content |
@@ -277,6 +279,8 @@ import { ThreadSchema, TurnSchema, UsageSnapshotSchema } from '@qiongqi/contract
 ```
 
 #### Layer 1 — Pure Domain
+
+> 📦 Detailed technical docs (Chinese): [`./packages/domain.md`](./packages/domain.md)
 
 **`@qiongqi/domain`** — Pure domain entities and value objects, **no I/O**.
 
@@ -296,6 +300,8 @@ import { createThreadRecord, makeToolResultItem } from '@qiongqi/domain'
 
 #### Layer 2 — Ports (Hexagonal)
 
+> 📦 Detailed technical docs (Chinese): [`./packages/ports.md`](./packages/ports.md)
+
 **`@qiongqi/ports`** — Abstract interfaces for all external dependencies. The engine never depends on concrete implementations.
 
 | Interface | Purpose |
@@ -313,6 +319,8 @@ import type { ModelClient, ToolHost, ThreadStore } from '@qiongqi/ports'
 ```
 
 #### Layer 3 — Infrastructure
+
+> 📦 Detailed technical docs (Chinese): [`./packages/cache.md`](./packages/cache.md) · [`./packages/attachments.md`](./packages/attachments.md) · [`./packages/adapter-fs.md`](./packages/adapter-fs.md) · [`./packages/tool-infra.md`](./packages/tool-infra.md)
 
 **`@qiongqi/cache`** — Cache infrastructure, immutable prefix, tool fingerprint, telemetry.
 
@@ -349,6 +357,8 @@ import { AttachmentStore } from '@qiongqi/attachments'
 
 #### Layer 4 — Engine
 
+> 📦 Detailed technical docs (Chinese): [`./packages/services-event-recorder.md`](./packages/services-event-recorder.md) · [`./packages/services-thread-turn.md`](./packages/services-thread-turn.md) · [`./packages/services-usage.md`](./packages/services-usage.md) · [`./packages/loop-orchestrator.md`](./packages/loop-orchestrator.md) · [`./packages/loop-prompt-and-context.md`](./packages/loop-prompt-and-context.md) · [`./packages/loop-tool-coordination.md`](./packages/loop-tool-coordination.md)
+
 **`@qiongqi/loop`** — Agent Loop core — turn orchestration, prompt building, continuation decisions, tool coordination.
 
 | Module | Content |
@@ -379,6 +389,8 @@ import { AttachmentStore } from '@qiongqi/attachments'
 > **Note**: `loop` and `services` depend on each other, but the cycle is broken via `import type`. See §4.2.
 
 #### Layer 5 — Adapters
+
+> 📦 Detailed technical docs (Chinese): [`./packages/adapter-storage.md`](./packages/adapter-storage.md) · [`./packages/adapter-model-client.md`](./packages/adapter-model-client.md) · [`./packages/adapter-model-pricing.md`](./packages/adapter-model-pricing.md) · [`./packages/adapter-tools-registry.md`](./packages/adapter-tools-registry.md) · [`./packages/adapter-tools-builtin.md`](./packages/adapter-tools-builtin.md) · [`./packages/adapter-tools-providers.md`](./packages/adapter-tools-providers.md)
 
 **`@qiongqi/adapter-model`** — Model client adapter (OpenAI-compatible API).
 
@@ -418,6 +430,8 @@ import { AttachmentStore } from '@qiongqi/attachments'
 
 #### Layer 6 — Capability Extensions
 
+> 📦 Detailed technical docs (Chinese): [`./packages/skills.md`](./packages/skills.md) · [`./packages/memory.md`](./packages/memory.md)
+
 **`@qiongqi/skills`** — Skill runtime, plugin host, skill-to-tool bridge.
 
 | Module | Content |
@@ -438,6 +452,8 @@ import { MemoryStore } from '@qiongqi/memory'
 
 #### Layer 7 — Delegation & Multi-Agent
 
+> 📦 Detailed technical docs (Chinese): [`./packages/delegation-runtime.md`](./packages/delegation-runtime.md) · [`./packages/delegation-registry.md`](./packages/delegation-registry.md)
+
 **`@qiongqi/delegation`** — Sub-agent delegation runtime, concurrency control, peer addressing.
 
 | Module | Content |
@@ -449,6 +465,8 @@ import { MemoryStore } from '@qiongqi/memory'
 | `task-thread-map` | `TaskThreadMap` (Stage 2) — task → child-agent thread map |
 
 #### Layer 8 — HTTP Service
+
+> 📦 Detailed technical docs (Chinese): [`./packages/http-transport.md`](./packages/http-transport.md) · [`./packages/http-composition-and-routes.md`](./packages/http-composition-and-routes.md)
 
 **`@qiongqi/http`** — HTTP/SSE server, routing, auth, Composition Root.
 
@@ -466,6 +484,8 @@ import { MemoryStore } from '@qiongqi/memory'
 
 #### Layer 9 — CLI
 
+> 📦 Detailed technical docs (Chinese): [`./packages/cli.md`](./packages/cli.md)
+
 **`@qiongqi/cli`** — `qiongqi` CLI entry point.
 
 | Subcommand | Function |
@@ -480,6 +500,8 @@ qiongqi serve --data-dir ~/.qiongqi/data --api-key $KEY --port 8899
 ```
 
 #### Layer 10 — Domain Preset
+
+> 📦 Detailed technical docs (Chinese): [`./packages/preset-coding.md`](./packages/preset-coding.md)
 
 **`@qiongqi/preset-coding`** — Coding preset. Assembles a software engineering Agent: system prompt + default tools + skills.
 

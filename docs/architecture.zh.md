@@ -260,6 +260,8 @@ Layer 10:              preset-coding
 
 #### Layer 0 — 零依赖基础层
 
+> 📦 详细技术文档：[`./packages/contracts.md`](./packages/contracts.md) · [`./packages/domain.md`](./packages/domain.md) · [`./packages/ports.md`](./packages/ports.md) · [`./packages/cache.md`](./packages/cache.md) · [`./packages/attachments.md`](./packages/attachments.md)
+
 **`@qiongqi/contracts`** — 零依赖。所有 HTTP/SSE 接口、事件、条目、能力清单、配置、密钥脱敏的 Zod schema 与 TypeScript 类型。
 
 | 模块 | 内容 |
@@ -274,6 +276,8 @@ import { ThreadSchema, TurnSchema, UsageSnapshotSchema } from '@qiongqi/contract
 ```
 
 #### Layer 1 — 纯领域层
+
+> 📦 详细技术文档：[`./packages/domain.md`](./packages/domain.md)
 
 **`@qiongqi/domain`** — 纯领域实体与值对象，**不含 I/O**。
 
@@ -293,6 +297,8 @@ import { createThreadRecord, makeToolResultItem } from '@qiongqi/domain'
 
 #### Layer 2 — 端口层（Hexagonal）
 
+> 📦 详细技术文档：[`./packages/ports.md`](./packages/ports.md)
+
 **`@qiongqi/ports`** — 所有外部依赖的抽象接口。Engine 永不依赖具体实现。
 
 | 接口 | 用途 |
@@ -310,6 +316,8 @@ import type { ModelClient, ToolHost, ThreadStore } from '@qiongqi/ports'
 ```
 
 #### Layer 3 — 基础设施层
+
+> 📦 详细技术文档：[`./packages/cache.md`](./packages/cache.md) · [`./packages/attachments.md`](./packages/attachments.md) · [`./packages/adapter-fs.md`](./packages/adapter-fs.md) · [`./packages/tool-infra.md`](./packages/tool-infra.md)
 
 **`@qiongqi/cache`** — 缓存基础设施、不可变前缀、工具指纹、遥测。
 
@@ -346,6 +354,8 @@ import { AttachmentStore } from '@qiongqi/attachments'
 
 #### Layer 4 — 引擎层
 
+> 📦 详细技术文档：[`./packages/services-event-recorder.md`](./packages/services-event-recorder.md) · [`./packages/services-thread-turn.md`](./packages/services-thread-turn.md) · [`./packages/services-usage.md`](./packages/services-usage.md) · [`./packages/loop-orchestrator.md`](./packages/loop-orchestrator.md) · [`./packages/loop-prompt-and-context.md`](./packages/loop-prompt-and-context.md) · [`./packages/loop-tool-coordination.md`](./packages/loop-tool-coordination.md)
+
 **`@qiongqi/loop`** — Agent Loop 核心——回合编排、prompt 构建、续行决策、工具协调。
 
 | 模块 | 内容 |
@@ -376,6 +386,8 @@ import { AttachmentStore } from '@qiongqi/attachments'
 > **注意**：`loop` 与 `services` 互相依赖，但通过 `import type` 打破值循环。详见 §4.2。
 
 #### Layer 5 — 适配器层
+
+> 📦 详细技术文档：[`./packages/adapter-storage.md`](./packages/adapter-storage.md) · [`./packages/adapter-model-client.md`](./packages/adapter-model-client.md) · [`./packages/adapter-model-pricing.md`](./packages/adapter-model-pricing.md) · [`./packages/adapter-tools-registry.md`](./packages/adapter-tools-registry.md) · [`./packages/adapter-tools-builtin.md`](./packages/adapter-tools-builtin.md) · [`./packages/adapter-tools-providers.md`](./packages/adapter-tools-providers.md)
 
 **`@qiongqi/adapter-model`** — 模型客户端适配器（OpenAI 兼容 API）。
 
@@ -415,6 +427,8 @@ import { AttachmentStore } from '@qiongqi/attachments'
 
 #### Layer 6 — 能力扩展层
 
+> 📦 详细技术文档：[`./packages/skills.md`](./packages/skills.md) · [`./packages/memory.md`](./packages/memory.md)
+
 **`@qiongqi/skills`** — Skill 运行时、插件宿主、技能工具桥接。
 
 | 模块 | 内容 |
@@ -435,6 +449,8 @@ import { MemoryStore } from '@qiongqi/memory'
 
 #### Layer 7 — 委派与多 Agent 层
 
+> 📦 详细技术文档：[`./packages/delegation-runtime.md`](./packages/delegation-runtime.md) · [`./packages/delegation-registry.md`](./packages/delegation-registry.md)
+
 **`@qiongqi/delegation`** — 子代理委派运行时、并发控制、peer 寻址。
 
 | 模块 | 内容 |
@@ -446,6 +462,8 @@ import { MemoryStore } from '@qiongqi/memory'
 | `task-thread-map` | `TaskThreadMap`（Stage 2）— 任务→子 Agent 线程映射 |
 
 #### Layer 8 — HTTP 服务层
+
+> 📦 详细技术文档：[`./packages/http-transport.md`](./packages/http-transport.md) · [`./packages/http-composition-and-routes.md`](./packages/http-composition-and-routes.md)
 
 **`@qiongqi/http`** — HTTP/SSE 服务器、路由、鉴权、Composition Root。
 
@@ -463,6 +481,8 @@ import { MemoryStore } from '@qiongqi/memory'
 
 #### Layer 9 — CLI 层
 
+> 📦 详细技术文档：[`./packages/cli.md`](./packages/cli.md)
+
 **`@qiongqi/cli`** — `qiongqi` 命令行入口。
 
 | 子命令 | 功能 |
@@ -477,6 +497,8 @@ qiongqi serve --data-dir ~/.qiongqi/data --api-key $KEY --port 8899
 ```
 
 #### Layer 10 — 领域预设层
+
+> 📦 详细技术文档：[`./packages/preset-coding.md`](./packages/preset-coding.md)
 
 **`@qiongqi/preset-coding`** — 编码预设。组装软件工程 Agent：系统提示 + 默认工具 + 技能挂载。
 
