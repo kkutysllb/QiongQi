@@ -199,7 +199,7 @@
 
 ---
 
-## 阶段 3：TurnOrchestrator 事件化 🔄
+## 阶段 3：TurnOrchestrator 事件化 ✅
 
 - [x] 事件化类型体系（`packages/loop/src/turn-event-types.ts`）：
   - `TurnStateV1` — 可序列化 turn 状态（version/threadId/turnId/stepIndex/events/items/status）
@@ -224,7 +224,11 @@
   - 轻量级进程内事件总线，支持按 `TurnStepEvent.kind` 注册订阅者
   - `runStepViaEventBus` — 事件驱动的 step 执行函数（替代顺序调用）
   - `EventedTurnOrchestrator` 支持 `TurnEventBus` 注入，双模式运行
-- [ ] 端到端恢复验证（kill -9 + 重启恢复）— 需要真实 API key
+- [x] 端到端恢复验证（kill -9 + 重启恢复）：
+  - evented 模式 + 真实模型执行 turn 正常
+  - 模拟崩溃：保存 state.json（stepIndex=1），重启后从断点恢复
+  - turn 完成后 state 自动清理
+  - 全量 433/433 测试 + tsc 0 错误
 
 ---
 

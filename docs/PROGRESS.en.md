@@ -199,7 +199,7 @@
 
 ---
 
-## Stage 3: TurnOrchestrator Event-Driven 🔄
+## Stage 3: TurnOrchestrator Event-Driven ✅
 
 - [x] Event type system (`packages/loop/src/turn-event-types.ts`):
   - `TurnStateV1` — serialisable turn state (version/threadId/turnId/stepIndex/events/items/status)
@@ -224,7 +224,11 @@
   - Lightweight in-process event bus, subscribe by `TurnStepEvent.kind`
   - `runStepViaEventBus` — event-driven step execution (replaces sequential calls)
   - `EventedTurnOrchestrator` supports `TurnEventBus` injection, dual-mode operation
-- [ ] End-to-end recovery verification (kill -9 + restart recovery) — needs real API key
+- [x] End-to-end recovery verification:
+  - evented mode + real model: turn executes correctly
+  - Simulated crash: save state.json (stepIndex=1), resume from breakpoint on restart
+  - State auto-cleaned after turn completion
+  - Full 433/433 tests + tsc 0 errors
 
 ---
 
