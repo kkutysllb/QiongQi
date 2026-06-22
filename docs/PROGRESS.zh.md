@@ -15,7 +15,7 @@
 | 指标 | 当前值 | 目标 |
 |------|--------|------|
 | 全量测试 | 433/433 ✅ | 全绿 |
-| 包构建 | 16/16 ✅ | 全绿 |
+| 包构建 | 18/18 ✅ | 全绿 |
 | 端到端（serve + curl） | ✅ | 通过 |
 
 ---
@@ -30,7 +30,7 @@
 - [x] 各包 `tsconfig.json` + `tsconfig.build.json` 配置 paths 映射
 - [x] `scripts/flatten-dist.mjs` 后处理脚本（拍平嵌套 dist 输出）
 
-### 1.2 包划分（16 个包）✅
+### 1.2 包划分（18 个包）✅
 
 175 个源文件 + 5 个 CLI 文件迁移完成，全部 import 重写为 `@qiongqi/*` 格式。
 
@@ -48,6 +48,8 @@
 | `@qiongqi/skills` | SkillRuntime + PluginHost | ✅ | 完成 |
 | `@qiongqi/memory` | MemoryStore + provider | ✅ | 完成 |
 | `@qiongqi/attachments` | AttachmentStore | ✅ | 完成 |
+| `@qiongqi/adapter-fs` | 纯 FS I/O 工具 | ✅ | 完成 |
+| `@qiongqi/tool-infra` | 工具执行基础设施 | ✅ | 完成 |
 | `@qiongqi/delegation` | DelegationRuntime + PeerRegistry + SkillRegistry + TaskThreadMap | ✅ | 完成 |
 | `@qiongqi/http` | HTTP/SSE server + routes | ✅ | 完成 |
 | `@qiongqi/cli` | qiongqi 命令行入口 | ✅ | 完成 |
@@ -150,7 +152,7 @@
 
 ### 1.8 交付物 ✅
 
-- [x] 16 个独立 npm 包，各自 `package.json` + `tsconfig.json` + `tsconfig.build.json`：
+- [x] 18 个独立 npm 包，各自 `package.json` + `tsconfig.json` + `tsconfig.build.json`：
   - 所有包补全顶层 `types: ./dist/index.d.ts`（兼容旧 TS / 工具）
   - 所有包 `exports` 包含 `types` + `import` 双子字段
   - 所有包 `.d.ts` 类型声明文件正确生成（11~71 行不等）
@@ -158,7 +160,7 @@
 - [x] `createAgent` / `createHttpServer` 公共 API 文档（JSDoc）见 1.4
 - [x] preset-coding 包验证：外部消费模拟测试通过（`createCodingAgent` / `CODING_SYSTEM_PROMPT` / `CODING_PINNED_CONSTRAINTS` 导出正常）
 - [x] 全量测试 + 端到端验证通过：
-  - 16 包构建全绿 + 433/433 测试全绿 + tsc 0 错误
+  - 18 包构建全绿 + 433/433 测试全绿 + tsc 0 错误
   - bin 入口启动成功（`agentName=Qiongqi Coding`）
   - Health check / Runtime info / Thread CRUD 全通过
 
@@ -236,12 +238,17 @@
 - [x] `TurnEventBus` + `runStepViaEventBus`（`packages/loop/src/turn-event-bus.ts`）：
   - 轻量级进程内事件总线，支持按 `TurnStepEvent.kind` 注册订阅者
   - `runStepViaEventBus` — 事件驱动的 step 执行函数（替代顺序调用）
+  - step 边界已发布 `step:start` / `step:end`，订阅者可观察事件化回合边界
   - `EventedTurnOrchestrator` 支持 `TurnEventBus` 注入，双模式运行
 - [x] 端到端恢复验证（kill -9 + 重启恢复）：
   - evented 模式 + 真实模型执行 turn 正常
   - 模拟崩溃：保存 state.json（stepIndex=1），重启后从断点恢复
   - turn 完成后 state 自动清理
   - 全量 433/433 测试 + tsc 0 错误
+- [x] `scripts/verify-evented-a2a.mjs` 本地双实例验证：
+  - 启动本地 fake model + 两个 evented Qiongqi HTTP runtime
+  - 覆盖 AgentCard 发现、A2A task lifecycle、artifacts、SSE subscribe
+  - 验证 evented turn state 在 A2A turn 完成后清理
 
 ---
 
@@ -255,19 +262,53 @@
 - [x] `FileA2ATaskStore`（`packages/http/src/a2a-task-store.ts`）
   - 持久化到 `<dataDir>/a2a-tasks/<id>.json`
 - [x] A2A 端点升级：
-  - `POST /a2a/tasks` — 创建任务、执行 turn、返回 task+artifact
+  - `POST /a2a/tasks` — 创建任务、启动后台 turn、快速返回 202 + task
   - `GET /a2a/tasks/{id}` — 查询任务状态
-  - 旧 `POST /a2a` 向后兼容（委托新端点）
+  - 旧 `POST /a2a` 保持同步兼容，返回旧 PeerArtifact 语义
 - [x] `ServerRuntime.a2aTaskStore` 注入
-- [x] `POST /a2a/tasks/{id}/cancel` — 取消待处理/运行中任务
+- [x] `POST /a2a/tasks/{id}/cancel` — 取消待处理/运行中任务，并通过 runtime hook 中断关联 turn；后台完成不会覆盖 cancelled 终态
 - [x] `GET /a2a/tasks/{id}/artifacts` — 从任务关联 thread 获取 turn items
 - [x] `GET /a2a/tasks/{id}/subscribe` — SSE 事件流（已完成立即推送，进行中轮询+eventBus 订阅）
 - [x] `ArtifactSchema` + `mapItemsToArtifacts()` — A2A Artifact ↔ TurnItem 桥接（`packages/contracts/src/a2a-artifact.ts`）
   - assistant_text→text/markdown, tool_result→application/json, error→text/plain
   - a2aCreateTask 响应含 `artifacts` 数组
+- [x] `HttpPeerTransport` 兼容旧 `PeerArtifact` 响应与 Stage 4 `{ task, artifact, artifacts }` 响应
 - [ ] `A2APeerAdapter` — 已由 HttpPeerTransport 覆盖
-- [ ] 跨厂商互操作验证
-- [ ] 端到端跨实例协作验证
+- [ ] 跨厂商互操作验证（移入 P2：需要真实外部 peer/厂商对端）
+- [x] 端到端跨实例协作验证（本地 fake model 双实例；外部 peer 仍需真实对端）
+
+## P1：生产运行面 🔄
+
+- [x] `GET /ready` 就绪检查：
+  - 无需鉴权，区别于 `/health` 的 liveness
+  - 暴露 storage degraded 状态，hybrid SQLite fallback 可见
+- [x] `GET /v1/runtime/metrics` 运行指标：
+  - Bearer 鉴权
+  - 默认 JSON，支持 `?format=prometheus` / `Accept: text/plain` 导出 Prometheus text
+  - 汇总 token/cache usage、A2A task 状态计数、storage diagnostics
+- [x] `HybridThreadStore.diagnostics()`：
+  - 暴露 `backend=hybrid`、SQLite path、SQLite 可用性与 fallback reason
+  - runtime factory 注入 `ServerRuntime.storageDiagnostics`
+- [x] 结构化日志 / request id：
+  - `dispatchRequest` 自动生成或复用 `x-request-id`，并回写响应头
+  - `startNodeHttpServer` / `createHttpServer` 支持 `accessLog` sink，输出无敏感 header 的结构化 access log
+- [x] Prometheus exporter：
+  - `/v1/runtime/metrics?format=prometheus` 导出 `qiongqi_usage_*`、`qiongqi_cache_hit_rate`、`qiongqi_a2a_tasks_total`、`qiongqi_storage_degraded`
+- [x] CI 与生产部署说明：
+  - GitHub Actions 覆盖 SQLite native binding build+verify、typecheck、fast tests、build、flatten、evented A2A
+  - `docs/deployment.zh.md` 记录探针、Prometheus scrape、hybrid storage gate、结构化日志与 A2A 验证
+  - 提供 `Dockerfile`、`docker-compose.yml`、Kubernetes manifest 与 Prometheus alert rules
+- [x] Trace id / OpenTelemetry-compatible propagation:
+  - 支持 W3C `traceparent` 透传
+  - access log 输出 `traceparent`、`traceId`、`spanId`，可接入 OTel collector/logger
+
+## P2：跨实例互操作与可观测性深化
+
+- [ ] 真实外部 A2A peer / 跨厂商互操作验证：
+  - 复用 `pnpm run verify:evented-a2a -- --external-peer`
+  - 需要 `QIONGQI_A2A_PEER_URL` / `QIONGQI_A2A_PEER_TOKEN` 指向真实对端
+- [ ] 完整 OpenTelemetry SDK exporter：
+  - 在已具备 `traceparent` 传播基础上补 span lifecycle/exporter
 
 | `@qiongqi/adapter-fs` | 文件系统基础能力（read/write/edit/grep/find/ls/bash） | ✅ | 新增 |
 | `@qiongqi/tool-infra` | 工具执行基础设施（hooks/rate-limit/mutation-queue） | ✅ | 新增 |

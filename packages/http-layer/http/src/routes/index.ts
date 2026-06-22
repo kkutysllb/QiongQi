@@ -1,5 +1,5 @@
 import { Router } from '../router.js'
-import { healthJsonResponse } from './health.js'
+import { healthJsonResponse, readinessJsonResponse } from './health.js'
 import { buildWorkspaceStatusResponse } from './workspace.js'
 import {
   createThread,
@@ -28,9 +28,9 @@ import { decideApproval } from './approvals.js'
 import { resolveUserInput } from './user-inputs.js'
 import { resumeSession } from './sessions.js'
 import { usageJsonResponse } from './usage.js'
-import { runtimeInfoJsonResponse, runtimeToolDiagnosticsJsonResponse } from './runtime-info.js'
+import { runtimeInfoJsonResponse, runtimeToolDiagnosticsJsonResponse, runtimeMetricsResponse } from './runtime-info.js'
 import { agentCardJsonResponse } from './agent-card.js'
-import { a2aCreateTask, a2aGetTask, a2aCancelTask, a2aGetArtifacts, a2aSubscribeTask } from './a2a.js'
+import { a2aCreateTask, a2aCreateTaskSync, a2aGetTask, a2aCancelTask, a2aGetArtifacts, a2aSubscribeTask } from './a2a.js'
 import { listSkills } from './skills.js'
 import {
   attachmentDiagnostics,
@@ -86,6 +86,7 @@ import type { ServerRuntime } from './server-runtime.js'
 export function buildRouter(runtime: ServerRuntime): Router {
   const router = new Router()
   router.add('GET', '/health', () => healthJsonResponse())
+  router.add('GET', '/ready', () => readinessJsonResponse(runtime))
   // Stage 2: A2A discovery — public, unauthenticated by RFC 8615 convention.
   router.add('GET', '/.well-known/agent-card.json', () => agentCardJsonResponse(runtime))
   // Stage 4: A2A task submission with status tracking.
@@ -104,7 +105,7 @@ export function buildRouter(runtime: ServerRuntime): Router {
   router.add('POST', '/a2a/tasks/:id/cancel', async (request, ctx) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
-    return a2aCancelTask(runtime.a2aTaskStore, ctx.params.id)
+    return a2aCancelTask(runtime, runtime.a2aTaskStore, ctx.params.id)
   })
   // Stage 4: retrieve task artifacts (turn items).
   router.add('GET', '/a2a/tasks/:id/artifacts', async (request, ctx) => {
@@ -122,7 +123,7 @@ export function buildRouter(runtime: ServerRuntime): Router {
   router.add('POST', '/a2a', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     if (!runtime.a2aTaskStore) return ERRORS.unavailable('A2A task store not configured')
-    return a2aCreateTask(runtime, runtime.a2aTaskStore, request)
+    return a2aCreateTaskSync(runtime, runtime.a2aTaskStore, request)
   })
   router.add('GET', '/v1/runtime/info', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
@@ -131,6 +132,10 @@ export function buildRouter(runtime: ServerRuntime): Router {
   router.add('GET', '/v1/runtime/tools', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     return runtimeToolDiagnosticsJsonResponse(runtime)
+  })
+  router.add('GET', '/v1/runtime/metrics', async (request) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    return runtimeMetricsResponse(request, runtime)
   })
   router.add('GET', '/v1/skills', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()

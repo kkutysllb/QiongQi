@@ -31,7 +31,7 @@
 | `JsonResponse` | type | `response.ts` | `{ status, headers, body }` |
 | `jsonResponse(body, status?)` | function | `response.ts` | 构造 JSON 响应 |
 | `HttpServerOptions` / `dispatchRequest(router, request)` | function | `http-server.ts` | 派发请求到路由 |
-| `startNodeHttpServer({ router, host, port })` | function (async) | `node-http-server.ts` | 启动 Node HTTP 服务器 |
+| `startNodeHttpServer({ router, host, port, accessLog? })` | function (async) | `node-http-server.ts` | 启动 Node HTTP 服务器，可注入结构化 access log sink |
 | `NodeHttpServerHandle` | type | `node-http-server.ts` | `{ server, host, port, close() }` |
 | `readJsonBody(request)` | function (async) | `read-json-body.ts` | 读 + 解析 JSON body（容错）|
 | `ReadJsonBodyResult` | type | `read-json-body.ts` | `{ ok: true; value } \| { ok: false; response }` |
@@ -97,7 +97,12 @@ router.add('GET', '/v1/threads/:id', async (req, ctx) => {
 })
 
 // 2. 启动 Node 服务器
-const handle = await startNodeHttpServer({ router, host: '127.0.0.1', port: 8899 })
+const handle = await startNodeHttpServer({
+  router,
+  host: '127.0.0.1',
+  port: 8899,
+  accessLog: (entry) => console.log(JSON.stringify(entry))
+})
 
 // 3. SSE
 function sseHandler(events: RuntimeEvent[]): Response {

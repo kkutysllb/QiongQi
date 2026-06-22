@@ -142,6 +142,7 @@ export class EventedTurnOrchestrator {
 
         const stepStatus = this.eventBus
           ? await runStepViaEventBus({
+              eventBus: this.eventBus,
               threadId, turnId, signal,
               deps: {
                 promptBuilder: this.promptBuilder,

@@ -78,6 +78,7 @@ export class HybridThreadStore implements ThreadStore {
   private readonly readyPromise: Promise<void>
   private readonly metadataQueues = new Map<string, Promise<void>>()
   private db: BetterSqliteDatabase | null = null
+  private sqliteFallbackReason: string | undefined
 
   constructor(options: { dataDir: string; sqlitePath?: string; nowIso?: () => string }) {
     this.dataDir = resolve(options.dataDir, 'threads')
@@ -95,6 +96,26 @@ export class HybridThreadStore implements ThreadStore {
       this.db?.close()
     } finally {
       this.db = null
+    }
+  }
+
+  diagnostics(): {
+    backend: 'hybrid'
+    available: boolean
+    degraded: boolean
+    reason?: string
+    sqlite: { available: boolean; path: string; reason?: string }
+  } {
+    return {
+      backend: 'hybrid',
+      available: true,
+      degraded: !this.db,
+      ...(this.sqliteFallbackReason ? { reason: this.sqliteFallbackReason } : {}),
+      sqlite: {
+        available: Boolean(this.db),
+        path: this.sqlitePath,
+        ...(this.sqliteFallbackReason ? { reason: this.sqliteFallbackReason } : {})
+      }
     }
   }
 
@@ -188,7 +209,8 @@ export class HybridThreadStore implements ThreadStore {
       this.migrate()
       await this.backfill()
     } catch (error) {
-      warnSqlite('initialize', error)
+      this.sqliteFallbackReason = sqliteWarningMessage('initialize', error)
+      warnSqliteMessage(this.sqliteFallbackReason)
       try {
         this.db?.close()
       } catch {
@@ -874,6 +896,14 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 function warnSqlite(action: string, error: unknown): void {
+  warnSqliteMessage(sqliteWarningMessage(action, error))
+}
+
+function sqliteWarningMessage(action: string, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
-  console.warn(`[qiongqi] hybrid sqlite ${action} failed; using JSONL fallback: ${message}`)
+  return `hybrid sqlite ${action} failed; using JSONL fallback: ${message}`
+}
+
+function warnSqliteMessage(message: string): void {
+  console.warn(`[qiongqi] ${message}`)
 }

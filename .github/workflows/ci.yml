@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SQLite native binding
+        run: pnpm run prepare:sqlite
+
+      - name: Verify SQLite native binding
+        run: pnpm run verify:sqlite
+
+      - name: Typecheck
+        run: pnpm -r run typecheck
+
+      - name: Fast tests
+        run: pnpm test:fast
+
+      - name: Build packages
+        run: pnpm -r run build
+
+      - name: Flatten package dist
+        run: node scripts/flatten-dist.mjs
+
+      - name: Evented A2A verification
+        run: pnpm run verify:evented-a2a

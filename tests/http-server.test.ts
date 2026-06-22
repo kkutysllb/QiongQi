@@ -25,6 +25,32 @@ describe('HTTP server', () => {
     expect(body).toEqual({ status: 'ok', service: 'qiongqi', mode: 'serve' })
   })
 
+  it('returns readiness with degraded storage diagnostics without auth', async () => {
+    const h = buildHarness()
+    h.runtime.storageDiagnostics = () => ({
+      backend: 'hybrid',
+      available: true,
+      degraded: true,
+      reason: 'sqlite native binding unavailable',
+      sqlite: { available: false, path: '/tmp/index.sqlite3' }
+    })
+
+    const response = await dispatchRequest(h.router, new Request('http://localhost/ready'))
+
+    expect(response.status).toBe(200)
+    await expect(readJson(response)).resolves.toMatchObject({
+      status: 'degraded',
+      service: 'qiongqi',
+      checks: {
+        storage: {
+          backend: 'hybrid',
+          degraded: true,
+          sqlite: { available: false }
+        }
+      }
+    })
+  })
+
   it('returns runtime info with disabled capability defaults', async () => {
     const h = buildHarness()
     const response = await dispatchRequest(
@@ -166,6 +192,147 @@ describe('HTTP server', () => {
     )
 
     expect(response.status).toBe(401)
+  })
+
+  it('submits A2A tasks asynchronously and completes them in the background', async () => {
+    const h = buildHarness()
+    const records = new Map<string, unknown>()
+    h.runtime.a2aTaskStore = {
+      async upsert(record: { id: string }) {
+        records.set(record.id, structuredClone(record))
+      },
+      async get(id: string) {
+        return records.get(id) as never
+      },
+      async list() {
+        return Array.from(records.values()) as never
+      }
+    } as never
+    h.runtime.agentCard = {
+      id: 'qiongqi:test-b',
+      url: 'http://localhost',
+      name: 'Test B',
+      version: '0.1.0',
+      skills: [],
+      capabilities: h.runtime.info().capabilities,
+      model: {
+        provider: 'fake',
+        defaultModel: 'fake-model',
+        endpointFormats: ['chat_completions']
+      },
+      endpoints: {
+        wellKnown: '/.well-known/agent-card.json',
+        a2a: '/a2a',
+        mcp: '/mcp'
+      }
+    }
+    let completed = false
+    h.runtime.runTurn = async (threadId, turnId) => {
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      await h.sessionStore.appendItem(threadId, makeAssistantTextItem({
+        id: 'item_a2a_done',
+        threadId,
+        turnId,
+        text: 'background A2A finished',
+        status: 'completed'
+      }))
+      completed = true
+      return 'completed'
+    }
+
+    const submit = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/a2a/tasks', {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-1', 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'run async task', label: 'async-a2a' })
+      })
+    )
+
+    expect(submit.status).toBe(202)
+    expect(completed).toBe(false)
+    const body = await readJson(submit) as { task: { id: string; status: string; threadId?: string; turnId?: string } }
+    expect(body.task.status).toBe('working')
+    expect(body.task.threadId).toBeTruthy()
+    expect(body.task.turnId).toBeTruthy()
+
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const lookup = await dispatchRequest(
+      h.router,
+      new Request(`http://localhost/a2a/tasks/${body.task.id}`, {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+    expect(lookup.status).toBe(200)
+    await expect(readJson(lookup)).resolves.toMatchObject({
+      id: body.task.id,
+      status: 'completed',
+      summary: 'background A2A finished'
+    })
+  })
+
+  it('cancels a running A2A task through the runtime turn hook', async () => {
+    const h = buildHarness()
+    const records = new Map<string, unknown>()
+    h.runtime.a2aTaskStore = {
+      async upsert(record: { id: string }) {
+        records.set(record.id, structuredClone(record))
+      },
+      async get(id: string) {
+        return records.get(id) as never
+      },
+      async list() {
+        return Array.from(records.values()) as never
+      }
+    } as never
+    let cancelInput: { threadId: string; turnId: string } | undefined
+    h.runtime.cancelA2ATaskTurn = async (input) => {
+      cancelInput = input
+    }
+    h.runtime.runTurn = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      return 'completed'
+    }
+
+    const submit = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/a2a/tasks', {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-1', 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'cancel me' })
+      })
+    )
+    const submitted = await readJson(submit) as { task: { id: string; threadId: string; turnId: string } }
+
+    const cancel = await dispatchRequest(
+      h.router,
+      new Request(`http://localhost/a2a/tasks/${submitted.task.id}/cancel`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(cancel.status).toBe(200)
+    expect(cancelInput).toEqual({
+      threadId: submitted.task.threadId,
+      turnId: submitted.task.turnId
+    })
+    await expect(readJson(cancel)).resolves.toMatchObject({
+      id: submitted.task.id,
+      status: 'cancelled'
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 130))
+    const lookup = await dispatchRequest(
+      h.router,
+      new Request(`http://localhost/a2a/tasks/${submitted.task.id}`, {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+    await expect(readJson(lookup)).resolves.toMatchObject({
+      id: submitted.task.id,
+      status: 'cancelled'
+    })
   })
 
   it('lists discovered skills through the HTTP layer', async () => {
@@ -950,6 +1117,71 @@ describe('HTTP server', () => {
     expect(response.status).toBe(200)
     const body = (await readJson(response)) as { total: { promptTokens: number } }
     expect(body.total.promptTokens).toBe(5)
+  })
+
+  it('returns runtime metrics with usage, cache, A2A, and storage summaries', async () => {
+    const h = buildHarness()
+    h.runtime.storageDiagnostics = () => ({
+      backend: 'hybrid',
+      available: true,
+      degraded: true,
+      reason: 'sqlite native binding unavailable',
+      sqlite: { available: false, path: '/tmp/index.sqlite3' }
+    })
+    h.runtime.a2aTaskStore = {
+      async upsert() {},
+      async get() {
+        return undefined
+      },
+      async list() {
+        return [
+          { id: 'a', senderCardId: 'x', prompt: 'one', status: 'completed', createdAt: '2026-06-22T00:00:00.000Z', updatedAt: '2026-06-22T00:00:01.000Z' },
+          { id: 'b', senderCardId: 'x', prompt: 'two', status: 'cancelled', createdAt: '2026-06-22T00:00:00.000Z', updatedAt: '2026-06-22T00:00:01.000Z' }
+        ] as never
+      }
+    } as never
+    h.runtime.usageService.record('thr_1', {
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+      cachedTokens: 6,
+      cacheHitTokens: 6,
+      cacheMissTokens: 4,
+      cacheHitRate: 0.6,
+      turns: 2
+    })
+
+    const response = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/runtime/metrics', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(response.status).toBe(200)
+    await expect(readJson(response)).resolves.toMatchObject({
+      service: 'qiongqi',
+      usage: {
+        promptTokens: 10,
+        completionTokens: 5,
+        totalTokens: 15,
+        turns: 2
+      },
+      cache: {
+        cachedTokens: 6,
+        cacheHitTokens: 6,
+        cacheMissTokens: 4,
+        cacheHitRate: 0.6
+      },
+      a2a: {
+        total: 2,
+        byStatus: { completed: 1, cancelled: 1 }
+      },
+      storage: {
+        backend: 'hybrid',
+        degraded: true
+      }
+    })
   })
 
   it('returns live thread-grouped usage buckets from /v1/usage?group_by=thread', async () => {

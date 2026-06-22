@@ -84,24 +84,53 @@ pnpm -r run build
 node scripts/flatten-dist.mjs  # Flatten build output
 ```
 
+Before using `hybrid` storage in production or CI, run `pnpm run prepare:sqlite && pnpm run verify:sqlite` to build and verify that the `better-sqlite3` native binding can be loaded.
+
+Verify the evented orchestrator + two-instance A2A path:
+
+```bash
+pnpm -r run build
+node scripts/flatten-dist.mjs
+pnpm run verify:evented-a2a
+```
+
+The script covers async `POST /a2a/tasks` submission, polling to task completion, artifacts, SSE subscribe, and evented turn-state cleanup.
+
 ### Start the Runtime
 
 ```bash
 npx tsx packages/cli/src/serve-entry.ts serve \
   --data-dir ~/.qiongqi/data \
-  --api-key "$DEEPSEEK_API_KEY" \
+  --base-url "$QIONGQI_BASE_URL" \
+  --api-key "$QIONGQI_API_KEY" \
   --port 8899
 ```
 
 After startup, the HTTP API is available at `http://127.0.0.1:8899`.
 
+Production probes and runtime metrics:
+
+```bash
+curl http://127.0.0.1:8899/health
+curl http://127.0.0.1:8899/ready
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  http://127.0.0.1:8899/v1/runtime/metrics
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  -H "Accept: text/plain" \
+  "http://127.0.0.1:8899/v1/runtime/metrics?format=prometheus"
+```
+
+`/ready` exposes storage degraded state; `/v1/runtime/metrics` returns JSON by default and can also export Prometheus text for token/cache usage, A2A tasks, and storage diagnostics.
+
 ### Script Reference
 
 ```bash
 pnpm -r run build          # Build all 18 packages
+pnpm run prepare:sqlite    # Build the better-sqlite3 native binding for the current Node ABI
+pnpm run verify:sqlite     # Verify the better-sqlite3 native binding for hybrid storage
+pnpm run verify:evented-a2a # Local fake-model two-instance evented + A2A verification
 pnpm test                  # Full test suite (Vitest)
 pnpm test:unit             # Unit tests
-pnpm test:integration      # Integration tests
 pnpm test:fast             # Fast test subset
 ```
 
@@ -144,7 +173,7 @@ pnpm test:fast             # Fast test subset
 
 ## 📦 Monorepo Package Structure
 
-Qiongqi uses a pnpm monorepo structure with 16 independent npm packages:
+Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 
 | Package | Responsibility |
 |---------|---------------|
@@ -160,6 +189,8 @@ Qiongqi uses a pnpm monorepo structure with 16 independent npm packages:
 | `@qiongqi/skills` | SkillRuntime + PluginHost |
 | `@qiongqi/memory` | Cross-session memory storage |
 | `@qiongqi/attachments` | Attachment management |
+| `@qiongqi/adapter-fs` | Pure filesystem I/O utilities |
+| `@qiongqi/tool-infra` | Tool execution infrastructure |
 | `@qiongqi/delegation` | Child agent delegation runtime |
 | `@qiongqi/http` | HTTP/SSE server |
 | `@qiongqi/cli` | CLI entry point |
@@ -236,6 +267,7 @@ Qiongqi uses a pnpm monorepo structure with 16 independent npm packages:
 |----------|----------|
 | **Refactoring Progress** | [`docs/PROGRESS.en.md`](./docs/PROGRESS.en.md) |
 | **Architecture Overview** | [`docs/architecture.en.md`](./docs/architecture.en.md) |
+| **Deployment** | [`docs/deployment.en.md`](./docs/deployment.en.md) |
 | **Package Dependencies** | [`docs/architecture.en.md#appendix-a-complete-dependency-table`](./docs/architecture.en.md) |
 | **Package Guide** | [`docs/architecture.en.md#3-package-structure`](./docs/architecture.en.md) |
 | **Design Specs** | [`docs/superpowers/specs/`](./docs/superpowers/specs/) |
@@ -245,15 +277,14 @@ Qiongqi uses a pnpm monorepo structure with 16 independent npm packages:
 
 ## 🗺️ Roadmap
 
-Qiongqi is undergoing a four-stage architecture refactoring, currently in
-Stage 1:
+Qiongqi's four-stage architecture refactoring currently stands at:
 
 | Stage | Goal | Status |
 |-------|------|--------|
-| **Stage 1** | SDK extraction + monorepo split | In progress |
-| **Stage 2** | AgentCard + AgentIdentity | Not started |
-| **Stage 3** | TurnOrchestrator event-driven | Not started |
-| **Stage 4** | A2A protocol endpoint | Not started |
+| **Stage 1** | SDK extraction + monorepo split | Complete |
+| **Stage 2** | AgentCard + AgentIdentity | Complete |
+| **Stage 3** | TurnOrchestrator event-driven | Complete |
+| **Stage 4** | A2A protocol endpoint | Nearly complete; awaiting external Agent cross-vendor interop verification |
 
 Detailed progress: [`docs/PROGRESS.en.md`](./docs/PROGRESS.en.md).
 

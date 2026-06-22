@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import type { Router } from './router.js'
-import { dispatchRequest } from './http-server.js'
+import { dispatchRequest, type DispatchRequestOptions } from './http-server.js'
 
 export type NodeHttpServerHandle = {
   server: Server
@@ -14,9 +14,10 @@ export async function startNodeHttpServer(input: {
   router: Router
   host: string
   port: number
+  accessLog?: DispatchRequestOptions['accessLog']
 }): Promise<NodeHttpServerHandle> {
   const server = createServer((request, response) => {
-    void handleNodeRequest(input.router, request, response)
+    void handleNodeRequest(input.router, request, response, { accessLog: input.accessLog })
   })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
@@ -41,11 +42,12 @@ export async function startNodeHttpServer(input: {
 async function handleNodeRequest(
   router: Router,
   incoming: IncomingMessage,
-  outgoing: ServerResponse
+  outgoing: ServerResponse,
+  options: DispatchRequestOptions = {}
 ): Promise<void> {
   try {
     const request = toFetchRequest(incoming)
-    const response = await dispatchRequest(router, request)
+    const response = await dispatchRequest(router, request, options)
     await writeFetchResponse(outgoing, response)
   } catch (error) {
     const body = JSON.stringify({

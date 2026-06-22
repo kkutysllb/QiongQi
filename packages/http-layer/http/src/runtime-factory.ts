@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { buildRouter } from './routes/index.js'
 import type { ServerRuntime } from './routes/server-runtime.js'
 import { startNodeHttpServer, type NodeHttpServerHandle } from './node-http-server.js'
+import type { DispatchRequestOptions } from './http-server.js'
 import { FileAttachmentStore } from '@qiongqi/attachments'
 import { InMemoryApprovalGate } from '@qiongqi/adapter-storage'
 import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
@@ -190,6 +191,13 @@ export interface CoreRuntime {
   events: RuntimeEventRecorder
   turnService: TurnService
   threadService: ThreadService
+  storageDiagnostics: () => {
+    backend: string
+    available: boolean
+    degraded: boolean
+    reason?: string
+    sqlite?: { available: boolean; path?: string; reason?: string }
+  }
   storesShutdown?: () => Promise<void>
 }
 
@@ -279,6 +287,7 @@ export async function createCore(
     events,
     turnService,
     threadService,
+    storageDiagnostics: stores.diagnostics,
     storesShutdown: stores.shutdown
   }
 }
@@ -796,9 +805,13 @@ async function assembleRuntime(input: {
     runTurn(threadId, turnId) {
       return loop.runTurn(threadId, turnId)
     },
+    async cancelA2ATaskTurn(input) {
+      await core.turnService.interruptTurn({ ...input, discard: false })
+    },
     runReview(input: Parameters<ReviewService['runReview']>[0]) {
       return reviewService.runReview(input)
     },
+    storageDiagnostics: core.storageDiagnostics,
     runtimeToken: options.runtimeToken,
     insecure: options.insecure,
     allocateSeq: core.allocateSeq,
@@ -848,12 +861,22 @@ async function createPersistentStores(input: {
   dataDir: string
   storage?: StorageConfig
   nowIso: () => string
-}): Promise<{ threadStore: ThreadStore; sessionStore: SessionStore; shutdown?: () => Promise<void> }> {
+}): Promise<{
+  threadStore: ThreadStore
+  sessionStore: SessionStore
+  diagnostics: CoreRuntime['storageDiagnostics']
+  shutdown?: () => Promise<void>
+}> {
   const storage = input.storage ?? DEFAULT_STORAGE_CONFIG
   if (storage.backend === 'file') {
     return {
       sessionStore: new FileSessionStore({ dataDir: input.dataDir }),
-      threadStore: new FileThreadStore({ dataDir: input.dataDir })
+      threadStore: new FileThreadStore({ dataDir: input.dataDir }),
+      diagnostics: () => ({
+        backend: 'file',
+        available: true,
+        degraded: false
+      })
     }
   }
 
@@ -869,6 +892,7 @@ async function createPersistentStores(input: {
       dataDir: input.dataDir,
       index: threadStore
     }),
+    diagnostics: () => threadStore.diagnostics(),
     shutdown: async () => {
       threadStore.close()
     }
@@ -907,6 +931,11 @@ export type CreateHttpServerOptions = {
   host?: string
   /** Bind port. `0` lets the OS pick an ephemeral port. */
   port: number
+  /**
+   * Optional structured access log sink. Receives one redacted entry per
+   * request with request id, method, path, status, and duration.
+   */
+  accessLog?: DispatchRequestOptions['accessLog']
 }
 
 /**
@@ -942,7 +971,8 @@ export async function createHttpServer(
   const server = await startNodeHttpServer({
     router,
     host: options.host ?? '127.0.0.1',
-    port: options.port
+    port: options.port,
+    accessLog: options.accessLog
   })
   return {
     ...server,

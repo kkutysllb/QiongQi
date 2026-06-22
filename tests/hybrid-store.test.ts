@@ -17,12 +17,10 @@ import { SequentialIdGenerator } from '@qiongqi/ports'
 describe('HybridThreadStore', () => {
   let dataDir = ''
   let openStores: HybridThreadStore[] = []
-  let sqliteAvailable = false
 
   beforeEach(async () => {
     dataDir = await mkdtemp(join(tmpdir(), 'kun-hybrid-'))
     openStores = []
-    sqliteAvailable = await canOpenBetterSqlite()
   })
 
   afterEach(async () => {
@@ -36,6 +34,7 @@ describe('HybridThreadStore', () => {
 
     const summaries = await threadStore.list({ search: 'Hybrid demo' })
     expect(summaries.map((thread) => thread.id)).toEqual([record.id])
+    const sqliteAvailable = threadStore.diagnostics().sqlite?.available === true
     if (sqliteAvailable) {
       await expect(stat(join(dataDir, 'index.sqlite3'))).resolves.toBeTruthy()
     } else {
@@ -59,6 +58,24 @@ describe('HybridThreadStore', () => {
       kind: 'user_message',
       text: 'hello from jsonl'
     })
+  })
+
+  it('reports SQLite availability in storage diagnostics', async () => {
+    const { threadStore } = await createHybridStores()
+    const sqliteAvailable = threadStore.diagnostics().sqlite?.available === true
+
+    expect(threadStore.diagnostics()).toMatchObject({
+      backend: 'hybrid',
+      available: true,
+      degraded: !sqliteAvailable,
+      sqlite: {
+        available: sqliteAvailable,
+        path: join(dataDir, 'index.sqlite3')
+      }
+    })
+    if (!sqliteAvailable) {
+      expect(threadStore.diagnostics().reason).toMatch(/sqlite/i)
+    }
   })
 
   it('rebuilds the SQLite index from JSONL after the database is deleted', async () => {
@@ -305,15 +322,4 @@ describe('HybridThreadStore', () => {
     })
   }
 
-  async function canOpenBetterSqlite(): Promise<boolean> {
-    try {
-      const sqlite = await import('better-sqlite3')
-      const Database = sqlite.default
-      const db = new Database(':memory:')
-      db.close()
-      return true
-    } catch {
-      return false
-    }
-  }
 })

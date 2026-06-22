@@ -1,5 +1,10 @@
 import type { RemotePeerTransport } from '@qiongqi/delegation'
 import { PeerArtifactSchema, type AgentCard, type PeerArtifact, type PeerTask } from '@qiongqi/contracts'
+import { z } from 'zod'
+
+const Stage4A2AResponseSchema = z.object({
+  artifact: PeerArtifactSchema
+}).passthrough()
 
 /**
  * Stage 2: HTTP-based implementation of {@link RemotePeerTransport}.
@@ -69,6 +74,8 @@ export class HttpPeerTransport implements RemotePeerTransport {
     }
 
     const body = await response.json()
-    return PeerArtifactSchema.parse(body)
+    const legacy = PeerArtifactSchema.safeParse(body)
+    if (legacy.success) return legacy.data
+    return Stage4A2AResponseSchema.parse(body).artifact
   }
 }

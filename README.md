@@ -22,7 +22,7 @@
 
 > **穷奇非凶，乃破局之锐。** Qiongqi 是一个领域中立的独立多 Agent 框架，以 cache-first、去中心化编排的 HTTP/SSE 引擎为骨架，搭配可插拔的技能与工具体系。
 >
-> 本项目正在进行 **四阶段架构改造**（monorepo 拆包 → AgentCard → 事件化 → A2A），已完成四阶段改造。详细进度见 [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md)。
+> 本项目正在进行 **四阶段架构改造**（monorepo 拆包 → AgentCard → 事件化 → A2A）：阶段 1–3 已完成，阶段 4 基本完成，待外部 Agent 做跨厂商互操作验证。详细进度见 [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md)。
 
 ---
 
@@ -45,15 +45,42 @@ node scripts/flatten-dist.mjs
 
 npx tsx packages/cli/src/serve-entry.ts serve \
   --data-dir ~/.qiongqi/data \
-  --api-key "$API_KEY" \
+  --base-url "$QIONGQI_BASE_URL" \
+  --api-key "$QIONGQI_API_KEY" \
   --port 8899
 ```
+
+生产或 CI 中使用 `hybrid` 存储前，建议运行 `pnpm run prepare:sqlite && pnpm run verify:sqlite`，用于编译并验证 `better-sqlite3` 原生绑定可加载。
+
+生产探针与运行指标：
+
+```bash
+curl http://127.0.0.1:8899/health
+curl http://127.0.0.1:8899/ready
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  http://127.0.0.1:8899/v1/runtime/metrics
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  -H "Accept: text/plain" \
+  "http://127.0.0.1:8899/v1/runtime/metrics?format=prometheus"
+```
+
+`/ready` 会暴露 storage degraded 状态；`/v1/runtime/metrics` 默认返回 JSON，也可用 Prometheus text 格式导出 token/cache、A2A task 与存储诊断。
+
+验证 evented orchestrator + A2A 双实例路径：
+
+```bash
+pnpm -r run build
+node scripts/flatten-dist.mjs
+pnpm run verify:evented-a2a
+```
+
+该脚本覆盖异步 `POST /a2a/tasks` 提交、任务轮询完成、artifacts、SSE subscribe，以及 evented turn state 清理。
 
 ---
 
 ## 📦 Monorepo 包结构
 
-采用 pnpm monorepo 多包结构，共 18 个独立 npm 包。详见 [`docs/architecture.zh.md`](./docs/architecture.zh.md#3-包结构)。
+采用 pnpm monorepo 多包结构，共 18 个独立 npm 包。当前状态以 [`docs/architecture.zh.md`](./docs/architecture.zh.md#3-包结构) 为准。
 
 ---
 
@@ -65,6 +92,7 @@ npx tsx packages/cli/src/serve-entry.ts serve \
 | **English README** | [`README.en.md`](./README.en.md) |
 | **改造进度** | [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md) |
 | **架构总览** | [`docs/architecture.zh.md`](./docs/architecture.zh.md) |
+| **生产部署** | [`docs/deployment.zh.md`](./docs/deployment.zh.md) |
 | **包依赖图** | [`docs/architecture.zh.md#附录-a-完整依赖表`](./docs/architecture.zh.md) |
 | **各包说明** | [`docs/architecture.zh.md#3-包结构`](./docs/architecture.zh.md) |
 | **设计规范** | [`docs/superpowers/specs/`](./docs/superpowers/specs/) |

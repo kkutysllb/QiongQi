@@ -15,22 +15,42 @@ import type { FileA2ATaskStore } from '../a2a-task-store.js'
  *
  * ## Endpoints
  *
- * - `POST /a2a/tasks` — submit a task, run one turn, return artifact
+ * - `POST /a2a/tasks` — submit a task, start one turn, return 202 + task
  * - `GET /a2a/tasks/{id}` — query task status
- *
- * Future: SSE subscription, cancel, artifacts (4.1 full protocol).
+ * - `POST /a2a/tasks/{id}/cancel` — cancel the task and abort its turn
+ * - `GET /a2a/tasks/{id}/artifacts` — retrieve mapped turn artifacts
+ * - `GET /a2a/tasks/{id}/subscribe` — stream task progress
  */
 
 /**
- * POST /a2a/tasks — submit a peer task and execute one turn.
+ * POST /a2a/tasks — submit a peer task and start one turn.
  *
- * Creates a {@link A2ATaskRecord}, runs the turn synchronously,
- * updates the record with the result, and returns it.
+ * Creates a {@link A2ATaskRecord}, starts the backing thread/turn, and
+ * completes it in the background. The legacy `/a2a` alias uses
+ * {@link a2aCreateTaskSync} to preserve the Stage-2 synchronous artifact
+ * response shape for existing peer transports.
  */
 export async function a2aCreateTask(
   runtime: ServerRuntime,
   store: FileA2ATaskStore,
   request: Request
+): Promise<JsonResponse> {
+  return a2aSubmitTask(runtime, store, request, { waitForCompletion: false })
+}
+
+export async function a2aCreateTaskSync(
+  runtime: ServerRuntime,
+  store: FileA2ATaskStore,
+  request: Request
+): Promise<JsonResponse> {
+  return a2aSubmitTask(runtime, store, request, { waitForCompletion: true })
+}
+
+async function a2aSubmitTask(
+  runtime: ServerRuntime,
+  store: FileA2ATaskStore,
+  request: Request,
+  options: { waitForCompletion: boolean }
 ): Promise<JsonResponse> {
   const body = await readJsonBody(request)
   if (!body.ok) {
@@ -79,9 +99,40 @@ export async function a2aCreateTask(
       threadId: thread.id,
       request: { prompt: task.prompt, model: task.model, mode: 'agent' }
     })
-    const status = await runtime.runTurn(thread.id, started.turnId)
-    const items = await runtime.sessionStore.loadItems(thread.id)
-    const turnItems = items.filter((item) => item.turnId === started.turnId)
+    record = A2ATaskRecord.parse({
+      ...record,
+      threadId: thread.id,
+      turnId: started.turnId,
+      updatedAt: new Date().toISOString()
+    })
+    await store.upsert(record)
+
+    const completion = completeA2ATask(runtime, store, record)
+    if (!options.waitForCompletion) {
+      void completion
+      return jsonResponse({ task: record }, 202)
+    }
+    return await completion
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    record = A2ATaskRecord.parse({ ...record, status: 'failed', error: message, updatedAt: new Date().toISOString() })
+    await store.upsert(record).catch(() => {})
+    return { status: 500, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ task: record, error: message }) }
+  }
+}
+
+async function completeA2ATask(
+  runtime: ServerRuntime,
+  store: FileA2ATaskStore,
+  record: A2ATaskRecordType
+): Promise<JsonResponse> {
+  try {
+    if (!record.threadId || !record.turnId) {
+      throw new Error('A2A task is missing thread or turn')
+    }
+    const status = await runtime.runTurn(record.threadId, record.turnId)
+    const items = await runtime.sessionStore.loadItems(record.threadId)
+    const turnItems = items.filter((item) => item.turnId === record.turnId)
     const summary = turnItems
       .filter((item): item is Extract<typeof turnItems[0], { kind: 'assistant_text' }> => item.kind === 'assistant_text')
       .map((item) => item.text.trim()).filter(Boolean).join('\n\n').trim() || undefined
@@ -89,10 +140,18 @@ export async function a2aCreateTask(
       (item): item is Extract<typeof turnItems[0], { kind: 'error' }> => item.kind === 'error'
     )
 
+    const latest = await store.get(record.id)
+    if (latest?.status === 'cancelled') {
+      const artifact = PeerArtifactSchema.parse({
+        peerCardId: runtime.agentCard?.id ?? 'unknown',
+        status: 'aborted',
+        error: 'A2A task cancelled'
+      })
+      return jsonResponse({ task: latest, artifact, artifacts: mapItemsToArtifacts(items) })
+    }
+
     record = A2ATaskRecord.parse({
       ...record,
-      threadId: thread.id,
-      turnId: started.turnId,
       status: status === 'completed' ? 'completed' : 'failed',
       ...(summary ? { summary } : {}),
       ...(errorItem ? { error: errorItem.message } : {}),
@@ -135,6 +194,7 @@ export async function a2aGetTask(
  * POST /a2a/tasks/{id}/cancel — cancel a pending or working task.
  */
 export async function a2aCancelTask(
+  runtime: ServerRuntime,
   store: FileA2ATaskStore,
   taskId: string
 ): Promise<JsonResponse> {
@@ -144,6 +204,9 @@ export async function a2aCancelTask(
   }
   if (record.status === 'completed' || record.status === 'failed') {
     return { status: 409, headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify({ error: 'task already terminal', status: record.status }) }
+  }
+  if (record.threadId && record.turnId) {
+    await runtime.cancelA2ATaskTurn?.({ threadId: record.threadId, turnId: record.turnId })
   }
   const updated = A2ATaskRecord.parse({ ...record, status: 'cancelled', updatedAt: new Date().toISOString() })
   await store.upsert(updated)

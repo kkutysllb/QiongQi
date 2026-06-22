@@ -4,7 +4,7 @@
 >
 > **Document purpose**: A unified reference that fuses **design philosophy** and **technical architecture** — the load-bearing layer between `README` (entry point) and `PROGRESS` (changelog).
 >
-> **Version note**: This document reflects the 18-package, Stages 1–3 complete / Stage 4 nearly complete state as of 2026-06-22. The "16 packages" claim and stage roadmap in `README.*.md` are stale; defer to this document.
+> **Version note**: This document reflects the 18-package, Stages 1–3 complete / Stage 4 nearly complete state as of 2026-06-22.
 >
 > 中文版本：[`architecture.zh.md`](./architecture.zh.md)
 
@@ -496,7 +496,7 @@ import { MemoryStore } from '@qiongqi/memory'
 | `qiongqi exec [options] <tool>` | Direct tool invocation (`--list-tools` / `--args <json>`) |
 
 ```bash
-qiongqi serve --data-dir ~/.qiongqi/data --api-key $KEY --port 8899
+qiongqi serve --data-dir ~/.qiongqi/data --base-url "$QIONGQI_BASE_URL" --api-key "$QIONGQI_API_KEY" --port 8899
 ```
 
 #### Layer 10 — Domain Preset
@@ -510,9 +510,9 @@ import { createCodingAgent, CODING_SYSTEM_PROMPT, CODING_PINNED_CONSTRAINTS } fr
 
 const agent = await createCodingAgent({
   dataDir: './data',
-  apiKey: process.env.API_KEY,
-  baseUrl: 'https://api.deepseek.com/beta',
-  model: 'deepseek-v4-pro',
+  apiKey: process.env.QIONGQI_API_KEY!,
+  baseUrl: process.env.QIONGQI_BASE_URL!,
+  model: 'provider-model-name',
 })
 ```
 
@@ -523,19 +523,20 @@ const agent = await createCodingAgent({
 - `system: keep the stable coding-preset prefix byte-stable for prompt-cache reuse`
 - `system: never claim a change is verified without running the relevant tests or build`
 
-### 3.4 HTTP Route Table (48 endpoints)
+### 3.4 HTTP Route Table (50 endpoints)
 
 | Path prefix | Main endpoints | Auth |
 |-------------|---------------|------|
 | `/health` | Liveness probe | none |
+| `/ready` | Readiness/degraded check (storage degraded is visible) | none |
 | `/.well-known/agent-card.json` | A2A discovery (Stage 2) | none (RFC 8615) |
-| `/a2a/tasks` | POST create / GET list (Stage 4) | Bearer |
+| `/a2a/tasks` | POST async task creation (Stage 4) | Bearer |
 | `/a2a/tasks/:id` | GET query status | Bearer |
 | `/a2a/tasks/:id/cancel` | POST cancel | Bearer |
 | `/a2a/tasks/:id/artifacts` | GET turn items | Bearer |
 | `/a2a/tasks/:id/subscribe` | SSE progress stream | Bearer |
 | `/a2a` | Backward-compat alias | Bearer |
-| `/v1/runtime/info` / `/v1/runtime/tools` | Runtime diagnostics | Bearer |
+| `/v1/runtime/info` / `/v1/runtime/tools` / `/v1/runtime/metrics` | Runtime diagnostics and metrics | Bearer |
 | `/v1/skills` | Skills list (v1 + v2 merged) | Bearer |
 | `/v1/attachments` | POST upload / GET list / GET diagnostics | Bearer |
 | `/v1/memory` | Memory CRUD | Bearer |
@@ -563,7 +564,7 @@ SSE format: `id: <seq>\nevent: <kind>\ndata: <JSON>\n\n`, with 15s heartbeat eve
 3. `createToolMatrix()` — tool registry, skills, delegation runtime
 4. `createAgent()` — orchestration loop (TurnOrchestrator assembly)
 
-`createHttpServer({ agent, host, port })` attaches HTTP listening on top of the agent and returns a `QiongqiServeHandle`.
+`createHttpServer({ agent, host, port, accessLog? })` attaches HTTP listening on top of the agent and returns a `QiongqiServeHandle`. `accessLog` can be connected to a JSON logger or APM collector; each structured entry contains request id, trace id, method, path, status, and duration, but not sensitive headers such as authorization. When a request includes W3C `traceparent`, the runtime propagates it in response headers and logs `traceparent` / `traceId` / `spanId`.
 
 **Design trade-offs**:
 
@@ -613,7 +614,7 @@ The event-driven refactor introduced in Stage 3. `QiongqiServeRuntimeOptions.orc
 | `classic` | `TurnOrchestrator` (explicit step advancement) | none | default, low overhead |
 | `evented` | `EventedTurnOrchestrator` (subscriber collaboration) | yes (`FileTurnStateStore` persists `TurnStateV1`) | critical workflows, long turns |
 
-**Shared logic**: `runOrchestratorStep` pure function is shared by both orchestrators — `EventedTurnOrchestrator` wraps it in `TurnEventBus`'s `step:start` / `step:end` events, allowing subscribers to collaborate at step boundaries.
+**Shared logic**: `runOrchestratorStep` pure function is shared by both orchestrators; the evented path uses `runStepViaEventBus` to publish `step:start` / `step:end` boundary events, letting subscribers observe step boundaries and gradually attach collaboration logic.
 
 **Real backlog**: `createPromptSubscriber` is still a placeholder; peer-style orchestration is a future direction (the honest annotation on Proposition ① in §1.2).
 
@@ -625,10 +626,10 @@ The multi-Agent infrastructure from Stages 2 + 4:
 - **`PeerRegistry`** (`@qiongqi/delegation`) — Unified local/remote peer entry; `LocalPeerHandle` (in-process) + `RemotePeerTransport` (interface, implemented by `http/HttpPeerTransport`)
 - **`FilePeerStore`** — Remote peer persistence to `<dataDir>/peers.json`
 - **`GET /.well-known/agent-card.json`** — A2A discovery (no auth, RFC 8615)
-- **`HttpPeerTransport`** — HTTP implementation of `RemotePeerTransport`, with token resolution callback
-- **A2A task endpoints** (Stage 4) — `POST /a2a/tasks` create and execute a turn; `GET /a2a/tasks/:id` query; `/cancel` / `/artifacts` / `/subscribe` SSE
+- **`HttpPeerTransport`** — HTTP implementation of `RemotePeerTransport`, with token resolution callback; accepts both legacy `PeerArtifact` responses and Stage 4 `{ task, artifact, artifacts }` responses
+- **A2A task endpoints** (Stage 4) — `POST /a2a/tasks` creates a task and starts a background turn, returning 202 + task; `GET /a2a/tasks/:id` query; `/cancel` interrupts the associated turn through a runtime hook; `/artifacts` / `/subscribe` SSE
 
-**Cross-instance A2A closed loop** (verified in Stage 2): Agent A submits a task to Agent B via `POST /a2a`; B creates a temporary thread, executes a turn, and returns a `PeerArtifact`; A discovers B's capabilities through B's AgentCard.
+**Cross-instance A2A closed loop**: Agent A can use the compatible `POST /a2a` endpoint for a synchronous `PeerArtifact`, or submit async work via `POST /a2a/tasks` and query/subscribe to its lifecycle; A discovers B's capabilities through B's AgentCard.
 
 ### 4.6 Cache-First Three-Layer Contract
 
@@ -651,7 +652,7 @@ Four-stage refactor plan, **as of 2026-06-22**:
 | **Stage 1** | SDK extraction + monorepo split | ✅ **Complete** | 18 packages + pnpm workspace + vitest aliases + Composition Root split + PricingProvider abstraction + CLI required-field validation |
 | **Stage 2** | AgentCard + AgentIdentity | ✅ **Complete** | AgentCard / PeerRegistry / SkillRegistry / TaskThreadMap + `GET /.well-known/agent-card.json` + `POST /a2a` + HttpPeerTransport + cross-instance A2A closed loop verification |
 | **Stage 3** | TurnOrchestrator event-driven | ✅ **Complete** | TurnStateV1 / FileTurnStateStore / EventedTurnOrchestrator / TurnEventBus / shared `runOrchestratorStep` + end-to-end kill -9 crash recovery verification |
-| **Stage 4** | A2A protocol endpoints | 🔄 **Nearly complete** | A2ATaskRecord / FileA2ATaskStore + `POST /a2a/tasks` + `GET /a2a/tasks/:id` + `cancel` + `artifacts` + SSE `subscribe` + ArtifactSchema bridge. **Awaiting external Agent for cross-vendor interop verification** |
+| **Stage 4** | A2A protocol endpoints | 🔄 **Nearly complete** | A2ATaskRecord / FileA2ATaskStore + async `POST /a2a/tasks` + synchronous compatible `POST /a2a` + `GET /a2a/tasks/:id` + interruptible `cancel` + `artifacts` + SSE `subscribe` + ArtifactSchema bridge. **Awaiting external Agent for cross-vendor interop verification** |
 
 **Current verification baseline** (synchronized with `PROGRESS.zh.md`):
 - Full test suite: 433/433 ✅
@@ -868,12 +869,47 @@ Test files are centralized at the root `tests/` directory; the root `vitest.conf
 ```bash
 npx tsx packages/cli/src/serve-entry.ts serve \
   --data-dir ~/.qiongqi/data \
-  --api-key "$DEEPSEEK_API_KEY" \
+  --base-url "$QIONGQI_BASE_URL" \
+  --api-key "$QIONGQI_API_KEY" \
   --port 8899
 
 curl http://127.0.0.1:8899/health
 # → {"status":"ok","service":"qiongqi","mode":"serve"}
 ```
+
+`hybrid` is the recommended production storage mode (SQLite index + full JSONL log). Run `pnpm run prepare:sqlite && pnpm run verify:sqlite` in CI or production image builds to compile `better-sqlite3` for the current Node ABI and run both in-memory and temporary file-backed probes. This catches missing native bindings, Node ABI mismatches, or missing platform packages early. If the binding is unavailable, Qiongqi can fall back to JSONL, but the SQLite index performance path is not exercised.
+
+Production probes and metrics:
+
+```bash
+curl http://127.0.0.1:8899/health
+curl http://127.0.0.1:8899/ready
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  http://127.0.0.1:8899/v1/runtime/metrics
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  -H "Accept: text/plain" \
+  "http://127.0.0.1:8899/v1/runtime/metrics?format=prometheus"
+```
+
+`/health` is suitable for liveness; `/ready` is suitable for readiness and returns `status=degraded` when hybrid SQLite falls back; the Prometheus text endpoint exports token/cache, A2A task status, and storage degraded state.
+
+Evented orchestrator + two-instance A2A verification:
+
+```bash
+pnpm -r run build
+node scripts/flatten-dist.mjs
+pnpm run verify:evented-a2a
+```
+
+`verify:evented-a2a` starts a local OpenAI-compatible fake model and two evented Qiongqi HTTP runtimes by default. It verifies AgentCard discovery, async `POST /a2a/tasks`, polling to task completion, artifacts, SSE subscribe, and evented turn-state cleanup after completion. Real external interoperability is explicit opt-in:
+
+```bash
+QIONGQI_A2A_PEER_URL="https://peer.example.com" \
+QIONGQI_A2A_PEER_TOKEN="$TOKEN" \
+pnpm run verify:evented-a2a -- --external-peer
+```
+
+When no external peer is configured, the script reports external peer verification as skipped rather than passed.
 
 ### Key Scripts (`scripts/`)
 
@@ -882,6 +918,7 @@ curl http://127.0.0.1:8899/health
 | `flatten-dist.mjs` | Flatten the nested `dist/` structure |
 | `transcript-diff.mjs` | Compare usage metrics between two threads (cache hit rate, token savings) |
 | `verify-crash-recovery.mjs` | Stage 3 end-to-end: simulate crash + EventedTurnOrchestrator recovery |
+| `verify-evented-a2a.mjs` | Stage 3/4 end-to-end: local two-instance evented orchestrator + A2A task lifecycle verification, optional external peer |
 
 ---
 

@@ -75,24 +75,53 @@ pnpm -r run build
 node scripts/flatten-dist.mjs  # 拍平构建产物
 ```
 
+生产或 CI 中使用 `hybrid` 存储前，建议额外运行 `pnpm run prepare:sqlite && pnpm run verify:sqlite`，用于编译并验证 `better-sqlite3` 原生绑定可加载。
+
+验证 evented orchestrator + A2A 双实例路径：
+
+```bash
+pnpm -r run build
+node scripts/flatten-dist.mjs
+pnpm run verify:evented-a2a
+```
+
+该脚本覆盖异步 `POST /a2a/tasks` 提交、任务轮询完成、artifacts、SSE subscribe，以及 evented turn state 清理。
+
 ### 启动运行时
 
 ```bash
 npx tsx packages/cli/src/serve-entry.ts serve \
   --data-dir ~/.qiongqi/data \
-  --api-key "$DEEPSEEK_API_KEY" \
+  --base-url "$QIONGQI_BASE_URL" \
+  --api-key "$QIONGQI_API_KEY" \
   --port 8899
 ```
 
 启动后可通过 `http://127.0.0.1:8899` 访问 HTTP API。
 
+生产探针与运行指标：
+
+```bash
+curl http://127.0.0.1:8899/health
+curl http://127.0.0.1:8899/ready
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  http://127.0.0.1:8899/v1/runtime/metrics
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  -H "Accept: text/plain" \
+  "http://127.0.0.1:8899/v1/runtime/metrics?format=prometheus"
+```
+
+`/ready` 会暴露 storage degraded 状态；`/v1/runtime/metrics` 默认返回 JSON，也可用 Prometheus text 格式导出 token/cache、A2A task 与存储诊断。
+
 ### 脚本速查
 
 ```bash
 pnpm -r run build          # 构建全部 18 个包
+pnpm run prepare:sqlite    # 为当前 Node ABI 编译 better-sqlite3 原生绑定
+pnpm run verify:sqlite     # 验证 hybrid 存储所需的 better-sqlite3 原生绑定
+pnpm run verify:evented-a2a # 本地 fake model 双实例验证 evented + A2A
 pnpm test                  # 全量测试（Vitest）
 pnpm test:unit             # 单元测试
-pnpm test:integration      # 集成测试
 pnpm test:fast             # 快速测试子集
 ```
 
@@ -135,7 +164,7 @@ pnpm test:fast             # 快速测试子集
 
 ## 📦 Monorepo 包结构
 
-Qiongqi 采用 pnpm monorepo 多包结构，共 16 个独立 npm 包：
+Qiongqi 采用 pnpm monorepo 多包结构，共 18 个独立 npm 包：
 
 | 包 | 职责 |
 |---|------|
@@ -151,6 +180,8 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 16 个独立 npm 包：
 | `@qiongqi/skills` | SkillRuntime + PluginHost |
 | `@qiongqi/memory` | 跨会话记忆存储 |
 | `@qiongqi/attachments` | 附件管理 |
+| `@qiongqi/adapter-fs` | 纯文件系统 I/O 工具 |
+| `@qiongqi/tool-infra` | 工具执行基础设施 |
 | `@qiongqi/delegation` | 子代理委派运行时 |
 | `@qiongqi/http` | HTTP/SSE 服务器 |
 | `@qiongqi/cli` | 命令行入口 |
@@ -227,6 +258,7 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 16 个独立 npm 包：
 |------|------|
 | **改造进度** | [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md) |
 | **架构总览** | [`docs/architecture.zh.md`](./docs/architecture.zh.md) |
+| **生产部署** | [`docs/deployment.zh.md`](./docs/deployment.zh.md) |
 | **包依赖图** | [`docs/architecture.zh.md#附录-a-完整依赖表`](./docs/architecture.zh.md) |
 | **各包说明** | [`docs/architecture.zh.md#3-包结构`](./docs/architecture.zh.md) |
 | **设计哲学** | [`docs/superpowers/specs/`](./docs/superpowers/specs/) |
@@ -236,14 +268,14 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 16 个独立 npm 包：
 
 ## 🗺️ 改造路线
 
-Qiongqi 正在进行四阶段架构改造，已完成四阶段改造：
+Qiongqi 的四阶段架构改造当前状态如下：
 
 | 阶段 | 目标 | 状态 |
 |------|------|------|
-| **阶段 1** | SDK 抽离 + monorepo 拆包 | 进行中 |
-| **阶段 2** | AgentCard + AgentIdentity | 待开始 |
-| **阶段 3** | TurnOrchestrator 事件化 | 待开始 |
-| **阶段 4** | A2A 协议端点 | 待开始 |
+| **阶段 1** | SDK 抽离 + monorepo 拆包 | 完成 |
+| **阶段 2** | AgentCard + AgentIdentity | 完成 |
+| **阶段 3** | TurnOrchestrator 事件化 | 完成 |
+| **阶段 4** | A2A 协议端点 | 基本完成，待外部 Agent 做跨厂商互操作验证 |
 
 详细进度见 [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md)。
 

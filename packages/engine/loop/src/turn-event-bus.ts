@@ -69,6 +69,7 @@ export function createPromptSubscriber(deps: StepSubscriberDeps) {
  * Step orchestrator context passed through the event chain.
  */
 export interface StepContext {
+  eventBus: TurnEventBus
   threadId: string
   turnId: string
   signal: AbortSignal
@@ -87,12 +88,22 @@ export interface StepContext {
  * handler, making the data flow visible and interceptable.
  */
 export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): Promise<'continue' | 'stop' | 'failed' | 'aborted'> {
-  const { threadId, turnId, signal, deps } = ctx
+  const { eventBus, threadId, turnId, signal, deps } = ctx
+
+  await eventBus.emit({ kind: 'step:start', stepIndex })
+
+  const finish = async (status: 'continue' | 'stop' | 'failed' | 'aborted') => {
+    await eventBus.emit({
+      kind: 'step:end',
+      status: status === 'stop' || status === 'continue' ? 'completed' : status
+    })
+    return status
+  }
 
   // 1. Build prompt
   const built = await deps.promptBuilder.build({ threadId, turnId, signal, stepIndex })
-  if (built.kind === 'aborted') return 'aborted'
-  if (built.kind === 'stop') return 'stop'
+  if (built.kind === 'aborted') return finish('aborted')
+  if (built.kind === 'stop') return finish('stop')
   const promptCtx = built.ctx
 
   // 2. Run model
@@ -106,7 +117,7 @@ export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): P
     recordPromptPressure: (tid, model, promptTokens) =>
       deps.promptBuilder.recordPromptPressure(tid, model, promptTokens)
   })
-  if (stepResult.kind === 'aborted') return 'aborted'
+  if (stepResult.kind === 'aborted') return finish('aborted')
 
   // 3. Decide continuation
   const decision = decideContinuation({
@@ -119,9 +130,9 @@ export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): P
 
   // 4. Execute decision
   switch (decision.action) {
-    case 'stop': return 'stop'
-    case 'continue': return 'continue'
-    case 'failed': return 'failed'
+    case 'stop': return finish('stop')
+    case 'continue': return finish('continue')
+    case 'failed': return finish('failed')
     case 'failed_with_error': {
       await deps.events.record({
         kind: 'error', threadId, turnId,
@@ -131,7 +142,7 @@ export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): P
         id: deps.ids.next('item_error'), turnId, threadId,
         message: decision.errorMessage, code: decision.errorCode
       }))
-      return 'failed'
+      return finish('failed')
     }
     case 'materialize_plan': {
       await deps.turns.applyItem(threadId, decision.planToolCallItem)
@@ -152,8 +163,8 @@ export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): P
         toolProviderKinds: promptCtx.toolProviderKinds,
         approvalPolicy: promptCtx.approvalPolicy, signal
       })
-      if (dispatched === 'aborted') return 'aborted'
-      return 'continue'
+      if (dispatched === 'aborted') return finish('aborted')
+      return finish('continue')
     }
     case 'dispatch': {
       const dispatched = await deps.coordinator.dispatch({
@@ -167,8 +178,8 @@ export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): P
         toolProviderKinds: promptCtx.toolProviderKinds,
         approvalPolicy: promptCtx.approvalPolicy, signal
       })
-      if (dispatched === 'aborted') return 'aborted'
-      return 'continue'
+      if (dispatched === 'aborted') return finish('aborted')
+      return finish('continue')
     }
   }
 }

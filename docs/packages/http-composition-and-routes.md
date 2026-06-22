@@ -12,7 +12,7 @@
 `@qiongqi/http` 的"组合"与"路由"部分：
 
 - **`createQiongqiServeRuntime(options)`** —— **唯一 Composition Root**。按四步装配：`createCore` + `createModelAdapter` + `createToolMatrix` + `createAgent`
-- **`createHttpServer({ agent, host, port })`** —— 在 runtime 上挂 HTTP 监听
+- **`createHttpServer({ agent, host, port, accessLog? })`** —— 在 runtime 上挂 HTTP 监听，可注入结构化 access log sink
 - **`startQiongqiServe` (deprecated alias)** —— 老式入口，向后兼容
 - **`ReviewService`** —— 隔离的 code-review 子服务（独立只读工具 + 独立 turn）
 - **18 个 route handlers** —— 所有 HTTP 端点
@@ -42,10 +42,10 @@
 
 | 文件 | 端点 |
 |------|------|
-| `health.ts` | `GET /health` |
+| `health.ts` | `GET /health` + `GET /ready` |
 | `agent-card.ts` | `GET /.well-known/agent-card.json` |
 | `a2a.ts` | `POST /a2a` + Stage 4 端点 |
-| `runtime-info.ts` | `GET /v1/runtime/info` |
+| `runtime-info.ts` | `GET /v1/runtime/info` + `/tools` + `/metrics` |
 | `skills.ts` | `GET /v1/skills` |
 | `attachments.ts` | `POST/GET /v1/attachments` |
 | `memory.ts` | `GET/POST/PATCH/DELETE /v1/memory` |
@@ -121,7 +121,12 @@ const agent = await createAgent({
   // ... 其他配置
 })
 
-const handle = await createHttpServer({ agent, host: '127.0.0.1', port: 8899 })
+const handle = await createHttpServer({
+  agent,
+  host: '127.0.0.1',
+  port: 8899,
+  accessLog: (entry) => console.log(JSON.stringify(entry))
+})
 
 // 2. 旧 API（向后兼容）
 const handle2 = await startQiongqiServe({

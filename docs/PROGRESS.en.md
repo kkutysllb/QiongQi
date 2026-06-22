@@ -6,8 +6,8 @@
 >
 > 中文版本：[`PROGRESS.zh.md`](./PROGRESS.zh.md)
 
-**Last Updated**: 2026-06-21
-**Current Stage**: Stage 1 in progress (1.1–1.3 complete, 1.4–1.8 pending)
+**Last Updated**: 2026-06-22
+**Current Stage**: Stages 1–3 complete ✅, Stage 4 nearly complete (awaiting external Agent cross-vendor verification)
 
 ---
 
@@ -16,7 +16,7 @@
 | Metric | Current | Target |
 |--------|---------|--------|
 | Full test suite | 433/433 ✅ | All green |
-| Package builds | 16/16 ✅ | All green |
+| Package builds | 18/18 ✅ | All green |
 | End-to-end (serve + curl) | ✅ | Pass |
 
 ---
@@ -31,7 +31,7 @@
 - [x] Per-package `tsconfig.json` + `tsconfig.build.json` with paths mapping
 - [x] `scripts/flatten-dist.mjs` post-build script (flattens nested dist output)
 
-### 1.2 Package Split (16 packages) ✅
+### 1.2 Package Split (18 packages) ✅
 
 175 source files + 5 CLI files migrated, all imports rewritten to `@qiongqi/*` format.
 
@@ -49,7 +49,9 @@
 | `@qiongqi/skills` | SkillRuntime + PluginHost | ✅ | Done |
 | `@qiongqi/memory` | MemoryStore + provider | ✅ | Done |
 | `@qiongqi/attachments` | AttachmentStore | ✅ | Done |
-| `@qiongqi/delegation` | DelegationRuntime + ChildExecutor + PeerRegistry | ✅ | Done |
+| `@qiongqi/adapter-fs` | Pure FS I/O utilities | ✅ | Done |
+| `@qiongqi/tool-infra` | Tool execution infrastructure | ✅ | Done |
+| `@qiongqi/delegation` | DelegationRuntime + PeerRegistry + SkillRegistry + TaskThreadMap | ✅ | Done |
 | `@qiongqi/http` | HTTP/SSE server + routes | ✅ | Done |
 | `@qiongqi/cli` | qiongqi CLI entry point | ✅ | Done |
 | `@qiongqi/preset-coding` | Coding preset (system prompt + default config) | ✅ | Done |
@@ -150,7 +152,7 @@
 
 ### 1.8 Deliverables ✅
 
-- [x] 16 independent npm packages, each with `package.json` + `tsconfig.json` + `tsconfig.build.json`:
+- [x] 18 independent npm packages, each with `package.json` + `tsconfig.json` + `tsconfig.build.json`:
   - All packages have top-level `types: ./dist/index.d.ts` (compat for older TS / tools)
   - All packages have `exports` with `types` + `import` sub-fields
   - All packages generate correct `.d.ts` declarations (11~71 lines each)
@@ -158,7 +160,7 @@
 - [x] `createAgent` / `createHttpServer` public API docs (JSDoc) — see 1.4
 - [x] preset-coding package verified: external consumer simulation test passes (`createCodingAgent` / `CODING_SYSTEM_PROMPT` / `CODING_PINNED_CONSTRAINTS` exports work)
 - [x] Full test suite + end-to-end verification passed:
-  - 16 packages build green + 433/433 tests green + tsc 0 errors
+  - 18 packages build green + 433/433 tests green + tsc 0 errors
   - bin entry boots successfully (`agentName=Qiongqi Coding`)
   - Health check / Runtime info / Thread CRUD all pass
 
@@ -223,12 +225,17 @@
 - [x] `TurnEventBus` + `runStepViaEventBus` (`packages/loop/src/turn-event-bus.ts`):
   - Lightweight in-process event bus, subscribe by `TurnStepEvent.kind`
   - `runStepViaEventBus` — event-driven step execution (replaces sequential calls)
+  - Step boundaries now publish `step:start` / `step:end` so subscribers can observe evented turn boundaries
   - `EventedTurnOrchestrator` supports `TurnEventBus` injection, dual-mode operation
 - [x] End-to-end recovery verification:
   - evented mode + real model: turn executes correctly
   - Simulated crash: save state.json (stepIndex=1), resume from breakpoint on restart
   - State auto-cleaned after turn completion
   - Full 433/433 tests + tsc 0 errors
+- [x] `scripts/verify-evented-a2a.mjs` local two-instance verification:
+  - Starts a local fake model + two evented Qiongqi HTTP runtimes
+  - Covers AgentCard discovery, A2A task lifecycle, artifacts, and SSE subscribe
+  - Verifies evented turn state cleanup after the A2A turn completes
 
 ---
 
@@ -242,19 +249,53 @@
 - [x] `FileA2ATaskStore` (`packages/http/src/a2a-task-store.ts`)
   - Persists to `<dataDir>/a2a-tasks/<id>.json`
 - [x] A2A endpoint upgrade:
-  - `POST /a2a/tasks` — creates task, executes turn, returns task+artifact
+  - `POST /a2a/tasks` — creates task, starts a background turn, quickly returns 202 + task
   - `GET /a2a/tasks/{id}` — queries task status
-  - Old `POST /a2a` backward-compatible (delegates to new endpoint)
+  - Old `POST /a2a` keeps synchronous compatibility and returns the legacy PeerArtifact semantics
 - [x] `ServerRuntime.a2aTaskStore` injection
-- [x] `POST /a2a/tasks/{id}/cancel` — cancel pending/working tasks
+- [x] `POST /a2a/tasks/{id}/cancel` — cancels pending/working tasks and interrupts the associated turn through a runtime hook; background completion no longer overwrites a cancelled terminal state
 - [x] `GET /a2a/tasks/{id}/artifacts` — retrieve turn items from task's thread
 - [x] `GET /a2a/tasks/{id}/subscribe` — SSE event stream (completed: immediate push, in-progress: polling+eventBus)
 - [x] `ArtifactSchema` + `mapItemsToArtifacts()` — A2A Artifact ↔ TurnItem bridge (`packages/contracts/src/a2a-artifact.ts`)
   - assistant_text→text/markdown, tool_result→application/json, error→text/plain
   - a2aCreateTask response includes `artifacts` array
+- [x] `HttpPeerTransport` accepts both legacy `PeerArtifact` responses and Stage 4 `{ task, artifact, artifacts }` responses
 - [ ] `A2APeerAdapter` — covered by HttpPeerTransport
-- [ ] Cross-vendor interoperability verification
-- [ ] End-to-end cross-instance collaboration verification
+- [ ] Cross-vendor interoperability verification (moved to P2: requires a real external peer/vendor counterpart)
+- [x] End-to-end cross-instance collaboration verification (local fake-model two-instance path; external peer still requires a real counterpart)
+
+## P1: Production Operations Surface 🔄
+
+- [x] `GET /ready` readiness check:
+  - Unauthenticated, separate from `/health` liveness
+  - Exposes storage degraded state, making hybrid SQLite fallback visible
+- [x] `GET /v1/runtime/metrics` runtime metrics:
+  - Bearer-authenticated
+  - JSON by default; supports `?format=prometheus` / `Accept: text/plain` for Prometheus text
+  - Summarizes token/cache usage, A2A task status counts, and storage diagnostics
+- [x] `HybridThreadStore.diagnostics()`:
+  - Exposes `backend=hybrid`, SQLite path, SQLite availability, and fallback reason
+  - Runtime factory injects `ServerRuntime.storageDiagnostics`
+- [x] Structured logs / request id:
+  - `dispatchRequest` generates or reuses `x-request-id` and writes it back to response headers
+  - `startNodeHttpServer` / `createHttpServer` accept an `accessLog` sink for redacted structured access logs
+- [x] Prometheus exporter:
+  - `/v1/runtime/metrics?format=prometheus` exports `qiongqi_usage_*`, `qiongqi_cache_hit_rate`, `qiongqi_a2a_tasks_total`, and `qiongqi_storage_degraded`
+- [x] CI and production deployment docs:
+  - GitHub Actions covers SQLite native binding build+verify, typecheck, fast tests, build, flatten, and evented A2A
+  - `docs/deployment.en.md` documents probes, Prometheus scrape, hybrid storage gate, structured logs, and A2A verification
+  - Provides `Dockerfile`, `docker-compose.yml`, Kubernetes manifest, and Prometheus alert rules
+- [x] Trace id / OpenTelemetry-compatible propagation:
+  - Supports W3C `traceparent` propagation
+  - Access logs include `traceparent`, `traceId`, and `spanId` for OTel collectors/loggers
+
+## P2: Cross-instance Interoperability and Deeper Observability
+
+- [ ] Real external A2A peer / cross-vendor interoperability verification:
+  - Reuse `pnpm run verify:evented-a2a -- --external-peer`
+  - Requires `QIONGQI_A2A_PEER_URL` / `QIONGQI_A2A_PEER_TOKEN` pointing at a real counterpart
+- [ ] Full OpenTelemetry SDK exporter:
+  - Add span lifecycle/exporter on top of existing `traceparent` propagation
 
 | `@qiongqi/adapter-fs` | File-system capabilities (read/write/edit/grep/find/ls/bash) | ✅ | New |
 | `@qiongqi/tool-infra` | Tool infrastructure (hooks/rate-limit/mutation-queue) | ✅ | New |

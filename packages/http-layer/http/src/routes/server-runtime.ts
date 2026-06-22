@@ -33,6 +33,18 @@ export type RuntimeToolDiagnostics = {
   memory: MemoryDiagnostics
 }
 
+export type StorageDiagnostics = {
+  backend: 'hybrid' | 'file' | string
+  available: boolean
+  degraded: boolean
+  reason?: string
+  sqlite?: {
+    available: boolean
+    path?: string
+    reason?: string
+  }
+}
+
 /**
  * Dependencies that the HTTP router needs. Bundled into a single
  * type so callers can compose the runtime from the in-memory or
@@ -53,6 +65,7 @@ export type ServerRuntime = {
   attachmentStore?: AttachmentStore
   memoryStore?: MemoryStore
   runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> | void
+  cancelA2ATaskTurn?(input: { threadId: string; turnId: string }): Promise<void> | void
   runReview?(input: {
     threadId: string
     turnId: string
@@ -73,6 +86,7 @@ export type ServerRuntime = {
   /** Stage 4: A2A task store for persistence. */
   a2aTaskStore?: FileA2ATaskStore
   toolDiagnostics?(): RuntimeToolDiagnostics | Promise<RuntimeToolDiagnostics>
+  storageDiagnostics?(): StorageDiagnostics | Promise<StorageDiagnostics>
   skills?(): SkillRuntimeDiagnostics | Promise<SkillRuntimeDiagnostics>
   /**
    * v1 plugin diagnostics: same surface as `skills()` plus per-skill

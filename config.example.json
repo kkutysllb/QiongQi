@@ -2,11 +2,11 @@
   "serve": {
     "host": "127.0.0.1",
     "port": 8899,
-    "dataDir": "~/.deepseekgui/qiongqi",
+    "dataDir": "~/.qiongqi/data",
     "runtimeToken": "",
-    "apiKey": "",
-    "baseUrl": "https://api.deepseek.com/beta",
-    "model": "deepseek-v4-pro",
+    "apiKey": "your-provider-api-key",
+    "baseUrl": "https://api.example.com/v1",
+    "model": "provider-model-name",
     "approvalPolicy": "auto",
     "sandboxMode": "workspace-write",
     "tokenEconomyMode": false,
@@ -39,23 +39,11 @@
   },
   "models": {
     "profiles": {
-      "deepseek-v4-pro": {
-        "contextWindowTokens": 1000000,
+      "provider-model-name": {
+        "contextWindowTokens": 128000,
         "contextCompaction": {
-          "softThreshold": 980000,
-          "hardThreshold": 990000
-        },
-        "inputModalities": ["text"],
-        "outputModalities": ["text"],
-        "supportsToolCalling": true,
-        "messageParts": ["text"]
-      },
-      "deepseek-v4-flash": {
-        "aliases": ["deepseek-chat", "deepseek-reasoner"],
-        "contextWindowTokens": 1000000,
-        "contextCompaction": {
-          "softThreshold": 980000,
-          "hardThreshold": 990000
+          "softThreshold": 96000,
+          "hardThreshold": 112000
         },
         "inputModalities": ["text"],
         "outputModalities": ["text"],
