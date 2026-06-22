@@ -162,6 +162,17 @@
   - bin 入口启动成功（`agentName=Qiongqi Coding`）
   - Health check / Runtime info / Thread CRUD 全通过
 
+### 1.8.1 adapter-tools 拆分遗留死代码清理 ✅
+
+- [x] 清理 commit 90e2530（adapter-tools 拆分）时遗留的 5 个源文件副本：
+  - `packages/adapter-tools/src/edit-diff.ts`（已迁至 `adapter-fs`）
+  - `packages/adapter-tools/src/truncate.ts`（已迁至 `adapter-fs`）
+  - `packages/adapter-tools/src/file-mutation-queue.ts`（已迁至 `tool-infra`）
+  - `packages/adapter-tools/src/output-accumulator.ts`（已迁至 `tool-infra`）
+  - `packages/adapter-tools/src/tool-rate-limit.ts`（已迁至 `tool-infra`）
+- [x] 仓库内 grep 验证 0 内部引用；`adapter-tools/src/index.ts` 已通过 `export * from '@qiongqi/adapter-fs'` 与 `export * from '@qiongqi/tool-infra'` 重导出，barrel 兼容
+- [x] 验证基线保持：18 包构建全绿 + 433/433 测试全绿 + tsc 0 错误
+
 ---
 
 ## 阶段 2：AgentCard + AgentIdentity ✅
