@@ -234,6 +234,9 @@
 
 ## 阶段 4：A2A 协议端点 🔄
 
+> 注：Qiongqi 内部两实例 A2A 互调验证已在阶段 2 完成（AgentCard 发现 → POST /a2a → PeerArtifact）；
+> 跨厂商互操作验证暂无外部 Agent 作为基准。
+
 - [x] `A2ATaskRecord` 数据模型（`packages/http/src/a2a-task-model.ts`）
   - 任务状态：submitted → working → completed/failed/cancelled
 - [x] `FileA2ATaskStore`（`packages/http/src/a2a-task-store.ts`）

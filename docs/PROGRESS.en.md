@@ -234,6 +234,9 @@
 
 ## Stage 4: A2A Protocol Endpoint 🔄
 
+> Note: Qiongqi internal two-instance A2A cross-call verification was completed in Stage 2 (AgentCard discovery → POST /a2a → PeerArtifact);
+> cross-vendor interoperability verification has no external Agent as a baseline.
+
 - [x] `A2ATaskRecord` data model (`packages/http/src/a2a-task-model.ts`)
   - Task states: submitted → working → completed/failed/cancelled
 - [x] `FileA2ATaskStore` (`packages/http/src/a2a-task-store.ts`)
