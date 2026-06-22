@@ -14,8 +14,8 @@
 <p align="center">
   🌐 <a href="./README.zh.md">中文</a> · <a href="./README.en.md">English</a><br>
   <a href="./docs/PROGRESS.zh.md">改造进度</a> ·
-  <a href="./docs/architecture-overview.zh.md">架构文档</a> ·
-  <a href="./docs/packages.zh.md">包说明</a>
+  <a href="./docs/architecture.zh.md">架构文档</a> ·
+  <a href="./docs/architecture.zh.md#3-包结构">包说明</a>
 </p>
 
 ---
@@ -53,7 +53,7 @@ npx tsx packages/cli/src/serve-entry.ts serve \
 
 ## 📦 Monorepo 包结构
 
-采用 pnpm monorepo 多包结构，共 16 个独立 npm 包。详见 [`docs/packages.zh.md`](./docs/packages.zh.md)。
+采用 pnpm monorepo 多包结构，共 18 个独立 npm 包。详见 [`docs/architecture.zh.md`](./docs/architecture.zh.md#3-包结构)。
 
 ---
 
@@ -64,9 +64,9 @@ npx tsx packages/cli/src/serve-entry.ts serve \
 | **中文 README** | [`README.zh.md`](./README.zh.md) |
 | **English README** | [`README.en.md`](./README.en.md) |
 | **改造进度** | [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md) |
-| **架构总览** | [`docs/architecture-overview.zh.md`](./docs/architecture-overview.zh.md) |
-| **包依赖图** | [`docs/package-dependencies.zh.md`](./docs/package-dependencies.zh.md) |
-| **各包说明** | [`docs/packages.zh.md`](./docs/packages.zh.md) |
+| **架构总览** | [`docs/architecture.zh.md`](./docs/architecture.zh.md) |
+| **包依赖图** | [`docs/architecture.zh.md#附录-a-完整依赖表`](./docs/architecture.zh.md) |
+| **各包说明** | [`docs/architecture.zh.md#3-包结构`](./docs/architecture.zh.md) |
 | **设计规范** | [`docs/superpowers/specs/`](./docs/superpowers/specs/) |
 
 ---

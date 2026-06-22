@@ -98,7 +98,7 @@ After startup, the HTTP API is available at `http://127.0.0.1:8899`.
 ### Script Reference
 
 ```bash
-pnpm -r run build          # Build all 16 packages
+pnpm -r run build          # Build all 18 packages
 pnpm test                  # Full test suite (Vitest)
 pnpm test:unit             # Unit tests
 pnpm test:integration      # Integration tests
@@ -138,7 +138,7 @@ pnpm test:fast             # Fast test subset
 └───────────────────────────────────────────────────┘
 ```
 
-> Detailed architecture: [`docs/architecture-overview.en.md`](./docs/architecture-overview.en.md)
+> Detailed architecture: [`docs/architecture.en.md`](./docs/architecture.en.md)
 
 ---
 
@@ -165,8 +165,8 @@ Qiongqi uses a pnpm monorepo structure with 16 independent npm packages:
 | `@qiongqi/cli` | CLI entry point |
 | `@qiongqi/preset-coding` | Coding preset |
 
-> Full dependency graph: [`docs/package-dependencies.en.md`](./docs/package-dependencies.en.md)
-> Package details: [`docs/packages.en.md`](./docs/packages.en.md)
+> Full dependency graph: [`docs/architecture.en.md#appendix-a-complete-dependency-table`](./docs/architecture.en.md)
+> Package details: [`docs/architecture.en.md#3-package-structure`](./docs/architecture.en.md)
 
 ---
 
@@ -203,10 +203,8 @@ Qiongqi uses a pnpm monorepo structure with 16 independent npm packages:
 ├── docs/                          # Technical docs (bilingual)
 │   ├── PROGRESS.zh.md            # Progress (Chinese)
 │   ├── PROGRESS.en.md            # Progress (English)
-│   ├── architecture-overview.*   # Architecture overview
-│   ├── package-dependencies.*    # Package dependency graph
-│   └── packages.*                # Package guide
-├── packages/                      # 16 @qiongqi/* packages
+│   └── architecture.{zh,en}.md   # Unified architecture (design philosophy + tech architecture + package tour)
+├── packages/                      # 18 @qiongqi/* packages
 │   ├── contracts/
 │   ├── domain/
 │   ├── ports/
@@ -237,9 +235,9 @@ Qiongqi uses a pnpm monorepo structure with 16 independent npm packages:
 | Document | Location |
 |----------|----------|
 | **Refactoring Progress** | [`docs/PROGRESS.en.md`](./docs/PROGRESS.en.md) |
-| **Architecture Overview** | [`docs/architecture-overview.en.md`](./docs/architecture-overview.en.md) |
-| **Package Dependencies** | [`docs/package-dependencies.en.md`](./docs/package-dependencies.en.md) |
-| **Package Guide** | [`docs/packages.en.md`](./docs/packages.en.md) |
+| **Architecture Overview** | [`docs/architecture.en.md`](./docs/architecture.en.md) |
+| **Package Dependencies** | [`docs/architecture.en.md#appendix-a-complete-dependency-table`](./docs/architecture.en.md) |
+| **Package Guide** | [`docs/architecture.en.md#3-package-structure`](./docs/architecture.en.md) |
 | **Design Specs** | [`docs/superpowers/specs/`](./docs/superpowers/specs/) |
 | **Chinese README** | [`README.zh.md`](./README.zh.md) |
 

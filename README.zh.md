@@ -89,7 +89,7 @@ npx tsx packages/cli/src/serve-entry.ts serve \
 ### 脚本速查
 
 ```bash
-pnpm -r run build          # 构建全部 16 个包
+pnpm -r run build          # 构建全部 18 个包
 pnpm test                  # 全量测试（Vitest）
 pnpm test:unit             # 单元测试
 pnpm test:integration      # 集成测试
@@ -129,7 +129,7 @@ pnpm test:fast             # 快速测试子集
 └───────────────────────────────────────────────────┘
 ```
 
-> 详细架构说明见 [`docs/architecture-overview.zh.md`](./docs/architecture-overview.zh.md)
+> 详细架构说明见 [`docs/architecture.zh.md`](./docs/architecture.zh.md)
 
 ---
 
@@ -156,8 +156,8 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 16 个独立 npm 包：
 | `@qiongqi/cli` | 命令行入口 |
 | `@qiongqi/preset-coding` | 编码预设 |
 
-> 完整依赖关系见 [`docs/package-dependencies.zh.md`](./docs/package-dependencies.zh.md)
-> 各包详细说明见 [`docs/packages.zh.md`](./docs/packages.zh.md)
+> 完整依赖关系见 [`docs/architecture.zh.md#附录-a-完整依赖表`](./docs/architecture.zh.md)
+> 各包详细说明见 [`docs/architecture.zh.md#3-包结构`](./docs/architecture.zh.md)
 
 ---
 
@@ -194,10 +194,8 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 16 个独立 npm 包：
 ├── docs/                          # 技术文档（中英双语）
 │   ├── PROGRESS.zh.md            # 改造进度（中文）
 │   ├── PROGRESS.en.md            # Refactoring progress (English)
-│   ├── architecture-overview.*   # 架构总览
-│   ├── package-dependencies.*    # 包依赖图
-│   └── packages.*                # 各包说明
-├── packages/                      # 16 个 @qiongqi/* 包
+│   └── architecture.{zh,en}.md   # 统一架构（设计哲学 + 技术架构 + 包结构）
+├── packages/                      # 18 个 @qiongqi/* 包
 │   ├── contracts/
 │   ├── domain/
 │   ├── ports/
@@ -228,9 +226,9 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 16 个独立 npm 包：
 | 文档 | 位置 |
 |------|------|
 | **改造进度** | [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md) |
-| **架构总览** | [`docs/architecture-overview.zh.md`](./docs/architecture-overview.zh.md) |
-| **包依赖图** | [`docs/package-dependencies.zh.md`](./docs/package-dependencies.zh.md) |
-| **各包说明** | [`docs/packages.zh.md`](./docs/packages.zh.md) |
+| **架构总览** | [`docs/architecture.zh.md`](./docs/architecture.zh.md) |
+| **包依赖图** | [`docs/architecture.zh.md#附录-a-完整依赖表`](./docs/architecture.zh.md) |
+| **各包说明** | [`docs/architecture.zh.md#3-包结构`](./docs/architecture.zh.md) |
 | **设计哲学** | [`docs/superpowers/specs/`](./docs/superpowers/specs/) |
 | **英文 README** | [`README.en.md`](./README.en.md) |
 
