@@ -1,9 +1,11 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
-import type { SubagentsCapabilityConfig } from '@qiongqi/contracts'
+import type { SubagentsCapabilityConfig, AgentCard } from '@qiongqi/contracts'
+import { AgentCardSchema } from '@qiongqi/contracts'
 import type { RuntimeEventRecorder } from '@qiongqi/services'
 import type { UsageSnapshot } from '@qiongqi/contracts'
+import type { PeerRegistry } from './peer-registry.js'
 
 const ChildRunUsage = z.object({
   promptTokens: z.number().int().nonnegative().default(0),
@@ -104,6 +106,19 @@ export class DelegationRuntime {
     idGenerator?: () => string
     executor?: ChildRunExecutor
     recordExternalUsage?: (threadId: string, usage: UsageSnapshot) => void
+    /**
+     * Stage 2: optional PeerRegistry. When supplied, every child run is
+     * also registered as a local peer so it becomes addressable via
+     * `invokePeer(childCardId, task)`. When omitted, behaviour is
+     * unchanged from Stage 1 (pure in-process executor).
+     */
+    peerRegistry?: PeerRegistry
+    /**
+     * Stage 2: directory where child agent cards are persisted. When
+     * `peerRegistry` is supplied, each child gets a card at
+     * `<agentsDir>/<childId>/card.json`. Defaults to `<storeDir>/agents`.
+     */
+    agentsDir?: string
   }) {}
 
   async runChild(input: {
@@ -136,6 +151,18 @@ export class DelegationRuntime {
     await this.options.store.upsert(record)
     await this.recordChildEvent(record)
     this.active += 1
+
+    // Stage 2: publish a child AgentCard so the child is addressable
+    // via the PeerRegistry. Best-effort — card creation never blocks
+    // the delegation itself.
+    if (this.options.peerRegistry) {
+      try {
+        await this.publishChildCard(record)
+      } catch {
+        // Card publishing is non-fatal; the run continues.
+      }
+    }
+
     try {
       const executor: ChildRunExecutor = this.options.executor ?? defaultExecutor
       const result = await executor({
@@ -172,6 +199,76 @@ export class DelegationRuntime {
     } finally {
       this.active -= 1
     }
+  }
+
+  /**
+   * Stage 2: persist a minimal AgentCard for a child agent and register
+   * it as a local peer. The card uses a synthetic URL (children are
+   * in-process) but carries the child's label/model so discovery UIs
+   * can render it.
+   */
+  private async publishChildCard(record: ChildRunRecord): Promise<void> {
+    const registry = this.options.peerRegistry
+    if (!registry) return
+    const cardId = `qiongqi:child:${record.id}`
+    const agentsDir = this.options.agentsDir ?? join(this.storeDir(), 'agents')
+    const cardDir = join(agentsDir, record.id)
+    const card: AgentCard = AgentCardSchema.parse({
+      id: cardId,
+      // Children are in-process; use a synthetic URL. The A2A endpoint
+      // is the parent's, so this URL is informational only.
+      url: 'qiongqi://child/' + encodeURIComponent(record.id),
+      name: record.label ?? `Child ${record.id}`,
+      version: '0.1.0',
+      skills: [],
+      capabilities: {
+        contractVersion: 1,
+        model: {
+          id: record.model ?? 'child',
+          inputModalities: ['text'],
+          outputModalities: ['text'],
+          supportsToolCalling: true,
+          messageParts: ['text']
+        },
+        cli: {
+          serve: { status: 'unavailable', enabled: false, available: false, reason: 'child agent' },
+          run: { status: 'available', enabled: true, available: true },
+          chat: { status: 'unavailable', enabled: false, available: false, reason: 'child agent' },
+          exec: { status: 'unavailable', enabled: false, available: false, reason: 'child agent' }
+        },
+        mcp: { status: 'disabled', enabled: false, available: false, reason: 'child agent', configuredServers: 0, connectedServers: 0, toolCount: 0, search: { enabled: false, mode: 'auto', active: false, indexedToolCount: 0, advertisedToolCount: 0 } },
+        web: { status: 'disabled', enabled: false, available: false, reason: 'child agent', fetch: { status: 'disabled', enabled: false, available: false, reason: 'child agent' }, search: { status: 'disabled', enabled: false, available: false, reason: 'child agent' } },
+        skills: { status: 'disabled', enabled: false, available: false, reason: 'child agent', configuredRoots: 0, discoveredSkills: 0 },
+        subagents: { status: 'disabled', enabled: false, available: false, reason: 'child agent', maxParallel: 0, maxChildRuns: 0 },
+        attachments: { status: 'disabled', enabled: false, available: false, reason: 'child agent', maxImageBytes: 0, maxImageDimension: 0, allowedMimeTypes: [], textFallbackMaxBase64Bytes: 0, textFallbackMaxImageDimension: 0, textFallbackPreferredMimeType: 'image/webp' },
+        memory: { status: 'disabled', enabled: false, available: false, reason: 'child agent', scopes: [], maxInjectedRecords: 0 }
+      },
+      model: {
+        provider: 'qiongqi-child',
+        defaultModel: record.model ?? 'default',
+        endpointFormats: ['chat_completions']
+      }
+    })
+    await mkdir(cardDir, { recursive: true })
+    await writeFile(join(cardDir, 'card.json'), JSON.stringify(card, null, 2), 'utf8')
+    // Register a local handle that re-invokes the executor. The handle
+    // is intentionally minimal — full task routing will land in a later
+    // stage when children get their own runtime loop.
+    await registry.registerLocal({
+      card,
+      invoke: async (task) => ({
+        peerCardId: cardId,
+        status: 'completed',
+        summary: `Child ${record.id} received: ${task.prompt.slice(0, 80)}`
+      })
+    })
+  }
+
+  private storeDir(): string {
+    // FileDelegationStore stores at rootDir; access via a cast since the
+    // field is private. This is acceptable inside the same package.
+    const store = this.options.store as unknown as { rootDir: string }
+    return store.rootDir
   }
 
   async diagnostics(parentThreadId?: string): Promise<{

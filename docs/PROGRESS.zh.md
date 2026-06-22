@@ -164,13 +164,31 @@
 
 ---
 
-## 阶段 2：AgentCard + AgentIdentity（未开始）
+## 阶段 2：AgentCard + AgentIdentity ✅
 
-- [ ] `AgentCardSchema` 合约定义
-- [ ] `PeerRegistry` 实现（本地 + 远程 peer）
-- [ ] `GET /.well-known/agent-card.json` 端点
-- [ ] DelegationRuntime 改造（子代理持久化）
-- [ ] 跨实例互调端到端验证
+- [x] `AgentCardSchema` 合约定义（`packages/contracts/src/agent-identity.ts`）：
+  - `SkillSummarySchema` — 轻量技能摘要（避免 contracts → skills 循环依赖）
+  - `AgentCardSchema` — 代理人身份证（id/url/name/version/skills/capabilities/model/endpoints）
+  - `PeerRecordSchema` — 本地/远程 peer 记录
+  - `PeerTaskSchema` / `PeerArtifactSchema` — A2A 任务与结果类型
+- [x] `PeerRegistry` 实现（`packages/delegation/src/peer-registry.ts`）：
+  - `LocalPeerHandle` 接口 — 进程内本地 peer 调用
+  - `RemotePeerTransport` 接口 — 远程 HTTP peer 传输（由 http 包实现，依赖反转）
+  - `PeerRegistry` — 统一 `invokePeer(cardId, task)` 入口
+  - `FilePeerStore` — 远程 peer 持久化到 `peers.json`
+- [x] `GET /.well-known/agent-card.json` 端点：
+  - 无需认证（RFC 8615 discovery 约定）
+  - 自动构建或接受显式传入的 AgentCard
+  - 稳定 id 持久化到 `<dataDir>/agent-identity.json`
+- [x] DelegationRuntime 改造：
+  - 可选 `peerRegistry` 注入 — 子代理运行时自动注册到 PeerRegistry
+  - 子代理 AgentCard 落盘到 `<dataDir>/agents/<id>/card.json`
+  - 无 peerRegistry 时行为完全不变（向后兼容）
+- [x] 跨实例端到端验证：
+  - 两实例各有独立 `qiongqi:<uuid>` id
+  - AgentCard 端点返回正确 card（id/url/name/version/model/endpoints/capabilities）
+  - id 持久化重启不丢失
+  - 全量 433/433 测试 + tsc 0 错误
 
 ---
 

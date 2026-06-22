@@ -9,7 +9,7 @@ import type { UserInputGate } from '@qiongqi/ports'
 import type { WorkspaceInspector } from '@qiongqi/ports'
 import type { ToolHost, ToolProviderPolicy } from '@qiongqi/ports'
 import type { RuntimeEventRecorder } from '@qiongqi/services'
-import type { RuntimeInfoResponse } from '@qiongqi/contracts'
+import type { RuntimeInfoResponse, AgentCard } from '@qiongqi/contracts'
 import type { McpServerDiagnostic } from '@qiongqi/adapter-tools'
 import type { McpSearchRuntimeDiagnostic } from '@qiongqi/adapter-tools'
 import type { WebProviderDiagnostic } from '@qiongqi/adapter-tools'
@@ -63,6 +63,11 @@ export type ServerRuntime = {
   allocateSeq: (threadId: string) => number
   nowIso: () => string
   info(): RuntimeInfoResponse
+  /**
+   * This agent's published identity card (Stage 2). Served at
+   * `/.well-known/agent-card.json` for A2A discovery.
+   */
+  agentCard?: AgentCard
   toolDiagnostics?(): RuntimeToolDiagnostics | Promise<RuntimeToolDiagnostics>
   skills?(): SkillRuntimeDiagnostics | Promise<SkillRuntimeDiagnostics>
   /**

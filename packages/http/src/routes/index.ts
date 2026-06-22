@@ -29,6 +29,7 @@ import { resolveUserInput } from './user-inputs.js'
 import { resumeSession } from './sessions.js'
 import { usageJsonResponse } from './usage.js'
 import { runtimeInfoJsonResponse, runtimeToolDiagnosticsJsonResponse } from './runtime-info.js'
+import { agentCardJsonResponse } from './agent-card.js'
 import { listSkills } from './skills.js'
 import {
   attachmentDiagnostics,
@@ -50,6 +51,7 @@ import type { ServerRuntime } from './server-runtime.js'
 /**
  * Build the full router used by the HTTP server. The router exposes:
  * - `GET /health` (unauthenticated)
+ * - `GET /.well-known/agent-card.json` (unauthenticated, Stage 2 A2A discovery)
  * - `GET /v1/runtime/info` (auth)
  * - `GET /v1/runtime/tools` (auth)
  * - `GET /v1/skills` (auth)
@@ -78,6 +80,8 @@ import type { ServerRuntime } from './server-runtime.js'
 export function buildRouter(runtime: ServerRuntime): Router {
   const router = new Router()
   router.add('GET', '/health', () => healthJsonResponse())
+  // Stage 2: A2A discovery — public, unauthenticated by RFC 8615 convention.
+  router.add('GET', '/.well-known/agent-card.json', () => agentCardJsonResponse(runtime))
   router.add('GET', '/v1/runtime/info', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     return runtimeInfoJsonResponse(runtime)

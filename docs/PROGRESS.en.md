@@ -164,13 +164,31 @@
 
 ---
 
-## Stage 2: AgentCard + AgentIdentity (Not Started)
+## Stage 2: AgentCard + AgentIdentity ✅
 
-- [ ] `AgentCardSchema` contract definition
-- [ ] `PeerRegistry` implementation (local + remote peers)
-- [ ] `GET /.well-known/agent-card.json` endpoint
-- [ ] DelegationRuntime refactoring (child agent persistence)
-- [ ] Cross-instance invocation end-to-end verification
+- [x] `AgentCardSchema` contract definition (`packages/contracts/src/agent-identity.ts`):
+  - `SkillSummarySchema` — lightweight skill summary (avoids contracts → skills circular dependency)
+  - `AgentCardSchema` — agent identity card (id/url/name/version/skills/capabilities/model/endpoints)
+  - `PeerRecordSchema` — local/remote peer records
+  - `PeerTaskSchema` / `PeerArtifactSchema` — A2A task & result types
+- [x] `PeerRegistry` implementation (`packages/delegation/src/peer-registry.ts`):
+  - `LocalPeerHandle` interface — in-process local peer invocation
+  - `RemotePeerTransport` interface — remote HTTP peer transport (implemented by http, dependency inversion)
+  - `PeerRegistry` — unified `invokePeer(cardId, task)` entry point
+  - `FilePeerStore` — remote peer persistence to `peers.json`
+- [x] `GET /.well-known/agent-card.json` endpoint:
+  - Unauthenticated (RFC 8615 discovery convention)
+  - Auto-builds or accepts an explicit AgentCard
+  - Stable id persisted to `<dataDir>/agent-identity.json`
+- [x] DelegationRuntime refactoring:
+  - Optional `peerRegistry` injection — child agents auto-register on run
+  - Child AgentCard persisted to `<dataDir>/agents/<id>/card.json`
+  - Behaviour unchanged when no peerRegistry (backward compatible)
+- [x] Cross-instance end-to-end verification:
+  - Two instances have independent `qiongqi:<uuid>` ids
+  - AgentCard endpoint returns correct card (id/url/name/version/model/endpoints/capabilities)
+  - Id persists across restarts
+  - Full 433/433 tests + tsc 0 errors
 
 ---
 

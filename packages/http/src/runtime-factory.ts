@@ -1,6 +1,8 @@
 import { mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { buildRouter } from './routes/index.js'
 import type { ServerRuntime } from './routes/server-runtime.js'
 import { startNodeHttpServer, type NodeHttpServerHandle } from './node-http-server.js'
@@ -26,6 +28,11 @@ import {
   type QiongqiCapabilitiesConfig
 } from '@qiongqi/contracts'
 import type { ApprovalPolicy, SandboxMode } from '@qiongqi/contracts'
+import {
+  AgentCardSchema,
+  type AgentCard,
+  type SkillSummary
+} from '@qiongqi/contracts'
 import { TurnOrchestrator } from '@qiongqi/loop'
 import { ContextCompactor } from '@qiongqi/loop'
 import type { TokenEconomyConfig } from '@qiongqi/loop'
@@ -65,6 +72,7 @@ import { collectSkillMcpServers } from '@qiongqi/skills'
 import { FileMemoryStore } from '@qiongqi/memory'
 import { DelegationRuntime, FileDelegationStore } from '@qiongqi/delegation'
 import { createChildAgentExecutor } from '@qiongqi/delegation'
+import { PeerRegistry, FilePeerStore } from '@qiongqi/delegation'
 
 // ---------------------------------------------------------------------------
 // Options
@@ -119,6 +127,15 @@ export type QiongqiServeRuntimeOptions = {
    * roots explicitly without relying on process layout.
    */
   skillRoots?: string[]
+  /**
+   * Stage 2: explicit AgentCard override. When omitted, the runtime
+   * builds a card automatically from `host`/`port`/`model`/
+   * `agentName`/capabilities and persists a stable id under
+   * `<dataDir>/agent-identity.json`. Pass an explicit card only when
+   * you need to override the auto-derived fields (e.g. behind a proxy
+   * with a different public URL).
+   */
+  agentCard?: AgentCard
 }
 
 export type QiongqiServeHandle = NodeHttpServerHandle & {
@@ -319,6 +336,8 @@ export interface ToolMatrix {
   skillRuntime: SkillRuntime
   skillPluginHost: SkillPluginHost
   delegationRuntime: DelegationRuntime | undefined
+  /** Stage 2: peer registry shared with delegation runtime. */
+  peerRegistry: PeerRegistry
   attachmentStore: FileAttachmentStore | undefined
   memoryStore: FileMemoryStore | undefined
 }
@@ -347,7 +366,15 @@ export async function createToolMatrix(
     'dataDir' | 'capabilities' | 'approvalPolicy' | 'sandboxMode' | 'model' | 'models' | 'contextCompaction' | 'runtime' | 'skillRoots' | 'tokenEconomyMode' | 'tokenEconomy'
   >,
   core: CoreRuntime,
-  model: ModelAdapter
+  model: ModelAdapter,
+  /**
+   * Stage 2: peer registry injected from the caller. When supplied,
+   * the delegation runtime registers child agents here so they become
+   * addressable via `invokePeer`. Created by {@link createAgent} and
+   * forwarded down — keeps the registry lifetime tied to the agent,
+   * not the tool matrix.
+   */
+  peerRegistry?: PeerRegistry
 ): Promise<ToolMatrix> {
   const nowIso = core.nowIso
   const skillRuntime = await SkillRuntime.create(options.capabilities?.skills)
@@ -405,6 +432,10 @@ export async function createToolMatrix(
         store: new FileDelegationStore(join(options.dataDir, 'child-runs')),
         events: core.events,
         nowIso,
+        ...(peerRegistry ? {
+          peerRegistry,
+          agentsDir: join(options.dataDir, 'agents')
+        } : {}),
         executor: createChildAgentExecutor({
           model: model.client,
           toolHost: childToolHost,
@@ -463,6 +494,10 @@ export async function createToolMatrix(
     })()
   ])
   const toolHost = new LocalToolHost({ registry, readTracker: true })
+  // Stage 2: always give ToolMatrix a peer registry. When the caller
+  // didn't supply one (e.g. tests, legacy paths), create a standalone
+  // one so the interface is always satisfied.
+  const effectivePeerRegistry = peerRegistry ?? new PeerRegistry()
   return {
     registry,
     toolHost,
@@ -471,6 +506,7 @@ export async function createToolMatrix(
     skillRuntime,
     skillPluginHost,
     delegationRuntime,
+    peerRegistry: effectivePeerRegistry,
     attachmentStore,
     memoryStore
   }
@@ -543,8 +579,33 @@ export async function createAgent(
 ): Promise<ServerRuntime> {
   const core = await createCore(options)
   const model = createModelAdapter(options)
-  const tools = await createToolMatrix(options, core, model)
-  return assembleRuntime({ options, core, model, tools })
+  // Stage 2: create the PeerRegistry that will be shared between
+  // the HTTP routes (agent-card discovery), delegation runtime
+  // (child agents), and external callers (A2A).
+  const peerStore = new FilePeerStore(join(options.dataDir, 'peers'))
+  const peerRegistry = new PeerRegistry({
+    remoteTransport: undefined, // set by embedders that need A2A outbound
+    onChange: async (record, action) => {
+      if (action === 'register' && record.kind === 'remote') {
+        const cards = await peerStore.load()
+        const existing = new Map(cards.map((c) => [c.id, c]))
+        existing.set(record.card.id, record.card)
+        await peerStore.save([...existing.values()])
+      } else if (action === 'unregister' && record.kind === 'remote') {
+        const cards = (await peerStore.load()).filter((c) => c.id !== record.card.id)
+        await peerStore.save(cards)
+      }
+    }
+  })
+  // Restore previously persisted remote peers on startup.
+  for (const card of await peerStore.load()) {
+    await peerRegistry.registerRemote(card).catch(() => {
+      // Peers that fail to re-register on startup are silently skipped —
+      // the operator can re-discover them later.
+    })
+  }
+  const tools = await createToolMatrix(options, core, model, peerRegistry)
+  return await assembleRuntime({ options, core, model, tools })
 }
 
 /**
@@ -573,12 +634,12 @@ function tokenEconomyConfigForOptions(
   }
 }
 
-function assembleRuntime(input: {
+async function assembleRuntime(input: {
   options: QiongqiServeRuntimeOptions
   core: CoreRuntime
   model: ModelAdapter
   tools: ToolMatrix
-}): ServerRuntime {
+}): Promise<ServerRuntime> {
   const { options, core, model, tools } = input
   const prefix = createImmutablePrefix({
     systemPrompt: options.systemPrompt ?? QIONGQI_SYSTEM_PROMPT,
@@ -665,6 +726,31 @@ function assembleRuntime(input: {
     subagents: { available: Boolean(tools.delegationRuntime) }
   })
   const startedAt = options.startedAt ?? core.nowIso()
+
+  // Stage 2: build or accept the AgentCard. When the caller supplied
+  // an explicit card we trust it verbatim (after re-validation).
+  // Otherwise we derive one from host/port/model/agentName and
+  // persist a stable id under <dataDir>/agent-identity.json so the
+  // same dataDir yields the same card id across restarts.
+  const skillSummaries: SkillSummary[] = tools.skillRuntime.diagnostics().skills.map((s) => ({
+    id: s.id,
+    name: s.name,
+    version: s.version ?? '0.0.0',
+    ...(s.description ? { description: s.description } : {}),
+    category: 'workflow' as const
+  }))
+  const endpointFormat = options.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT
+  const agentCard = options.agentCard ?? await buildAgentCard({
+    dataDir: options.dataDir,
+    host: options.host,
+    port: options.port,
+    agentName: options.agentName ?? 'Qiongqi',
+    model: options.model,
+    endpointFormats: [endpointFormat],
+    capabilities,
+    skills: skillSummaries
+  })
+
   return {
     threadService: core.threadService,
     turnService: core.turnService,
@@ -679,6 +765,8 @@ function assembleRuntime(input: {
     toolHost: tools.toolHost,
     ...(tools.attachmentStore ? { attachmentStore: tools.attachmentStore } : {}),
     ...(tools.memoryStore ? { memoryStore: tools.memoryStore } : {}),
+    /** Stage 2: published at /.well-known/agent-card.json */
+    agentCard,
     runTurn(threadId, turnId) {
       return loop.runTurn(threadId, turnId)
     },
@@ -881,4 +969,89 @@ async function resolveBuiltinSkillRoot(
   }
   const packaged = join(dataDir, 'builtin-skills')
   return existsSync(packaged) ? packaged : undefined
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: AgentCard assembly
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive a stable {@link AgentCard} for this agent instance.
+ *
+ * The card id is persisted at `<dataDir>/agent-identity.json` so the
+ * same dataDir yields the same id across restarts. The first launch
+ * generates a new id (`qiongqi:<uuid>`); subsequent launches reload
+ * it so peers can re-establish trust without re-discovery.
+ */
+async function buildAgentCard(input: {
+  dataDir: string
+  host: string
+  port: number
+  agentName: string
+  model: string
+  endpointFormats: AgentCard['model']['endpointFormats']
+  capabilities: AgentCard['capabilities']
+  skills: SkillSummary[]
+}): Promise<AgentCard> {
+  const id = await resolveStableAgentId(input.dataDir)
+  const baseUrl = `http://${input.host}:${input.port}`
+  const card = AgentCardSchema.parse({
+    id,
+    url: baseUrl,
+    name: input.agentName,
+    version: '0.1.0',
+    skills: input.skills,
+    capabilities: input.capabilities,
+    model: {
+      // provider is derived from the baseUrl host so consumers know
+      // which API family the agent speaks without an extra field.
+      provider: deriveProviderFromHost(input.host),
+      defaultModel: input.model,
+      endpointFormats: input.endpointFormats
+    }
+  })
+  return card
+}
+
+/**
+ * Read or create a stable agent id for the given dataDir.
+ *
+ * Persistence: `<dataDir>/agent-identity.json` with shape
+ * `{ id: 'qiongqi:<uuid>', createdAt: '<iso>' }`.
+ */
+async function resolveStableAgentId(dataDir: string): Promise<string> {
+  const identityPath = join(dataDir, 'agent-identity.json')
+  try {
+    const text = await readFile(identityPath, 'utf8')
+    const parsed = JSON.parse(text) as { id?: unknown }
+    if (typeof parsed.id === 'string' && parsed.id.length > 0) {
+      return parsed.id
+    }
+  } catch {
+    // file doesn't exist or is corrupt — fall through to creation
+  }
+  const id = `qiongqi:${randomUUID()}`
+  try {
+    await mkdir(dataDir, { recursive: true })
+    await writeFile(
+      identityPath,
+      JSON.stringify({ id, createdAt: new Date().toISOString() }, null, 2),
+      'utf8'
+    )
+  } catch {
+    // Best-effort persistence — id is still returned in-memory.
+  }
+  return id
+}
+
+/**
+ * Best-effort provider label derived from the bind host. This is only
+ * a hint for discovery UIs; the authoritative model info lives in the
+ * runtime capability manifest.
+ */
+function deriveProviderFromHost(host: string): string {
+  // The host is the *bind* address, not the upstream provider, so we
+  // can't infer the real provider from it. Use a neutral label and
+  // let the capability manifest carry the details.
+  return `qiongqi@${host}`
 }
