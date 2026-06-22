@@ -73,6 +73,7 @@ import { FileMemoryStore } from '@qiongqi/memory'
 import { DelegationRuntime, FileDelegationStore } from '@qiongqi/delegation'
 import { createChildAgentExecutor } from '@qiongqi/delegation'
 import { PeerRegistry, FilePeerStore } from '@qiongqi/delegation'
+import { HttpPeerTransport } from './http-peer-transport.js'
 
 // ---------------------------------------------------------------------------
 // Options
@@ -584,7 +585,9 @@ export async function createAgent(
   // (child agents), and external callers (A2A).
   const peerStore = new FilePeerStore(join(options.dataDir, 'peers'))
   const peerRegistry = new PeerRegistry({
-    remoteTransport: undefined, // set by embedders that need A2A outbound
+    remoteTransport: new HttpPeerTransport({
+      getToken: () => options.runtimeToken || undefined
+    }),
     onChange: async (record, action) => {
       if (action === 'register' && record.kind === 'remote') {
         const cards = await peerStore.load()

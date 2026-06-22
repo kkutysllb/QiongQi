@@ -152,18 +152,33 @@ export class DelegationRuntime {
     await this.recordChildEvent(record)
     this.active += 1
 
-    // Stage 2: publish a child AgentCard so the child is addressable
-    // via the PeerRegistry. Best-effort — card creation never blocks
-    // the delegation itself.
-    if (this.options.peerRegistry) {
-      try {
-        await this.publishChildCard(record)
-      } catch {
-        // Card publishing is non-fatal; the run continues.
-      }
-    }
-
     try {
+      // Stage 2: when a PeerRegistry is available, register the child
+      // as a local peer and dispatch through invokePeer so the child
+      // becomes addressable for cross-instance A2A calls.
+      if (this.options.peerRegistry) {
+        const executor: ChildRunExecutor = this.options.executor ?? defaultExecutor
+        const cardId = `qiongqi:child:${id}`
+        await this.publishChildCard(record, executor)
+        const artifact = await this.options.peerRegistry.invokePeer(cardId, {
+          prompt: input.prompt,
+          ...(input.workspace ? { workspace: input.workspace } : {}),
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.label ? { label: input.label } : {})
+        }, input.signal)
+        record = ChildRunRecord.parse({
+          ...record,
+          status: mapPeerStatus(artifact.status),
+          ...(artifact.summary ? { summary: artifact.summary } : {}),
+          ...(artifact.error ? { error: artifact.error } : {}),
+          updatedAt: this.now()
+        })
+        await this.options.store.upsert(record)
+        await this.recordChildEvent(record)
+        return record
+      }
+
+      // Legacy path (no PeerRegistry): invoke the executor directly.
       const executor: ChildRunExecutor = this.options.executor ?? defaultExecutor
       const result = await executor({
         childId: id,
@@ -207,7 +222,7 @@ export class DelegationRuntime {
    * in-process) but carries the child's label/model so discovery UIs
    * can render it.
    */
-  private async publishChildCard(record: ChildRunRecord): Promise<void> {
+  private async publishChildCard(record: ChildRunRecord, executor: ChildRunExecutor): Promise<void> {
     const registry = this.options.peerRegistry
     if (!registry) return
     const cardId = `qiongqi:child:${record.id}`
@@ -256,11 +271,23 @@ export class DelegationRuntime {
     // stage when children get their own runtime loop.
     await registry.registerLocal({
       card,
-      invoke: async (task) => ({
-        peerCardId: cardId,
-        status: 'completed',
-        summary: `Child ${record.id} received: ${task.prompt.slice(0, 80)}`
-      })
+      invoke: async (task, signal) => {
+        const result = await executor({
+          childId: record.id,
+          parentThreadId: record.parentThreadId,
+          parentTurnId: record.parentTurnId,
+          label: record.label,
+          prompt: task.prompt,
+          workspace: task.workspace,
+          model: task.model,
+          signal
+        })
+        return {
+          peerCardId: cardId,
+          status: 'completed',
+          summary: result.summary
+        }
+      }
     })
   }
 
@@ -382,4 +409,9 @@ const defaultExecutor: ChildRunExecutor = async (input) => {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Map PeerArtifact status to ChildRunRecord status. */
+function mapPeerStatus(status: 'completed' | 'failed' | 'aborted'): ChildRunRecord['status'] {
+  return status
 }

@@ -182,11 +182,18 @@
   - Stable id persisted to `<dataDir>/agent-identity.json`
 - [x] DelegationRuntime refactoring:
   - Optional `peerRegistry` injection — child agents auto-register on run
+  - `runChild()` dispatches via `invokePeer(childCardId, task)` when peerRegistry present
+  - LocalPeerHandle.invoke bound to real child-agent-executor
   - Child AgentCard persisted to `<dataDir>/agents/<id>/card.json`
   - Behaviour unchanged when no peerRegistry (backward compatible)
-- [x] Cross-instance end-to-end verification:
-  - Two instances have independent `qiongqi:<uuid>` ids
-  - AgentCard endpoint returns correct card (id/url/name/version/model/endpoints/capabilities)
+- [x] A2A protocol implementation:
+  - `POST /a2a` endpoint (authenticated) — receives PeerTask, creates temp thread + runs turn, returns PeerArtifact
+  - `HttpPeerTransport` — HTTP implementation of `RemotePeerTransport` (token resolution callback)
+  - `createAgent` injects `HttpPeerTransport` + `PeerRegistry` into runtime
+- [x] Cross-instance A2A closed-loop verification:
+  - AgentCard discovery: two instances have independent `qiongqi:<uuid>` ids
+  - AgentCard endpoint returns complete card (id/url/name/version/model/endpoints/capabilities)
+  - `POST /a2a` task submission: A→B / B→A cross-call receives task, creates thread, executes turn, returns PeerArtifact
   - Id persists across restarts
   - Full 433/433 tests + tsc 0 errors
 

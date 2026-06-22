@@ -182,11 +182,18 @@
   - 稳定 id 持久化到 `<dataDir>/agent-identity.json`
 - [x] DelegationRuntime 改造：
   - 可选 `peerRegistry` 注入 — 子代理运行时自动注册到 PeerRegistry
+  - `runChild()` 在 peerRegistry 存在时改为 `invokePeer(childCardId, task)` 分发
+  - LocalPeerHandle 的 invoke 绑定到真实的 child-agent-executor
   - 子代理 AgentCard 落盘到 `<dataDir>/agents/<id>/card.json`
   - 无 peerRegistry 时行为完全不变（向后兼容）
-- [x] 跨实例端到端验证：
-  - 两实例各有独立 `qiongqi:<uuid>` id
-  - AgentCard 端点返回正确 card（id/url/name/version/model/endpoints/capabilities）
+- [x] A2A 协议实现：
+  - `POST /a2a` 端点（认证）— 接收 PeerTask，创建临时 thread 并执行 turn，返回 PeerArtifact
+  - `HttpPeerTransport` — `RemotePeerTransport` 的 HTTP 实现（token 解析回调）
+  - `createAgent` 注入 `HttpPeerTransport` + `PeerRegistry` 到 runtime
+- [x] 跨实例 A2A 闭环验证：
+  - AgentCard 发现：两实例各有独立 `qiongqi:<uuid>` id
+  - AgentCard 端点返回完整 card（id/url/name/version/model/endpoints/capabilities）
+  - `POST /a2a` 任务提交：A→B / B→A 互调端点接收任务、创建 thread、执行 turn、返回 PeerArtifact
   - id 持久化重启不丢失
   - 全量 433/433 测试 + tsc 0 错误
 

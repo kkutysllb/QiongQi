@@ -30,6 +30,7 @@ import { resumeSession } from './sessions.js'
 import { usageJsonResponse } from './usage.js'
 import { runtimeInfoJsonResponse, runtimeToolDiagnosticsJsonResponse } from './runtime-info.js'
 import { agentCardJsonResponse } from './agent-card.js'
+import { a2aTaskHandler } from './a2a.js'
 import { listSkills } from './skills.js'
 import {
   attachmentDiagnostics,
@@ -52,6 +53,7 @@ import type { ServerRuntime } from './server-runtime.js'
  * Build the full router used by the HTTP server. The router exposes:
  * - `GET /health` (unauthenticated)
  * - `GET /.well-known/agent-card.json` (unauthenticated, Stage 2 A2A discovery)
+ * - `POST /a2a` (auth, Stage 2 A2A task submission)
  * - `GET /v1/runtime/info` (auth)
  * - `GET /v1/runtime/tools` (auth)
  * - `GET /v1/skills` (auth)
@@ -82,6 +84,11 @@ export function buildRouter(runtime: ServerRuntime): Router {
   router.add('GET', '/health', () => healthJsonResponse())
   // Stage 2: A2A discovery — public, unauthenticated by RFC 8615 convention.
   router.add('GET', '/.well-known/agent-card.json', () => agentCardJsonResponse(runtime))
+  // Stage 2: A2A task submission — authenticated, peers submit tasks here.
+  router.add('POST', '/a2a', async (request) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    return a2aTaskHandler(runtime, request)
+  })
   router.add('GET', '/v1/runtime/info', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     return runtimeInfoJsonResponse(runtime)
