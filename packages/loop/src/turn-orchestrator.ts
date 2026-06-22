@@ -325,105 +325,18 @@ export class TurnOrchestrator {
     signal: AbortSignal,
     stepIndex: number
   ): Promise<'continue' | 'stop' | 'failed' | 'aborted'> {
-    const built = await this.promptBuilder.build({ threadId, turnId, signal, stepIndex })
-    if (built.kind === 'aborted') return 'aborted'
-    if (built.kind === 'stop') return 'stop'
-    const ctx = built.ctx
-
-    const stepResult = await this.modelStepRunner.run({
-      request: ctx.request,
+    return runOrchestratorStep({
       threadId,
       turnId,
       signal,
-      toolProviderMetadata: ctx.toolProviderMetadata,
-      toolKinds: ctx.toolKinds,
-      recordPromptPressure: (tid, model, promptTokens) =>
-        this.promptBuilder.recordPromptPressure(tid, model, promptTokens)
+      stepIndex,
+      promptBuilder: this.promptBuilder,
+      modelStepRunner: this.modelStepRunner,
+      coordinator: this.coordinator,
+      events: this.opts.events,
+      turns: this.opts.turns,
+      ids: this.opts.ids
     })
-    if (stepResult.kind === 'aborted') return 'aborted'
-
-    const decision = decideContinuation({
-      stepResult,
-      ctx,
-      ids: this.opts.ids,
-      threadId,
-      turnId
-    })
-
-    switch (decision.action) {
-      case 'stop':
-        return 'stop'
-      case 'continue':
-        return 'continue'
-      case 'failed':
-        return 'failed'
-      case 'failed_with_error': {
-        await this.opts.events.record({
-          kind: 'error',
-          threadId,
-          turnId,
-          message: decision.errorMessage,
-          code: decision.errorCode
-        })
-        await this.opts.turns.applyItem(
-          threadId,
-          makeErrorItem({
-            id: this.opts.ids.next('item_error'),
-            turnId,
-            threadId,
-            message: decision.errorMessage,
-            code: decision.errorCode
-          })
-        )
-        return 'failed'
-      }
-      case 'materialize_plan': {
-        await this.opts.turns.applyItem(threadId, decision.planToolCallItem)
-        await this.opts.events.record({
-          kind: 'tool_call_ready',
-          threadId,
-          turnId,
-          itemId: decision.planToolCallItem.id,
-          callId: decision.planCall.callId,
-          toolName: CREATE_PLAN_TOOL_NAME,
-          readyCount: 1
-        })
-        const dispatched = await this.coordinator.dispatch({
-          calls: [decision.planCall],
-          threadId,
-          turnId,
-          workspace: ctx.thread?.workspace ?? '',
-          threadMode: ctx.effectiveMode,
-          ...(ctx.activePlanContext ? { activePlanContext: ctx.activePlanContext } : {}),
-          modelCapabilities: ctx.modelCapabilities,
-          activeSkillIds: ctx.activeSkillIds,
-          ...(ctx.allowedToolNames ? { allowedToolNames: ctx.allowedToolNames } : {}),
-          toolProviderKinds: ctx.toolProviderKinds,
-          approvalPolicy: ctx.approvalPolicy,
-          signal
-        })
-        if (dispatched === 'aborted') return 'aborted'
-        return 'continue'
-      }
-      case 'dispatch': {
-        const dispatched = await this.coordinator.dispatch({
-          calls: stepResult.completedToolCalls,
-          threadId,
-          turnId,
-          workspace: ctx.thread?.workspace ?? '',
-          threadMode: ctx.effectiveMode,
-          ...(ctx.activePlanContext ? { activePlanContext: ctx.activePlanContext } : {}),
-          modelCapabilities: ctx.modelCapabilities,
-          activeSkillIds: ctx.activeSkillIds,
-          ...(ctx.allowedToolNames ? { allowedToolNames: ctx.allowedToolNames } : {}),
-          toolProviderKinds: ctx.toolProviderKinds,
-          approvalPolicy: ctx.approvalPolicy,
-          signal
-        })
-        if (dispatched === 'aborted') return 'aborted'
-        return 'continue'
-      }
-    }
   }
 
   /** Convenience factory for tests: builds an orchestrator with sensible defaults. */
@@ -432,5 +345,127 @@ export class TurnOrchestrator {
       systemPrompt: 'You are Qiongqi, a careful and helpful assistant.',
       pinnedConstraints: ['user: preserve recent turns', 'project: keep responses concise']
     })
+  }
+}
+
+/**
+ * Shared step executor used by both {@link TurnOrchestrator} and
+ * {@link EventedTurnOrchestrator}.
+ *
+ * Extracted as a pure function so the evented orchestrator can wrap
+ * each step with {@link TurnStepEvent} recording and
+ * {@link TurnStateV1} persistence without duplicating the step logic.
+ */
+export async function runOrchestratorStep(input: {
+  threadId: string
+  turnId: string
+  signal: AbortSignal
+  stepIndex: number
+  promptBuilder: PromptBuilder
+  modelStepRunner: ModelStepRunner
+  coordinator: ToolCallCoordinator
+  events: RuntimeEventRecorder
+  turns: TurnService
+  ids: IdGenerator
+}): Promise<'continue' | 'stop' | 'failed' | 'aborted'> {
+  const { threadId, turnId, signal, stepIndex, promptBuilder, modelStepRunner, coordinator, events, turns, ids } = input
+  const built = await promptBuilder.build({ threadId, turnId, signal, stepIndex })
+  if (built.kind === 'aborted') return 'aborted'
+  if (built.kind === 'stop') return 'stop'
+  const ctx = built.ctx
+
+  const stepResult = await modelStepRunner.run({
+    request: ctx.request,
+    threadId,
+    turnId,
+    signal,
+    toolProviderMetadata: ctx.toolProviderMetadata,
+    toolKinds: ctx.toolKinds,
+    recordPromptPressure: (tid, model, promptTokens) =>
+      promptBuilder.recordPromptPressure(tid, model, promptTokens)
+  })
+  if (stepResult.kind === 'aborted') return 'aborted'
+
+  const decision = decideContinuation({
+    stepResult,
+    ctx,
+    ids,
+    threadId,
+    turnId
+  })
+
+  switch (decision.action) {
+    case 'stop':
+      return 'stop'
+    case 'continue':
+      return 'continue'
+    case 'failed':
+      return 'failed'
+    case 'failed_with_error': {
+      await events.record({
+        kind: 'error',
+        threadId,
+        turnId,
+        message: decision.errorMessage,
+        code: decision.errorCode
+      })
+      await turns.applyItem(
+        threadId,
+        makeErrorItem({
+          id: ids.next('item_error'),
+          turnId,
+          threadId,
+          message: decision.errorMessage,
+          code: decision.errorCode
+        })
+      )
+      return 'failed'
+    }
+    case 'materialize_plan': {
+      await turns.applyItem(threadId, decision.planToolCallItem)
+      await events.record({
+        kind: 'tool_call_ready',
+        threadId,
+        turnId,
+        itemId: decision.planToolCallItem.id,
+        callId: decision.planCall.callId,
+        toolName: CREATE_PLAN_TOOL_NAME,
+        readyCount: 1
+      })
+      const dispatched = await coordinator.dispatch({
+        calls: [decision.planCall],
+        threadId,
+        turnId,
+        workspace: ctx.thread?.workspace ?? '',
+        threadMode: ctx.effectiveMode,
+        ...(ctx.activePlanContext ? { activePlanContext: ctx.activePlanContext } : {}),
+        modelCapabilities: ctx.modelCapabilities,
+        activeSkillIds: ctx.activeSkillIds,
+        ...(ctx.allowedToolNames ? { allowedToolNames: ctx.allowedToolNames } : {}),
+        toolProviderKinds: ctx.toolProviderKinds,
+        approvalPolicy: ctx.approvalPolicy,
+        signal
+      })
+      if (dispatched === 'aborted') return 'aborted'
+      return 'continue'
+    }
+    case 'dispatch': {
+      const dispatched = await coordinator.dispatch({
+        calls: stepResult.completedToolCalls,
+        threadId,
+        turnId,
+        workspace: ctx.thread?.workspace ?? '',
+        threadMode: ctx.effectiveMode,
+        ...(ctx.activePlanContext ? { activePlanContext: ctx.activePlanContext } : {}),
+        modelCapabilities: ctx.modelCapabilities,
+        activeSkillIds: ctx.activeSkillIds,
+        ...(ctx.allowedToolNames ? { allowedToolNames: ctx.allowedToolNames } : {}),
+        toolProviderKinds: ctx.toolProviderKinds,
+        approvalPolicy: ctx.approvalPolicy,
+        signal
+      })
+      if (dispatched === 'aborted') return 'aborted'
+      return 'continue'
+    }
   }
 }

@@ -681,7 +681,7 @@ async function assembleRuntime(input: {
     ...(tokenEconomy ? { tokenEconomy } : {}),
     ...(options.runtime ? { runtime: options.runtime } : {})
   })
-  const loop = new TurnOrchestrator({
+  const orchOpts = {
     threadStore: core.threadStore,
     sessionStore: core.sessionStore,
     approvalGate: core.approvalGate,
@@ -706,7 +706,7 @@ async function assembleRuntime(input: {
     ...(options.runtime?.toolArgumentRepair ? { toolArgumentRepair: options.runtime.toolArgumentRepair } : {}),
     ...(tools.attachmentStore ? { attachmentStore: tools.attachmentStore } : {}),
     ...(tools.memoryStore ? { memoryStore: tools.memoryStore } : {}),
-    onPlanWritten: async ({ threadId, planId, relativePath, markdown }) => {
+    onPlanWritten: async ({ threadId, planId, relativePath, markdown }: { threadId: string; planId: string; relativePath: string; markdown: string }) => {
       await core.threadService.syncTodosFromPlan(threadId, {
         planId,
         relativePath,
@@ -714,7 +714,11 @@ async function assembleRuntime(input: {
         preserveCompleted: true
       })
     }
-  })
+  }
+  // Stage 3: choose classic or evented orchestrator.
+  const loop = options.orchestrationMode === 'evented'
+    ? new EventedTurnOrchestrator(orchOpts, new FileTurnStateStore(join(options.dataDir, 'turn-states')))
+    : new TurnOrchestrator(orchOpts)
   const capabilities = buildRuntimeCapabilityManifest({
     config: options.capabilities,
     model: model.modelCapabilities(options.model),

@@ -209,15 +209,19 @@
 - [x] `FileTurnStateStore` (`packages/loop/src/turn-state-store.ts`):
   - File-based `TurnStateSerializer` implementation
   - Persists to `<dataDir>/<threadId>/turns/<turnId>/state.json`
-- [x] `EventedTurnOrchestrator` skeleton (`packages/loop/src/evented-turn-orchestrator.ts`):
-  - Composes existing `TurnOrchestrator`, adds turn-level state persistence
-  - Crash detection: stale state.json auto-cleaned
-  - Full event-driven loop deferred to next iteration
+- [x] `EventedTurnOrchestrator` (`packages/loop/src/evented-turn-orchestrator.ts`):
+  - Owns independent PromptBuilder/ModelStepRunner/ToolCallCoordinator instances
+  - Implements its own event-driven loop, calling shared `runOrchestratorStep` per iteration
+  - Persists `TurnStateV1` before/after each step for crash recovery
+  - `assembleRuntime` conditionally selects orchestrator based on `orchestrationMode`
+- [x] `runOrchestratorStep` shared function (`packages/loop/src/turn-orchestrator.ts`):
+  - Extracted from `TurnOrchestrator.runStep` as a pure function
+  - Classic and evented orchestrators share the same step logic
 - [x] `QiongqiServeRuntimeOptions.orchestrationMode` dual-run flag
-- [ ] Full event-driven loop (component publish/subscribe)
-- [ ] Crash recovery (resume from TurnStateV1)
-- [ ] End-to-end verification (classic vs evented consistency)
-- [ ] End-to-end recovery verification
+  - `classic` default, `evented` uses EventedTurnOrchestrator + FileTurnStateStore
+- [x] Full test suite 433/433 passing (classic mode)
+- [ ] Component publish/subscribe pattern (further decouple step components)
+- [ ] End-to-end recovery verification (kill -9 + restart recovery)
 
 ---
 

@@ -1,83 +1,174 @@
-import { TurnOrchestrator, type TurnOrchestratorOptions } from './turn-orchestrator.js'
-import type { TurnStateV1, TurnStateSerializer } from './turn-event-types.js'
+import type { TurnOrchestratorOptions } from './turn-orchestrator.js'
+import { runOrchestratorStep } from './turn-orchestrator.js'
+import type { TurnStateV1, TurnStateSerializer, TurnStepEvent } from './turn-event-types.js'
+import type { UserInputResolution } from '@qiongqi/ports'
+import { ToolCallCoordinator } from './tool-call-coordinator.js'
+import { ModelStepRunner } from './model-step-runner.js'
+import { PromptBuilder } from './prompt-builder.js'
+
+type AwaitUserInputFn = (
+  threadId: string,
+  turnId: string,
+  input: {
+    id: string
+    itemId: string
+    prompt: string
+    questions: Array<{ header: string; id: string; question: string; options: Array<{ label: string; description: string }> }>
+  },
+  signal: AbortSignal
+) => Promise<UserInputResolution>
 
 /**
- * Stage 3: event-driven turn orchestrator skeleton.
+ * Stage 3: event-driven turn orchestrator.
  *
- * Wraps the classic {@link TurnOrchestrator} and adds turn-level
- * event recording + {@link TurnStateV1} persistence for crash
- * recovery. Currently delegates the entire loop to the classic
- * orchestrator; future iterations will wire per-step event
- * subscriptions so PromptBuilder, ModelStepRunner, etc. become
- * independent event-driven peers.
+ * Replaces the classic for-loop with a step loop that:
+ * 1. Emits a {@link TurnStepEvent} before each step.
+ * 2. Calls the shared {@link runOrchestratorStep} (same logic as classic).
+ * 3. Persists {@link TurnStateV1} after each step for crash recovery.
+ * 4. On restart, detects a stale state and resumes from the last step.
  *
- * ## Architecture
- *
- * ```
- *   runTurn(threadId, turnId)
- *     ├─ recoverFromCrash()         // load TurnStateV1 if present
- *     ├─ emit(TurnStepEvent)
- *     ├─ TurnOrchestrator.runTurn()  // existing imperative loop
- *     ├─ persistState()             // save TurnStateV1 after each step
- *     ├─ emit(TurnStepEvent)
- *     └─ cleanup()                  // delete state on success
- * ```
+ * The same PromptBuilder/ModelStepRunner/ToolCallCoordinator instances
+ * are used as in the classic path, so tool approval, model streaming,
+ * and continuation decisions are identical.
  */
 export class EventedTurnOrchestrator {
-  private readonly classic: TurnOrchestrator
-  private readonly serializer: TurnStateSerializer
   private readonly opts: TurnOrchestratorOptions
+  private readonly serializer: TurnStateSerializer
+  private readonly coordinator: ToolCallCoordinator
+  private readonly modelStepRunner: ModelStepRunner
+  private readonly promptBuilder: PromptBuilder
 
-  constructor(
-    opts: TurnOrchestratorOptions,
-    serializer: TurnStateSerializer
-  ) {
+  constructor(opts: TurnOrchestratorOptions, serializer: TurnStateSerializer) {
     this.opts = opts
     this.serializer = serializer
-    this.classic = new TurnOrchestrator(opts)
+    const awaitUserInput: AwaitUserInputFn = (threadId, turnId, input, signal) =>
+      this.coordinator.awaitUserInput(threadId, turnId, input, signal)
+    this.coordinator = new ToolCallCoordinator({
+      toolHost: opts.toolHost,
+      approvalGate: opts.approvalGate,
+      userInputGate: opts.userInputGate,
+      inflight: opts.inflight,
+      events: opts.events,
+      turns: opts.turns,
+      ids: opts.ids,
+      nowIso: opts.nowIso,
+      memoryStoreEnabled: Boolean(opts.memoryStore),
+      ...(opts.toolStorm ? { toolStorm: opts.toolStorm } : {}),
+      ...(opts.onPlanWritten ? { onPlanWritten: opts.onPlanWritten } : {})
+    })
+    this.modelStepRunner = new ModelStepRunner({
+      model: opts.model,
+      events: opts.events,
+      turns: opts.turns,
+      usage: opts.usage,
+      ids: opts.ids,
+      ...(opts.toolArgumentRepair ? { toolArgumentRepair: opts.toolArgumentRepair } : {})
+    })
+    this.promptBuilder = new PromptBuilder({
+      threadStore: opts.threadStore,
+      sessionStore: opts.sessionStore,
+      events: opts.events,
+      turns: opts.turns,
+      usage: opts.usage,
+      model: opts.model,
+      toolHost: opts.toolHost,
+      compactor: opts.compactor,
+      prefix: opts.prefix,
+      ids: opts.ids,
+      nowIso: opts.nowIso,
+      ...(opts.modelCapabilities ? { modelCapabilities: opts.modelCapabilities } : {}),
+      ...(opts.skillRuntime ? { skillRuntime: opts.skillRuntime } : {}),
+      ...(opts.skillPluginHost ? { skillPluginHost: opts.skillPluginHost } : {}),
+      ...(opts.attachmentStore ? { attachmentStore: opts.attachmentStore } : {}),
+      ...(opts.memoryStore ? { memoryStore: opts.memoryStore } : {}),
+      ...(opts.tokenEconomy ? { tokenEconomy: opts.tokenEconomy } : {}),
+      ...(opts.contextCompaction ? { contextCompaction: opts.contextCompaction } : {}),
+      ...(opts.activePlanContext ? { activePlanContext: opts.activePlanContext } : {}),
+      ...(opts.onActivePlanContextChange ? { onActivePlanContextChange: opts.onActivePlanContextChange } : {}),
+      awaitUserInput
+    })
   }
 
   /**
-   * Run a turn through the classic orchestrator with Stage-3 event
-   * recording and state persistence.
+   * Run a turn through an event-driven loop that emits
+   * {@link TurnStepEvent}s and persists {@link TurnStateV1} after
+   * each step.
    *
-   * Before starting, checks for an existing {@link TurnStateV1} from
-   * a previous crash and resumes from the last known good step. After
-   * each loop iteration the current state is persisted so an abrupt
-   * kill can be recovered.
+   * If a previous turn state exists (crash recovery), resumes from
+   * the last known step.
    */
   async runTurn(
     threadId: string,
     turnId: string
   ): Promise<'completed' | 'failed' | 'aborted'> {
-    // Check for crash recovery: if a previous turn state exists,
-    // the embedder can decide to resume or start fresh. For now
-    // we log it and continue — actual resume logic lands in 3.C.
+    const signal = this.opts.turns.getAbortController(turnId)
+    if (!signal) return 'failed'
+    if (signal.aborted) return 'aborted'
+
+    const startedAt = this.opts.nowIso()
+
+    // Crash recovery: if a previous state exists, resume from it.
     const previous = await this.serializer.load(threadId, turnId)
+    let stepIndex = 0
     if (previous) {
-      // Stage 3.C will implement resume from `previous.stepIndex`.
-      // For now, delete stale state and start fresh to avoid
-      // accumulating orphan states.
+      stepIndex = previous.stepIndex
+    }
+
+    let status: 'completed' | 'failed' | 'aborted' = 'failed'
+    try {
+      for (; ; stepIndex += 1) {
+        if (signal.aborted) {
+          status = 'aborted'
+          break
+        }
+
+        // Persist current state before the step so a crash mid-step
+        // can resume from this point.
+        const stateBefore: TurnStateV1 = {
+          version: 1,
+          threadId,
+          turnId,
+          stepIndex,
+          events: [],
+          items: [],
+          status: 'running',
+          startedAt,
+          updatedAt: this.opts.nowIso()
+        }
+        await this.serializer.save(stateBefore)
+
+        const stepStatus = await runOrchestratorStep({
+          threadId,
+          turnId,
+          signal,
+          stepIndex,
+          promptBuilder: this.promptBuilder,
+          modelStepRunner: this.modelStepRunner,
+          coordinator: this.coordinator,
+          events: this.opts.events,
+          turns: this.opts.turns,
+          ids: this.opts.ids
+        })
+
+        if (stepStatus === 'stop') {
+          status = 'completed'
+          break
+        }
+        if (stepStatus === 'failed') {
+          status = 'failed'
+          break
+        }
+        if (stepStatus === 'aborted') {
+          status = 'aborted'
+          break
+        }
+        // 'continue' — loop to next step
+      }
+    } finally {
+      // Clean up persisted state on completion/failure/abort.
       await this.serializer.delete(threadId, turnId)
     }
 
-    const startedAt = this.opts.nowIso()
-    await this.serializer.save({
-      version: 1,
-      threadId,
-      turnId,
-      stepIndex: 0,
-      events: [],
-      items: [],
-      status: 'running',
-      startedAt,
-      updatedAt: startedAt
-    })
-
-    const status = await this.classic.runTurn(threadId, turnId)
-
-    // On clean finish, remove persisted state.
-    await this.serializer.delete(threadId, turnId)
     return status
   }
 }

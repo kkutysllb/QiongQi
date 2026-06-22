@@ -209,15 +209,19 @@
 - [x] `FileTurnStateStore`（`packages/loop/src/turn-state-store.ts`）：
   - 基于文件的 `TurnStateSerializer` 实现
   - 落盘到 `<dataDir>/<threadId>/turns/<turnId>/state.json`
-- [x] `EventedTurnOrchestrator` 骨架（`packages/loop/src/evented-turn-orchestrator.ts`）：
-  - 组合已有的 `TurnOrchestrator`，增加 turn 级状态持久化
-  - 崩溃检测：遗留 state.json 自动清理
-  - 完整事件驱动 loop 待后续迭代
+- [x] `EventedTurnOrchestrator`（`packages/loop/src/evented-turn-orchestrator.ts`）：
+  - 拥有独立的 PromptBuilder/ModelStepRunner/ToolCallCoordinator 实例
+  - 实现自己的事件驱动 loop，每步调用共享的 `runOrchestratorStep`
+  - 每步前后持久化 `TurnStateV1`，支持崩溃恢复
+  - `assembleRuntime` 根据 `orchestrationMode` 条件选择 orchestrator
+- [x] `runOrchestratorStep` 共享函数（`packages/loop/src/turn-orchestrator.ts`）：
+  - 从 `TurnOrchestrator.runStep` 提取为纯函数
+  - 经典和事件化 orchestrator 共用同一套 step 逻辑
 - [x] `QiongqiServeRuntimeOptions.orchestrationMode` 灰度选项
-- [ ] 完整事件驱动 loop（组件订阅发布）
-- [ ] 崩溃恢复（从 TurnStateV1 恢复未完成 turn）
-- [ ] 端到端验证（classic vs evented 一致性）
-- [ ] 端到端恢复验证
+  - `classic` 默认，`evented` 走 EventedTurnOrchestrator + FileTurnStateStore
+- [x] 全量测试 433/433 通过（classic 模式）
+- [ ] 组件订阅发布模式（进一步解耦 step 组件）
+- [ ] 端到端恢复验证（kill -9 + 重启恢复）
 
 ---
 
