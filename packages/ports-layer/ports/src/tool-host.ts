@@ -79,6 +79,13 @@ export type ToolHostContext = {
   allowedProviderIds?: readonly string[]
   /** Optional tool-name allow-list. When set, other tools are not advertised or executed. */
   allowedToolNames?: readonly string[]
+  /** Optional model-visible tool result budget. Oversized outputs can be persisted and replaced with a preview. */
+  outputBudget?: {
+    outputDir: string
+    maxInlineBytes?: number
+    previewHeadBytes?: number
+    previewTailBytes?: number
+  }
   approvalPolicy: ApprovalPolicy
   abortSignal: AbortSignal
   /** Resolves a pending approval with the user's decision. */

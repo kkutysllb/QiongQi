@@ -18,6 +18,7 @@ import {
   type ResolvedToolHook
 } from './tool-hooks.js'
 import {
+  applyToolResultBudget,
   normalizeRateLimitedToolOutput
 } from '@qiongqi/tool-infra'
 import {
@@ -217,8 +218,9 @@ export class LocalToolHost implements ToolHost {
     }
     const hookedResult = applyPostToolHookResults(result, postHookResults)
     const rateLimited = normalizeRateLimitedToolOutput(hookedResult.output)
-    const output = rateLimited.rateLimited ? rateLimited.output : hookedResult.output
+    const rawOutput = rateLimited.rateLimited ? rateLimited.output : hookedResult.output
     const isError = hookedResult.isError || rateLimited.isError
+    const output = await this.applyOutputBudget(activeCall.toolName, rawOutput, context)
     this.readTracker.observeToolResult({
       context,
       call: activeCall,
@@ -278,6 +280,33 @@ export class LocalToolHost implements ToolHost {
     return `Run ${call.toolName}(${args})`
   }
 
+  private async applyOutputBudget(
+    toolName: string,
+    output: unknown,
+    context: ToolHostContext
+  ): Promise<unknown> {
+    if (!context.outputBudget) return output
+    const content = outputToBudgetableText(output)
+    if (content === null) return output
+    const budgeted = await applyToolResultBudget({
+      toolName,
+      content,
+      outputDir: context.outputBudget.outputDir,
+      maxInlineBytes: context.outputBudget.maxInlineBytes,
+      previewHeadBytes: context.outputBudget.previewHeadBytes,
+      previewTailBytes: context.outputBudget.previewTailBytes
+    })
+    if (!budgeted.externalized) return output
+    return {
+      externalized: true,
+      toolName,
+      modelVisibleText: budgeted.modelVisibleText,
+      originalBytes: budgeted.originalBytes,
+      omittedBytes: budgeted.omittedBytes,
+      ...(budgeted.persistedPath ? { persistedPath: budgeted.persistedPath } : {})
+    }
+  }
+
   private errorToolResult(
     context: ToolHostContext,
     call: ToolCallLike,
@@ -331,6 +360,18 @@ function hookContext(
 function hookErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   return `tool hook failed: ${message}`
+}
+
+function outputToBudgetableText(output: unknown): string | null {
+  if (typeof output === 'string') return output
+  if (Buffer.isBuffer(output)) return output.toString('utf8')
+  if (output === null || output === undefined) return null
+  if (typeof output !== 'object') return String(output)
+  try {
+    return JSON.stringify(output, null, 2)
+  } catch {
+    return null
+  }
 }
 
 /**

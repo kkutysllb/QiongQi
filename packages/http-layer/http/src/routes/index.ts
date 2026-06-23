@@ -39,6 +39,10 @@ import {
   uploadAttachment
 } from './attachments.js'
 import {
+  listThreadArtifacts,
+  readThreadArtifact
+} from './artifacts.js'
+import {
   createMemory,
   deleteMemory,
   listMemories,
@@ -64,6 +68,7 @@ import type { ServerRuntime } from './server-runtime.js'
  * - `POST /v1/attachments` (auth)
  * - `GET /v1/attachments/diagnostics` (auth)
  * - `GET /v1/attachments/{id}` and `{id}/content` (auth)
+ * - `GET /v1/threads/{id}/artifacts` and `{id}/artifacts/content` (auth)
  * - `GET/POST /v1/memory`, `PATCH/DELETE /v1/memory/{id}`, diagnostics (auth)
  * - `GET /v1/workspace/status` (auth)
  * - `GET/POST /v1/threads` (auth)
@@ -156,6 +161,14 @@ export function buildRouter(runtime: ServerRuntime): Router {
   router.add('GET', '/v1/attachments/:id/content', async (request, ctx) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     return getAttachmentContent(runtime.attachmentStore, ctx.params.id, request)
+  })
+  router.add('GET', '/v1/threads/:id/artifacts', async (request, ctx) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    return listThreadArtifacts(runtime, ctx.params.id)
+  })
+  router.add('GET', '/v1/threads/:id/artifacts/content', async (request, ctx) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    return readThreadArtifact(runtime, ctx.params.id, request)
   })
   router.add('GET', '/v1/memory', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()

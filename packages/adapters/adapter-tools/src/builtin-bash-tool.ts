@@ -2,7 +2,7 @@ import { mkdir } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { LocalToolHost, type LocalTool } from './local-tool-host.js'
-import { OutputAccumulator } from '@qiongqi/tool-infra'
+import { auditShellCommand, OutputAccumulator, type CommandAuditResult } from '@qiongqi/tool-infra'
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from '@qiongqi/adapter-fs'
 import type { BashLocalToolOptions, TextSlice, TruncateMode } from './builtin-tool-types.js'
 import { DEFAULT_BASH_TIMEOUT_SECONDS } from './builtin-tool-types.js'
@@ -65,6 +65,11 @@ type BashPayload = {
   partial?: boolean
   stop_sent?: boolean
   error?: string
+  audit?: {
+    decision: CommandAuditResult['decision']
+    reasons: string[]
+    command: string
+  }
 }
 
 const bashSessions = new Map<string, BashSession>()
@@ -552,6 +557,21 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
 
       const command = typeof args.command === 'string' ? args.command : ''
       if (!command.trim()) return { output: { error: 'command is required' }, isError: true }
+      const audit = auditShellCommand(command)
+      if (audit.decision === 'block') {
+        return {
+          output: {
+            command: audit.maskedCommand,
+            error: 'command blocked by audit policy',
+            audit: {
+              decision: audit.decision,
+              reasons: audit.reasons,
+              command: audit.maskedCommand
+            }
+          },
+          isError: true
+        }
+      }
       const timeout = normalizePositiveInteger(
         args.timeout,
         options.defaultTimeoutSeconds ?? DEFAULT_BASH_TIMEOUT_SECONDS
@@ -571,7 +591,7 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
             onUpdate
           )
           return {
-            output: result.payload,
+            output: withAudit(result.payload, audit),
             isError: result.isError
           }
         }
@@ -594,12 +614,12 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
         })
         if (result.exitCode && result.exitCode !== 0) {
           return {
-            output: payload,
+            output: withAudit(payload, audit),
             isError: true
           }
         }
         return {
-          output: payload
+          output: withAudit(payload, audit)
         }
       } catch (error) {
         return {
@@ -613,6 +633,19 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
       }
     })
   })
+}
+
+function withAudit(payload: BashPayload, audit: CommandAuditResult): BashPayload {
+  if (audit.decision === 'allow') return payload
+  return {
+    ...payload,
+    command: audit.maskedCommand,
+    audit: {
+      decision: audit.decision,
+      reasons: audit.reasons,
+      command: audit.maskedCommand
+    }
+  }
 }
 
 export const createBashTool = createBashLocalTool

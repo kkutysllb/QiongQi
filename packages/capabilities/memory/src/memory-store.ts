@@ -8,6 +8,7 @@ import {
   type MemoryCreateRequest,
   type MemoryUpdateRequest
 } from '@qiongqi/contracts'
+import { rankMemoryRecords } from './retrieval.js'
 
 export interface MemoryStore {
   create(input: MemoryCreateRequest): Promise<MemoryRecord>
@@ -89,14 +90,12 @@ export class FileMemoryStore implements MemoryStore {
 
   async retrieve(input: { query: string; workspace?: string; limit: number }): Promise<MemoryRecord[]> {
     if (!this.options.config.enabled) return []
-    const active = (await this.list({ workspace: input.workspace }))
-      .filter((record) => !record.disabledAt)
-    return active
-      .map((record) => ({ record, score: scoreMemory(record, input.query) }))
-      .filter((entry) => entry.score > 0)
-      .sort((a, b) => b.score - a.score || b.record.updatedAt.localeCompare(a.record.updatedAt))
-      .slice(0, input.limit)
-      .map((entry) => entry.record)
+    return rankMemoryRecords({
+      query: input.query,
+      records: await this.readAll(),
+      workspace: input.workspace,
+      limit: input.limit
+    })
   }
 
   async diagnostics(): Promise<MemoryDiagnostics> {
@@ -147,14 +146,4 @@ function inScope(record: MemoryRecord, workspace: string | undefined): boolean {
   if (record.scope === 'user') return true
   if (record.scope === 'workspace') return Boolean(workspace && record.workspace === workspace)
   return true
-}
-
-function scoreMemory(record: MemoryRecord, query: string): number {
-  const words = new Set(query.toLowerCase().split(/[^a-z0-9_]+/).filter((word) => word.length > 2))
-  let score = 0
-  const text = `${record.content} ${record.tags.join(' ')}`.toLowerCase()
-  for (const word of words) {
-    if (text.includes(word)) score += 1
-  }
-  return score * record.confidence
 }

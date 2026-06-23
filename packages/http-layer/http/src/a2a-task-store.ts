@@ -14,9 +14,12 @@ export class FileA2ATaskStore {
 
   async upsert(record: A2ATaskRecordType): Promise<void> {
     await mkdir(this.rootDir, { recursive: true })
+    const parsed = A2ATaskRecord.parse(record)
+    const existing = await this.get(parsed.id)
+    const next = existing ? preserveTerminal(existing, parsed) : parsed
     await writeFile(
-      join(this.rootDir, `${record.id}.json`),
-      JSON.stringify(A2ATaskRecord.parse(record), null, 2),
+      join(this.rootDir, `${next.id}.json`),
+      JSON.stringify(next, null, 2),
       'utf8'
     )
   }
@@ -47,4 +50,14 @@ export class FileA2ATaskStore {
       return []
     }
   }
+}
+
+function preserveTerminal(current: A2ATaskRecordType, next: A2ATaskRecordType): A2ATaskRecordType {
+  if (!isTerminal(current.status)) return next
+  if (current.status === next.status) return next
+  return current
+}
+
+function isTerminal(status: A2ATaskRecordType['status']): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled'
 }
