@@ -22,7 +22,7 @@
 
 > **穷奇非凶，乃破局之锐。** Qiongqi 是一个领域中立的独立多 Agent 框架，以 cache-first、去中心化编排的 HTTP/SSE 引擎为骨架，搭配可插拔的技能与工具体系。
 >
-> 本项目的 **四阶段架构改造**（monorepo 拆包 → AgentCard → 事件化 → A2A）已进入收尾状态：阶段 1–3 已完成，阶段 4 基本完成；Post-P1 运行治理与 OpenTelemetry exporter 已落地，真实外部 A2A peer / 跨厂商互操作验证保留为 P2。详细进度见 CHANGELOG 提交历史。
+> 本项目的 **四阶段架构构建**（monorepo 拆包 → AgentCard → 事件化 → A2A）已进入收尾状态：阶段 1–3 已完成，阶段 4 基本完成；Post-P1 运行治理与 OpenTelemetry exporter 已落地，真实外部 A2A peer / 跨厂商互操作验证保留为 P2。详细进度见 CHANGELOG 提交历史。
 
 ---
 
