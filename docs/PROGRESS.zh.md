@@ -5,7 +5,7 @@
 >
 > English version: [`PROGRESS.en.md`](./PROGRESS.en.md)
 
-**最后更新**：2026-06-22
+**最后更新**：2026-06-23
 **当前阶段**：阶段 1–3 已完成 ✅，阶段 4 基本完成（跨厂商验证待外部 Agent）
 
 ---
@@ -14,9 +14,10 @@
 
 | 指标 | 当前值 | 目标 |
 |------|--------|------|
-| 全量测试 | 433/433 ✅ | 全绿 |
+| 全量测试 | 484/484 ✅ | 全绿 |
+| 快速测试 | 455/455 ✅ | 全绿 |
 | 包构建 | 18/18 ✅ | 全绿 |
-| 端到端（serve + curl） | ✅ | 通过 |
+| 端到端（本地 evented A2A） | ✅ | 通过 |
 
 ---
 
@@ -273,7 +274,7 @@
   - assistant_text→text/markdown, tool_result→application/json, error→text/plain
   - a2aCreateTask 响应含 `artifacts` 数组
 - [x] `HttpPeerTransport` 兼容旧 `PeerArtifact` 响应与 Stage 4 `{ task, artifact, artifacts }` 响应
-- [ ] `A2APeerAdapter` — 已由 HttpPeerTransport 覆盖
+- [x] `A2APeerAdapter` — 不再单独实现；已由 HttpPeerTransport 覆盖
 - [ ] 跨厂商互操作验证（移入 P2：需要真实外部 peer/厂商对端）
 - [x] 端到端跨实例协作验证（本地 fake model 双实例；外部 peer 仍需真实对端）
 
@@ -302,13 +303,35 @@
   - 支持 W3C `traceparent` 透传
   - access log 输出 `traceparent`、`traceId`、`spanId`，可接入 OTel collector/logger
 
+## Post-P1：kk_OClaw 运行治理能力吸收 ✅
+
+> 边界：Qiongqi 替换 kk_OClaw `coding_core`，不引入 LangGraph/LangChain/Python core；仅吸收 kk_OClaw 在产品运行面上的治理经验，并按 Qiongqi 原生包边界实现。
+
+- [x] Tool result budget：
+  - `@qiongqi/tool-infra` 新增 `applyToolResultBudget`
+  - `LocalToolHost` 支持 `context.outputBudget`，超大工具结果外置到 outputs，模型仅见 head/tail 预览
+- [x] Command audit：
+  - `@qiongqi/tool-infra` 新增 `auditShellCommand` / `maskCommandSecrets` / `stripHeredocBodies`
+  - `bash` 工具在 spawn 前 block 高风险命令，并对 warn 命令附加 audit metadata
+- [x] Virtual path + artifacts：
+  - `@qiongqi/attachments` 新增 `VirtualPathResolver`
+  - `@qiongqi/http` 新增 `/v1/threads/:id/artifacts` 与 `/content?path=/mnt/qiongqi/...`
+- [x] Delegation / A2A terminal-state hardening：
+  - `@qiongqi/delegation` 新增 terminal-state helper
+  - `FileA2ATaskStore` 防止 completed/failed/cancelled 被 late racing update 覆盖
+- [x] Memory retrieval v2：
+  - 中文 n-gram、英文技术 token、workspace scope filtering、confidence/recency tie-break
+
 ## P2：跨实例互操作与可观测性深化
 
 - [ ] 真实外部 A2A peer / 跨厂商互操作验证：
   - 复用 `pnpm run verify:evented-a2a -- --external-peer`
   - 需要 `QIONGQI_A2A_PEER_URL` / `QIONGQI_A2A_PEER_TOKEN` 指向真实对端
-- [ ] 完整 OpenTelemetry SDK exporter：
-  - 在已具备 `traceparent` 传播基础上补 span lifecycle/exporter
+  - 执行计划：`docs/superpowers/plans/2026-06-23-external-a2a-interoperability.md`
+- [x] 完整 OpenTelemetry SDK exporter：
+  - 在已具备 `traceparent` 传播基础上补齐 HTTP server span lifecycle/exporter
+  - 支持 `serve.observability.openTelemetry` 与 `QIONGQI_OTEL_*` 配置入口
+  - 支持 OTLP HTTP、console、memory 测试 exporter 与关闭模式
 
 | `@qiongqi/adapter-fs` | 文件系统基础能力（read/write/edit/grep/find/ls/bash） | ✅ | 新增 |
 | `@qiongqi/tool-infra` | 工具执行基础设施（hooks/rate-limit/mutation-queue） | ✅ | 新增 |

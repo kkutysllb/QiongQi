@@ -81,6 +81,42 @@ Each entry contains `requestId`, `method`, `path`, `status`, and `durationMs`. T
 
 When callers provide W3C `traceparent`, the runtime propagates it in response headers and includes `traceparent`, `traceId`, and `spanId` in access logs so OpenTelemetry collector/logger pipelines can correlate requests.
 
+## OpenTelemetry Trace Exporter
+
+For production, use the OTLP HTTP exporter to send HTTP server spans to a collector:
+
+```json
+{
+  "serve": {
+    "observability": {
+      "openTelemetry": {
+        "enabled": true,
+        "serviceName": "qiongqi",
+        "exporter": "otlp-http",
+        "endpoint": "http://otel-collector:4318/v1/traces",
+        "headers": {}
+      }
+    }
+  }
+}
+```
+
+`qiongqi serve` also supports environment overrides for common fields:
+
+```bash
+QIONGQI_OTEL_ENABLED=true \
+QIONGQI_OTEL_SERVICE_NAME=qiongqi \
+QIONGQI_OTEL_EXPORTER=otlp-http \
+QIONGQI_OTEL_ENDPOINT=http://otel-collector:4318/v1/traces \
+pnpm qiongqi serve --config ./config.json
+```
+
+Available exporters:
+
+- `otlp-http`: sends spans to an OTLP HTTP collector; recommended for production.
+- `console`: writes spans to stdout for local debugging.
+- `none` or `enabled: false`: disables the SDK exporter while keeping request id / `traceparent` response propagation and access log fields.
+
 ## Containers and Orchestration
 
 The repository includes baseline delivery files:

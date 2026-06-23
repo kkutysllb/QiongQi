@@ -1,6 +1,6 @@
 # @qiongqi/attachments
 
-> 附件存储：图像二进制剥离、MIME 校验、文本回退、作用域授权。
+> 附件存储：图像二进制剥离、MIME 校验、文本回退、作用域授权、虚拟路径解析。
 > Layer 3 — 依赖：`@qiongqi/contracts`（仅 Zod 类型与配置）。被 `@qiongqi/http` 消费。
 
 ---
@@ -15,6 +15,7 @@
 - **去重** — 内容 SHA-256 哈希作为 id 的一部分（`att_<24-hex>`），相同内容自动合并 scope 列表
 - **作用域授权** — 附件可被限定到特定 `threadId` / `workspace`；`resolveContent` 在未授权时抛错
 - **文本回退** — 为视觉通道不达的环境提供 base64 文本形式的压缩回退
+- **虚拟路径** — `VirtualPathResolver` 把 `/mnt/qiongqi/{workspace,uploads,outputs,artifacts}` 映射到 thread-local 物理目录，并拒绝路径穿越
 
 `AttachmentStore` 接口是**唯一的 contract**；其他实现（如未来 S3 适配）只需实现该接口。
 
@@ -25,6 +26,7 @@
 | `AttachmentContent` | type | `attachment-store.ts` | `AttachmentMetadata` + `data: Buffer` |
 | `AttachmentStore` | interface | `attachment-store.ts` | 端口契约：create / get / resolveContent / textFallbackPolicy / diagnostics |
 | `FileAttachmentStore` | class | `attachment-store.ts` | 文件系统实现（`<rootDir>/<id>.bin` + `<id>.json`）|
+| `VirtualPathResolver` | class | `virtual-path.ts` | thread-local virtual mount 解析与反向映射 |
 
 #### `AttachmentStore.create` 参数
 
@@ -49,6 +51,8 @@
 - **作用域授权**：`resolveContent` 校验：若附件已绑定作用域，仅在调用方 scope 与之匹配时返回；未绑定任何作用域的附件视为公共（任何 scope 都可访问）。
 - **文本回退独立校验**：`textFallback.mimeType` 必须也在白名单内，base64 字节数受 `textFallbackMaxBase64Bytes` 限制（默认 512KB），维度受 `textFallbackMaxImageDimension` 限制（默认 1280px）。
 - **诊断非阻塞**：`diagnostics()` 解析失败的单文件返回 `null` 而不抛错，最终 `records.filter(Boolean)`。
+- **虚拟路径先 decode 后 containment 检查**：`../` 与 `%2e%2e` 都会被拒绝；返回 physical path 时使用 canonical path，兼容 macOS `/var` 与 `/private/var` 差异。
+- **虚拟路径只表达 thread-local 文件**：workspace/uploads/outputs/artifacts 都是逻辑 mount，不暴露真实数据目录给模型或上层产品壳。
 
 ### 4. 行为规约
 
@@ -61,6 +65,9 @@
 - `validates the text fallback against the same MIME/byte/dimension limits` — textFallback 独立校验
 - `returns null for missing attachments on get` — 不存在的 id 返回 `null`（不抛错）
 - `survives malformed metadata on diagnostics` — `diagnostics()` 容错（损坏的 JSON 跳过）
+- `VirtualPathResolver resolves workspace/uploads/outputs/artifacts mounts`
+- `VirtualPathResolver rejects traversal and percent-encoded traversal`
+- `VirtualPathResolver converts physical paths inside mounts back to virtual paths`
 
 ### 5. 使用示例
 

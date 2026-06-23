@@ -1,6 +1,6 @@
 # @qiongqi/tool-infra
 
-> 工具执行通用基础设施 —— mutation queue、output accumulator、rate limit parser。
+> 工具执行通用基础设施 —— mutation queue、output accumulator、rate limit parser、result budget、command audit。
 > Layer 4 — 依赖：`@qiongqi/adapter-fs`。被 `@qiongqi/services` 与 `@qiongqi/adapter-tools` 消费。
 
 ---
@@ -14,6 +14,8 @@
 - **跨进程文件锁 + 进程内 mutation queue**（`withFileMutationQueue`）—— 多进程安全的串行化文件写入
 - **Output accumulator**（`OutputAccumulator`）—— bash / 长输出工具的 UTF-8 / UTF-16LE 自动检测 + tail 截断 + 可选临时文件落盘
 - **Rate limit 解析**（`parseRateLimitedToolResult` / `normalizeRateLimitedToolOutput`）—— 把工具输出里的限流信息提取为结构化信号
+- **Tool result budget**（`applyToolResultBudget`）—— 超大工具结果落盘到 outputs，并把模型可见内容替换为 head/tail 预览
+- **Command audit**（`auditShellCommand` / `maskCommandSecrets` / `stripHeredocBodies`）—— bash 执行前分类 block/warn/allow，并在日志/错误中脱敏 secrets
 
 阶段 1.8 与 `@qiongqi/adapter-fs` 一起从 `adapter-tools` 拆出。
 
@@ -55,6 +57,10 @@
 | `ParsedRateLimit` | type | `tool-rate-limit.ts` | `{ rateLimited, message, retryAfterSeconds? }` |
 | `parseRateLimitedToolResult(output: unknown)` | function | `tool-rate-limit.ts` | 从工具 output 中提取限流信号（regex 匹配 `rate[- ]?limit` / `too many requests` / `quota exceeded` / `429` 等）|
 | `normalizeRateLimitedToolOutput(output: unknown)` | function | `tool-rate-limit.ts` | 若匹配则包装为 `{ code: 'rate_limited', rate_limited: true, error, retry_after_seconds?, original }` 并标记 `isError: true` |
+| `applyToolResultBudget(input)` | function | `tool-result-budget.ts` | byte-budget 检查；超限时写入 `outputDir` 并返回模型可见预览 |
+| `auditShellCommand(command)` | function | `command-audit.ts` | shell 命令风险分类：`allow` / `warn` / `block` |
+| `maskCommandSecrets(command)` | function | `command-audit.ts` | 脱敏 API key、token、password、Bearer token 等常见 secret |
+| `stripHeredocBodies(command)` | function | `command-audit.ts` | 用占位符替换 heredoc body，避免长脚本/secret 污染审计 |
 
 ### 3. 关键不变量
 
@@ -67,6 +73,8 @@
 - **Rate limit regex 容错**：`\b` 词边界 + 不区分大小写 + 多种别名（`rate limit` / `rate-limit` / `ratelimited` / `too many requests` / `quota exceeded` / `429`）（`tool-rate-limit.ts:7-8`）。
 - **Retry-After 单位转换**：ms / s / sec / seconds / m / min / minutes —— 都正确转换为秒（向上取整）（`tool-rate-limit.ts:9-10, 60-69`）。
 - **`compactRateLimitMessage` 上限 360 字符**：超长消息截断并加 `...`，避免模型上下文被巨型错误消息污染（`tool-rate-limit.ts:71-75`）。
+- **Tool result budget 不丢完整结果**：小输出保持 inline；超限输出写入 `outputDir`，返回包含 `persistedPath`、`originalBytes`、`omittedBytes` 的结构化结果和 head/tail 预览。
+- **Command audit fail-closed**：危险命令在 `bash` spawn 前被拦截；warn 命令继续执行但 payload 带 `audit` 元数据；错误和 audit payload 使用 masked command。
 
 ### 4. 行为规约
 
@@ -98,6 +106,16 @@
 - `parseRateLimitedToolResult converts ms/s/min units to seconds (ceiling)`
 - `normalizeRateLimitedToolOutput preserves the original output under "original" key`
 - `compactRateLimitMessage truncates to 360 chars and adds ellipsis`
+
+#### ToolResultBudget / CommandAudit
+
+- `applyToolResultBudget keeps small text inline`
+- `applyToolResultBudget externalizes oversized text and keeps a head/tail preview`
+- `LocalToolHost applies outputBudget to oversized string outputs`
+- `auditShellCommand blocks destructive delete, pipe-to-shell, base64 decode pipe execution, and fork bombs`
+- `auditShellCommand warns on /dev/tcp, environment dumps, broad process signals, and recursive permission changes`
+- `maskCommandSecrets redacts secret assignments and bearer tokens`
+- `stripHeredocBodies removes heredoc bodies before length-sensitive classification`
 
 ### 5. 使用示例
 

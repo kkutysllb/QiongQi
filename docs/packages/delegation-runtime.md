@@ -17,6 +17,7 @@
 - 派发到 `peerRegistry.invokePeer`（Stage 2 路径）或 `executor`（Stage 1 legacy 路径）
 - 把 child run 状态映射为 runtime events（`turn_started` / `turn_completed` / `turn_failed` / `turn_aborted`）
 - 聚合统计（按 `${label}:${model}` 分桶）
+- 提供 terminal-state helper，避免 completed / failed / cancelled / aborted 之间被 late racing update 覆盖
 
 `ChildAgentExecutor` 是默认的 `ChildRunExecutor` 实现 —— 给 child 装配一整套**隔离的**运行时（独立 event bus / session store / thread store / orchestrator），不污染主线程状态。
 
@@ -33,6 +34,8 @@
 | `aggregateChildRuns` | function | `delegation-runtime.ts` | 按 label+model 聚合 |
 | `createChildAgentExecutor` | function | `child-agent-executor.ts` | 隔离子代理工厂 |
 | `ChildAgentExecutorOptions` | type | `child-agent-executor.ts` | 构造配置 |
+| `isTerminalState(status)` | function | `terminal-state.ts` | 判断 completed / failed / cancelled / aborted |
+| `trySetTerminalState(current, next)` | function | `terminal-state.ts` | terminal first-writer-wins 状态更新 helper |
 
 ### 3. 关键不变量
 
@@ -48,6 +51,7 @@
   - `aborted → turn_aborted`
 - **`recordExternalUsage`**：把 child run 的 usage 合并到父 thread 的 UsageCounter。
 - **Abort 处理**：若 `signal.aborted`，子 run status 直接 → `aborted`，不发 `failed`。
+- **终态保护**：一旦记录进入 terminal state，不同 terminal state 的 late update 不应覆盖它；相同 terminal state 的幂等补充允许通过。
 - **`aggregateChildRuns` 分桶**（`delegation-runtime.ts:366`）：按 `${label}:${model}` 桶化，计算 `averageTotalTokens` / `averageCostUsd` / `averageCostCny`。
 
 ### 4. 行为规约
@@ -64,6 +68,7 @@
 - `runChild transitions status to completed on success and records summary + usage`
 - `runChild transitions status to failed on error and records error`
 - `runChild transitions status to aborted (not failed) when signal is aborted`
+- `trySetTerminalState rejects different terminal-state overwrites and allows idempotent same-terminal updates`
 - `runChild emits turn_started/turn_completed/turn_failed/turn_aborted events with child.childSeq`
 - `runChild records external usage into the parent thread's UsageCounter`
 - `aggregateChildRuns groups by ${label}:${model} and computes averages`

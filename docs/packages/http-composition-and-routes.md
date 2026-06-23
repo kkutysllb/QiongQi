@@ -1,6 +1,6 @@
 # @qiongqi/http — Composition & Routes
 
-> `createAgent` / `createQiongqiServeRuntime` / `createHttpServer` —— Composition Root；ReviewService；18 个 route handlers。
+> `createAgent` / `createQiongqiServeRuntime` / `createHttpServer` —— Composition Root；ReviewService；HTTP route handlers。
 > Layer 8 — 依赖：所有下层包。
 
 ---
@@ -15,7 +15,7 @@
 - **`createHttpServer({ agent, host, port, accessLog? })`** —— 在 runtime 上挂 HTTP 监听，可注入结构化 access log sink
 - **`startQiongqiServe` (deprecated alias)** —— 老式入口，向后兼容
 - **`ReviewService`** —— 隔离的 code-review 子服务（独立只读工具 + 独立 turn）
-- **18 个 route handlers** —— 所有 HTTP 端点
+- **HTTP route handlers** —— runtime info、threads/turns、A2A、attachments、artifacts、memory、usage、review 等端点
 
 ### 2. 公共 API
 
@@ -48,6 +48,7 @@
 | `runtime-info.ts` | `GET /v1/runtime/info` + `/tools` + `/metrics` |
 | `skills.ts` | `GET /v1/skills` |
 | `attachments.ts` | `POST/GET /v1/attachments` |
+| `artifacts.ts` | `GET /v1/threads/:id/artifacts` + `GET /v1/threads/:id/artifacts/content?path=...` |
 | `memory.ts` | `GET/POST/PATCH/DELETE /v1/memory` |
 | `workspace.ts` | `GET /v1/workspace/status` |
 | `threads.ts` | 完整 threads CRUD + fork + goal/todos |
@@ -73,6 +74,8 @@
 - **`ServerRuntime.info()` 必跑**：用于 `QIONGQI_READY` 握手返回启动元信息。
 - **`createAgent` 与 preset 正交**：`createCodingAgent` / `createQiongqiServeRuntime` 是不同 `agentName` / `systemPrompt` / `pinnedConstraints` 注入；不引入新基类。
 - **A2A POST `/a2a` 同步执行一个 turn**：返回 `task + artifact`；不长期订阅（Stage 4 SSE subscribe 单独）。
+- **A2A task store 终态保护**：`FileA2ATaskStore.upsert()` 不允许 late `cancelled` 覆盖已 `completed`，也不允许 late `completed` 覆盖已 `failed`。
+- **Artifact routes 只读 thread-local mount**：artifact content 通过 `/mnt/qiongqi/{uploads,outputs,artifacts}` virtual path 读取，拒绝 workspace mount 与路径穿越。
 - **ReviewService 独立**：`buildReadOnlyBuiltinLocalTools` + 独立 event bus / session store / thread store —— 不污染主线程状态。
 - **18 个 routes 顺序注册**：`buildRouter` 按文件顺序注册（agent-card 在 v1 之前）；先匹配的胜出。
 - **`/health` 不需鉴权**：`a2a.ts` 和 `health.ts` 是仅有的无 auth 端点。
@@ -99,6 +102,9 @@
 - `GET /a2a/tasks/:id/subscribe returns SSE with terminal event + done`
 - `POST /a2a/tasks creates a task and runs one turn synchronously`
 - `POST /a2a/tasks/:id/cancel transitions the task to cancelled`
+- `GET /v1/threads/:id/artifacts lists thread output artifacts`
+- `GET /v1/threads/:id/artifacts/content reads uploads/outputs/artifacts by virtual path`
+- `GET /v1/threads/:id/artifacts/content rejects virtual path traversal`
 - `Unknown routes return 404 with code: 'not_found'`
 
 ### 5. 使用示例

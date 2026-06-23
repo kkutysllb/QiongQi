@@ -179,6 +179,15 @@ HTTP POST /v1/threads/{id}/turns
 - `TurnService` is the **sole mutation point for thread/turn/item state** — other components write via `applyItem` / `updateItem` / `finishTurn`
 - `PromptBuilder.build()` reassembles the prefix on every call, but `ImmutablePrefix` uses SHA-256 fingerprints to guarantee byte-stability of `systemPrompt + tools + pinnedConstraints + fewShots`
 
+### 2.2.1 Post-P1 Runtime Governance Layer
+
+Qiongqi replaces kk_OClaw `coding_core`; it does not borrow LangGraph, LangChain, or Python core contracts as internal orchestration. kk_OClaw is used only as a product/runtime-governance reference, and the reusable safety, budgeting, path, memory, and terminal-state patterns are reimplemented inside Qiongqi-native package boundaries.
+
+- `@qiongqi/tool-infra`: `applyToolResultBudget` externalizes oversized tool results into outputs and gives the model a head/tail preview; `auditShellCommand` classifies bash commands as block/warn/allow before execution and masks secrets.
+- `@qiongqi/attachments` + `@qiongqi/http`: `VirtualPathResolver` provides `/mnt/qiongqi/{workspace,uploads,outputs,artifacts}` virtual mounts; HTTP artifact routes read only thread-local uploads/outputs/artifacts.
+- `@qiongqi/delegation` + `@qiongqi/http`: terminal-state helpers and `FileA2ATaskStore` prevent completed/failed/cancelled/aborted records from being overwritten by late racing updates.
+- `@qiongqi/memory`: retrieval now uses Chinese/English lexical ranking, technical-token exact matches, scope filtering, and confidence/recency tie-breaks.
+
 ### 2.3 Storage & State Architecture
 
 ```
@@ -564,7 +573,7 @@ SSE format: `id: <seq>\nevent: <kind>\ndata: <JSON>\n\n`, with 15s heartbeat eve
 3. `createToolMatrix()` — tool registry, skills, delegation runtime
 4. `createAgent()` — orchestration loop (TurnOrchestrator assembly)
 
-`createHttpServer({ agent, host, port, accessLog? })` attaches HTTP listening on top of the agent and returns a `QiongqiServeHandle`. `accessLog` can be connected to a JSON logger or APM collector; each structured entry contains request id, trace id, method, path, status, and duration, but not sensitive headers such as authorization. When a request includes W3C `traceparent`, the runtime propagates it in response headers and logs `traceparent` / `traceId` / `spanId`.
+`createHttpServer({ agent, host, port, accessLog?, telemetry? })` attaches HTTP listening on top of the agent and returns a `QiongqiServeHandle`. `accessLog` can be connected to a JSON logger or APM collector; each structured entry contains request id, trace id, method, path, status, and duration, but not sensitive headers such as authorization. When a request includes W3C `traceparent`, the runtime propagates it in response headers and logs `traceparent` / `traceId` / `spanId`. `telemetry` can be created with `createOpenTelemetryRuntime`, which supports OTLP HTTP, console, memory test exporter, and disabled modes; `qiongqi serve` can enable full HTTP server span lifecycle/export through `serve.observability.openTelemetry` or `QIONGQI_OTEL_*` environment variables.
 
 **Design trade-offs**:
 
@@ -655,9 +664,10 @@ Four-stage refactor plan, **as of 2026-06-22**:
 | **Stage 4** | A2A protocol endpoints | 🔄 **Nearly complete** | A2ATaskRecord / FileA2ATaskStore + async `POST /a2a/tasks` + synchronous compatible `POST /a2a` + `GET /a2a/tasks/:id` + interruptible `cancel` + `artifacts` + SSE `subscribe` + ArtifactSchema bridge. **Awaiting external Agent for cross-vendor interop verification** |
 
 **Current verification baseline** (synchronized with `PROGRESS.zh.md`):
-- Full test suite: 433/433 ✅
+- Full test suite: 484/484 ✅
+- Fast test suite: 455/455 ✅
 - Package build: 18/18 ✅
-- End-to-end (serve + curl): ✅
+- End-to-end (local evented A2A): ✅
 
 Detailed history: [`PROGRESS.zh.md`](./PROGRESS.zh.md) / [`PROGRESS.en.md`](./PROGRESS.en.md).
 
@@ -857,7 +867,7 @@ Each package has two tsconfigs:
 ### Test
 
 ```bash
-pnpm test                  # Full test suite (53 files, 433 tests)
+pnpm test                  # Full test suite (65 files, 484 tests)
 pnpm test:unit             # Quick unit tests (cache / contracts / domain / ports)
 pnpm test:fast             # Quick subset (excluding builtin-tools)
 ```

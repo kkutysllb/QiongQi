@@ -81,6 +81,42 @@ await createHttpServer({
 
 如果调用方传入 W3C `traceparent`，运行时会透传响应头，并在 access log 中输出 `traceparent`、`traceId`、`spanId`，可直接被 OpenTelemetry collector/logger pipeline 关联。
 
+## OpenTelemetry Trace Exporter
+
+生产环境推荐使用 OTLP HTTP exporter，把 HTTP server span 发送到 collector：
+
+```json
+{
+  "serve": {
+    "observability": {
+      "openTelemetry": {
+        "enabled": true,
+        "serviceName": "qiongqi",
+        "exporter": "otlp-http",
+        "endpoint": "http://otel-collector:4318/v1/traces",
+        "headers": {}
+      }
+    }
+  }
+}
+```
+
+`qiongqi serve` 也支持环境变量覆盖常用字段：
+
+```bash
+QIONGQI_OTEL_ENABLED=true \
+QIONGQI_OTEL_SERVICE_NAME=qiongqi \
+QIONGQI_OTEL_EXPORTER=otlp-http \
+QIONGQI_OTEL_ENDPOINT=http://otel-collector:4318/v1/traces \
+pnpm qiongqi serve --config ./config.json
+```
+
+可用 exporter：
+
+- `otlp-http`：发送到 OTLP HTTP collector，生产推荐。
+- `console`：本地调试时把 span 输出到 stdout。
+- `none` 或 `enabled: false`：关闭 SDK exporter，仅保留 request id / `traceparent` 响应传播与 access log 字段。
+
 ## 容器与编排
 
 仓库提供基础交付文件：

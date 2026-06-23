@@ -1,6 +1,6 @@
 # @qiongqi/memory
 
-> 跨会话记忆存储 —— FileMemoryStore + 简单关键词打分。
+> 跨会话记忆存储 —— FileMemoryStore + lexical ranking / scope filtering。
 > Layer 6 — 依赖：`@qiongqi/contracts`、`@qiongqi/adapter-storage`（用于原子写）。
 
 ---
@@ -12,7 +12,7 @@
 `@qiongqi/memory` 提供**跨会话持久化记忆**的文件系统实现 `FileMemoryStore`：
 
 - **作用域**：`user`（全局）/ `workspace`（当前 workspace）/ `project`（项目级）
-- **CRUD** + **检索**（关键词打分 + confidence 加权）
+- **CRUD** + **检索**（中英文 lexical ranking、技术 token 精确匹配、scope filtering、confidence/recency tie-break）
 - **软删除**（tombstone via `deletedAt`）+ **软禁用**（`disabledAt`）
 - **lastInjectedIds** 跟踪 —— 防止重复注入
 
@@ -24,6 +24,8 @@
 |------|------|---------|--------|
 | `MemoryStore` | interface | `memory-store.ts` | 端口契约：create / update / delete / list / retrieve / diagnostics / setLastInjected |
 | `FileMemoryStore` | class | `memory-store.ts` | 文件系统实现（`<rootDir>/<id>.json`，通过 `atomicWriteFile` 写）|
+| `tokenizeMemoryText(text)` | function | `retrieval.ts` | 中文 1/2/3-gram + 英文/技术 token 切分 |
+| `rankMemoryRecords(input)` | function | `retrieval.ts` | 对 MemoryRecord 做 scope 过滤、相关性排序、limit 截断 |
 
 #### `MemoryStore` 方法
 
@@ -47,7 +49,8 @@ setLastInjected(ids: string[]): void
   - `scope='workspace'` 仅当 `record.workspace === filter.workspace`
   - `scope='project'` 永远返回 true（项目级作用域由 `record.project` 字段标识，但当前不强制检查）
   （`memory-store.ts:146-150`）
-- **`scoreMemory` 关键词打分**：将 query 拆为长度 > 2 的 token，与 `content + tags` 做 substring 匹配，匹配数 × `confidence`（`memory-store.ts:152-160`）。
+- **检索 token 化**：英文/数字 token 保留 `better-sqlite3`、`adapter_tools` 这类技术词，同时拆分 `better` / `sqlite3` / `adapter` / `tools`；中文生成单字、2-gram、3-gram。
+- **检索排序**：先按 lexical overlap + technical exact-match boost 评分，再按 `confidence`、`updatedAt`、`id` 做确定性 tie-break。
 - **`list` 按 `updatedAt` 降序**：最近修改在前（`memory-store.ts:87`）。
 - **`retrieve` 按 `score` 降序、相同 score 按 `updatedAt` 降序**（`memory-store.ts:96-97`）。
 - **`diagnostics` 返回三计数**：active（既无 `deletedAt` 也无 `disabledAt`）/ tombstone（有 `deletedAt`）/ `lastInjectedIds`（`memory-store.ts:107-110`）。
@@ -69,9 +72,11 @@ setLastInjected(ids: string[]): void
 - `list filters by workspace scope using the canonical inScope rules`
 - `list sorts by updatedAt descending`
 - `retrieve returns an empty array when memory is disabled in config`
-- `retrieve ranks records by score (substring match count × confidence) descending`
-- `retrieve breaks ties on score by updatedAt descending`
+- `retrieve ranks records by lexical score and technical-token exact matches`
+- `retrieve breaks ties by confidence, updatedAt, and id`
 - `retrieve respects the limit parameter`
+- `retrieve handles Chinese n-grams and English technical tokens`
+- `retrieve filters workspace-scoped facts outside the active workspace`
 - `diagnostics reports activeCount, tombstoneCount, and lastInjectedIds`
 - `setLastInjected replaces the previous array (does not merge)`
 

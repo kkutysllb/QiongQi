@@ -6,7 +6,7 @@
 >
 > 中文版本：[`PROGRESS.zh.md`](./PROGRESS.zh.md)
 
-**Last Updated**: 2026-06-22
+**Last Updated**: 2026-06-23
 **Current Stage**: Stages 1–3 complete ✅, Stage 4 nearly complete (awaiting external Agent cross-vendor verification)
 
 ---
@@ -15,9 +15,10 @@
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Full test suite | 433/433 ✅ | All green |
+| Full test suite | 484/484 ✅ | All green |
+| Fast test suite | 455/455 ✅ | All green |
 | Package builds | 18/18 ✅ | All green |
-| End-to-end (serve + curl) | ✅ | Pass |
+| End-to-end (local evented A2A) | ✅ | Pass |
 
 ---
 
@@ -260,7 +261,7 @@
   - assistant_text→text/markdown, tool_result→application/json, error→text/plain
   - a2aCreateTask response includes `artifacts` array
 - [x] `HttpPeerTransport` accepts both legacy `PeerArtifact` responses and Stage 4 `{ task, artifact, artifacts }` responses
-- [ ] `A2APeerAdapter` — covered by HttpPeerTransport
+- [x] `A2APeerAdapter` — no separate implementation; covered by HttpPeerTransport
 - [ ] Cross-vendor interoperability verification (moved to P2: requires a real external peer/vendor counterpart)
 - [x] End-to-end cross-instance collaboration verification (local fake-model two-instance path; external peer still requires a real counterpart)
 
@@ -289,13 +290,35 @@
   - Supports W3C `traceparent` propagation
   - Access logs include `traceparent`, `traceId`, and `spanId` for OTel collectors/loggers
 
+## Post-P1: kk_OClaw Runtime Governance Absorption ✅
+
+> Boundary: Qiongqi replaces kk_OClaw `coding_core`; it does not introduce LangGraph, LangChain, or Python core contracts. Only kk_OClaw's product/runtime governance lessons are absorbed and reimplemented inside Qiongqi-native package boundaries.
+
+- [x] Tool result budget:
+  - `@qiongqi/tool-infra` adds `applyToolResultBudget`
+  - `LocalToolHost` supports `context.outputBudget`; oversized tool results are externalized to outputs and the model sees only a head/tail preview
+- [x] Command audit:
+  - `@qiongqi/tool-infra` adds `auditShellCommand` / `maskCommandSecrets` / `stripHeredocBodies`
+  - The `bash` tool blocks high-risk commands before spawn and attaches audit metadata to warning-level commands
+- [x] Virtual path + artifacts:
+  - `@qiongqi/attachments` adds `VirtualPathResolver`
+  - `@qiongqi/http` adds `/v1/threads/:id/artifacts` and `/content?path=/mnt/qiongqi/...`
+- [x] Delegation / A2A terminal-state hardening:
+  - `@qiongqi/delegation` adds terminal-state helpers
+  - `FileA2ATaskStore` prevents completed/failed/cancelled records from being overwritten by late racing updates
+- [x] Memory retrieval v2:
+  - Chinese n-grams, English technical tokens, workspace scope filtering, and confidence/recency tie-breaks
+
 ## P2: Cross-instance Interoperability and Deeper Observability
 
 - [ ] Real external A2A peer / cross-vendor interoperability verification:
   - Reuse `pnpm run verify:evented-a2a -- --external-peer`
   - Requires `QIONGQI_A2A_PEER_URL` / `QIONGQI_A2A_PEER_TOKEN` pointing at a real counterpart
-- [ ] Full OpenTelemetry SDK exporter:
-  - Add span lifecycle/exporter on top of existing `traceparent` propagation
+  - Execution plan: `docs/superpowers/plans/2026-06-23-external-a2a-interoperability.md`
+- [x] Full OpenTelemetry SDK exporter:
+  - Adds HTTP server span lifecycle/exporter on top of existing `traceparent` propagation
+  - Supports `serve.observability.openTelemetry` and `QIONGQI_OTEL_*` configuration paths
+  - Supports OTLP HTTP, console, memory test exporter, and disabled modes
 
 | `@qiongqi/adapter-fs` | File-system capabilities (read/write/edit/grep/find/ls/bash) | ✅ | New |
 | `@qiongqi/tool-infra` | Tool infrastructure (hooks/rate-limit/mutation-queue) | ✅ | New |
