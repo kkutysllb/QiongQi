@@ -11,7 +11,7 @@ import {
   runAgentCommand,
   splitQiongqiCliCommand
 } from './agent-cli.js'
-import { createAgent, createHttpServer } from '@qiongqi/http'
+import { createAgent, createHttpServer, createOpenTelemetryRuntime } from '@qiongqi/http'
 import type { ServerRuntime } from '@qiongqi/http'
 import { createCodingAgent } from '@qiongqi/preset-coding'
 import type { ServePreset } from './cli-options.js'
@@ -56,10 +56,12 @@ async function serveMain(argv: readonly string[]): Promise<number> {
   }
   const factory = resolveServeRuntimeFactory(parsed.options.preset)
   const runtime = await factory(parsed.options)
+  const telemetry = createOpenTelemetryRuntime(parsed.options.observability?.openTelemetry)
   const handle = await createHttpServer({
     agent: runtime,
     host: parsed.options.host,
-    port: parsed.options.port
+    port: parsed.options.port,
+    telemetry
   })
   const info = handle.runtime.info()
   const startupInfo = {

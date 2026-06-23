@@ -123,6 +123,7 @@ export function parseServeOptions(
     models: loadedConfig?.config.models,
     contextCompaction: loadedConfig?.config.contextCompaction,
     runtime: loadedConfig?.config.runtime,
+    observability: observabilityFromConfigOrEnv(configServe, env),
     capabilities: loadedConfig?.config.capabilities ?? DEFAULT_SERVE_OPTIONS.capabilities,
     preset:
       typeof raw.preset === 'string'
@@ -312,6 +313,42 @@ function storageSqlitePathFromRawOrEnv(
   return stringFlag(raw, 'sqlite-path') ??
     stringFlag(raw, 'sqlitePath') ??
     env.QIONGQI_SQLITE_PATH
+}
+
+function observabilityFromConfigOrEnv(
+  configServe: NonNullable<LoadedQiongqiConfig['config']['serve']>,
+  env: Record<string, string | undefined>
+): ServeOptions['observability'] | undefined {
+  const config = configServe.observability
+  const enabled = envBoolean(env.QIONGQI_OTEL_ENABLED)
+  const exporter = openTelemetryExporterFromEnv(env.QIONGQI_OTEL_EXPORTER)
+  const endpoint = env.QIONGQI_OTEL_ENDPOINT
+  const serviceName = env.QIONGQI_OTEL_SERVICE_NAME
+  if (
+    enabled === undefined &&
+    !exporter &&
+    !endpoint &&
+    !serviceName
+  ) {
+    return config
+  }
+  return {
+    ...(config ?? {}),
+    openTelemetry: {
+      ...(config?.openTelemetry ?? {}),
+      ...(enabled !== undefined ? { enabled } : {}),
+      ...(exporter ? { exporter } : {}),
+      ...(endpoint ? { endpoint } : {}),
+      ...(serviceName ? { serviceName } : {})
+    }
+  }
+}
+
+function openTelemetryExporterFromEnv(
+  value: string | undefined
+): NonNullable<NonNullable<ServeOptions['observability']>['openTelemetry']>['exporter'] | undefined {
+  if (value === 'otlp-http' || value === 'console' || value === 'none') return value
+  return value ? (value as NonNullable<NonNullable<ServeOptions['observability']>['openTelemetry']>['exporter']) : undefined
 }
 
 function stringFlag(

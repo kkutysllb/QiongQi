@@ -161,6 +161,22 @@ export const StorageConfigSchema = z
   })
   .strict()
 
+export const OpenTelemetryConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    serviceName: z.string().min(1).optional(),
+    exporter: z.enum(['otlp-http', 'console', 'none']).optional(),
+    endpoint: z.string().url().optional(),
+    headers: z.record(z.string().min(1), z.string()).optional()
+  })
+  .strict()
+
+export const ObservabilityConfigSchema = z
+  .object({
+    openTelemetry: OpenTelemetryConfigSchema.optional()
+  })
+  .strict()
+
 export const DEFAULT_STORAGE_CONFIG: StorageConfig = {
   backend: 'hybrid'
 }
@@ -183,7 +199,8 @@ export const QiongqiServeConfigSchema = z
     tokenEconomyMode: z.boolean().optional(),
     tokenEconomy: TokenEconomyConfigSchema.optional(),
     insecure: z.boolean().optional(),
-    storage: StorageConfigSchema.optional()
+    storage: StorageConfigSchema.optional(),
+    observability: ObservabilityConfigSchema.optional()
   })
   .strict()
 
@@ -204,6 +221,8 @@ export type ContextCompactionConfig = z.infer<typeof ContextCompactionConfigSche
 export type RuntimeTuningConfig = z.infer<typeof RuntimeTuningConfigSchema>
 export type TokenEconomyConfig = z.infer<typeof TokenEconomyConfigSchema>
 export type StorageConfig = z.infer<typeof StorageConfigSchema>
+export type OpenTelemetryConfig = z.infer<typeof OpenTelemetryConfigSchema>
+export type ObservabilityConfig = z.infer<typeof ObservabilityConfigSchema>
 
 export type LoadedQiongqiConfig = {
   path: string

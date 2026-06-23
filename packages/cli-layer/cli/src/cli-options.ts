@@ -10,6 +10,7 @@ import {
   DEFAULT_QIONGQI_MODEL,
   DEFAULT_STORAGE_CONFIG,
   ModelConfigSchema,
+  ObservabilityConfigSchema,
   RuntimeTuningConfigSchema,
   StorageConfigSchema,
   TokenEconomyConfigSchema
@@ -76,6 +77,7 @@ export const ServeOptionsSchema = z.object({
   models: ModelConfigSchema.optional(),
   contextCompaction: ContextCompactionConfigSchema.optional(),
   runtime: RuntimeTuningConfigSchema.optional(),
+  observability: ObservabilityConfigSchema.optional(),
   capabilities: QiongqiCapabilitiesConfig.default(DEFAULT_QIONGQI_CAPABILITIES_CONFIG),
   /**
    * Which built-in preset to use for the system prompt and pinned

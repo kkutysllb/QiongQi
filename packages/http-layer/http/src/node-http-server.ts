@@ -15,9 +15,10 @@ export async function startNodeHttpServer(input: {
   host: string
   port: number
   accessLog?: DispatchRequestOptions['accessLog']
+  telemetry?: DispatchRequestOptions['telemetry']
 }): Promise<NodeHttpServerHandle> {
   const server = createServer((request, response) => {
-    void handleNodeRequest(input.router, request, response, { accessLog: input.accessLog })
+    void handleNodeRequest(input.router, request, response, { accessLog: input.accessLog, telemetry: input.telemetry })
   })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)

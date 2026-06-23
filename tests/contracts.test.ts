@@ -349,6 +349,17 @@ describe('cli', () => {
           storage: {
             backend: 'hybrid',
             sqlitePath: join(dir, 'data', 'index.sqlite3')
+          },
+          observability: {
+            openTelemetry: {
+              enabled: true,
+              serviceName: 'qiongqi-config',
+              exporter: 'otlp-http',
+              endpoint: 'http://collector.invalid:4318/v1/traces',
+              headers: {
+                authorization: 'Bearer config-token'
+              }
+            }
           }
         },
         contextCompaction: {
@@ -405,7 +416,9 @@ describe('cli', () => {
         '--model',
         'deepseek-v4-pro'
       ], {
-        QIONGQI_PORT: '9091'
+        QIONGQI_PORT: '9091',
+        QIONGQI_OTEL_SERVICE_NAME: 'qiongqi-env',
+        QIONGQI_OTEL_ENDPOINT: 'http://collector-env.invalid:4318/v1/traces'
       })
 
       expect(parsed.configPath).toBe(configPath)
@@ -431,6 +444,15 @@ describe('cli', () => {
       expect(parsed.storage).toEqual({
         backend: 'hybrid',
         sqlitePath: join(dir, 'data', 'index.sqlite3')
+      })
+      expect(parsed.observability?.openTelemetry).toEqual({
+        enabled: true,
+        serviceName: 'qiongqi-env',
+        exporter: 'otlp-http',
+        endpoint: 'http://collector-env.invalid:4318/v1/traces',
+        headers: {
+          authorization: 'Bearer config-token'
+        }
       })
       expect(parsed.contextCompaction?.defaultSoftThreshold).toBe(32_000)
       expect(parsed.contextCompaction?.summaryMode).toBe('model')

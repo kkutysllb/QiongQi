@@ -1,6 +1,7 @@
 import type { Router } from './router.js'
 import type { JsonResponse } from './response.js'
 import { jsonResponse } from './response.js'
+import type { OpenTelemetryRuntime } from './telemetry.js'
 
 export type HttpServerOptions = {
   router: Router
@@ -21,6 +22,7 @@ export type HttpAccessLogEntry = {
 export type DispatchRequestOptions = {
   accessLog?: (entry: HttpAccessLogEntry) => void
   idGenerator?: () => string
+  telemetry?: OpenTelemetryRuntime
 }
 
 function toResponse(response: Response | JsonResponse, observability?: {
@@ -77,14 +79,27 @@ export async function dispatchRequest(
   const trace = parseTraceparent(request.headers.get('traceparent'))
   const observability = { requestId, traceparent: trace?.traceparent }
   const match = router.match(request.method, url.pathname)
+  const telemetrySpan = options.telemetry?.startHttpSpan({
+    method: request.method.toUpperCase(),
+    path: url.pathname,
+    url: request.url,
+    headers: request.headers,
+    requestId
+  })
   let response: Response
-  if (!match) {
-    response = toResponse(jsonResponse(
-      { code: 'not_found', message: 'route not found' },
-      404
-    ), observability)
-  } else {
-    response = toResponse(await match.handler(request, { params: match.params }), observability)
+  try {
+    if (!match) {
+      response = toResponse(jsonResponse(
+        { code: 'not_found', message: 'route not found' },
+        404
+      ), observability)
+    } else {
+      response = toResponse(await match.handler(request, { params: match.params }), observability)
+    }
+    options.telemetry?.finishSpan(telemetrySpan?.span, { status: response.status })
+  } catch (error) {
+    options.telemetry?.finishSpan(telemetrySpan?.span, { status: 500, error })
+    throw error
   }
   options.accessLog?.({
     type: 'http_access',

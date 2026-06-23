@@ -19,24 +19,30 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@qiongqi/contracts": "workspace:*",
-    "@qiongqi/domain": "workspace:*",
-    "@qiongqi/ports": "workspace:*",
-    "@qiongqi/cache": "workspace:*",
-    "@qiongqi/loop": "workspace:*",
-    "@qiongqi/services": "workspace:*",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/core": "^2.8.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
+    "@opentelemetry/resources": "^2.8.0",
+    "@opentelemetry/sdk-trace-base": "^2.8.0",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
     "@qiongqi/adapter-model": "workspace:*",
     "@qiongqi/adapter-storage": "workspace:*",
     "@qiongqi/adapter-tools": "workspace:*",
-    "@qiongqi/skills": "workspace:*",
-    "@qiongqi/memory": "workspace:*",
     "@qiongqi/attachments": "workspace:*",
+    "@qiongqi/cache": "workspace:*",
+    "@qiongqi/contracts": "workspace:*",
     "@qiongqi/delegation": "workspace:*",
+    "@qiongqi/domain": "workspace:*",
+    "@qiongqi/loop": "workspace:*",
+    "@qiongqi/memory": "workspace:*",
+    "@qiongqi/ports": "workspace:*",
+    "@qiongqi/services": "workspace:*",
+    "@qiongqi/skills": "workspace:*",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "typescript": "^5.8.2",
-    "@types/node": "^26.0.0"
+    "@types/node": "^26.0.0",
+    "typescript": "^5.8.2"
   },
   "private": true,
   "types": "./dist/index.d.ts"

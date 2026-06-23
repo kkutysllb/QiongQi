@@ -79,6 +79,7 @@ import { DelegationRuntime, FileDelegationStore } from '@qiongqi/delegation'
 import { createChildAgentExecutor } from '@qiongqi/delegation'
 import { PeerRegistry, FilePeerStore } from '@qiongqi/delegation'
 import { HttpPeerTransport } from './http-peer-transport.js'
+import { createOpenTelemetryRuntime, type OpenTelemetryRuntime, type OpenTelemetryRuntimeOptions } from './telemetry.js'
 
 // ---------------------------------------------------------------------------
 // Options
@@ -103,6 +104,9 @@ export type QiongqiServeRuntimeOptions = {
   contextCompaction?: ContextCompactionConfig
   runtime?: RuntimeTuningConfig
   storage?: StorageConfig
+  observability?: {
+    openTelemetry?: OpenTelemetryRuntimeOptions
+  }
   capabilities?: QiongqiCapabilitiesConfig
   startedAt?: string
   /**
@@ -936,6 +940,8 @@ export type CreateHttpServerOptions = {
    * request with request id, method, path, status, and duration.
    */
   accessLog?: DispatchRequestOptions['accessLog']
+  /** Optional OpenTelemetry runtime. When omitted, `agent.info().observability` is not inspected here. */
+  telemetry?: OpenTelemetryRuntime
 }
 
 /**
@@ -968,11 +974,13 @@ export async function createHttpServer(
   options: CreateHttpServerOptions
 ): Promise<QiongqiServeHandle> {
   const router = buildRouter(options.agent)
+  const telemetry = options.telemetry
   const server = await startNodeHttpServer({
     router,
     host: options.host ?? '127.0.0.1',
     port: options.port,
-    accessLog: options.accessLog
+    accessLog: options.accessLog,
+    telemetry
   })
   return {
     ...server,
@@ -981,6 +989,7 @@ export async function createHttpServer(
       try {
         await server.close()
       } finally {
+        await telemetry?.shutdown()
         await options.agent.shutdown?.()
       }
     }
@@ -999,10 +1008,12 @@ export async function startQiongqiServe(
   options: QiongqiServeRuntimeOptions
 ): Promise<QiongqiServeHandle> {
   const runtime = await createAgent(options)
+  const telemetry = createOpenTelemetryRuntime(options.observability?.openTelemetry)
   return createHttpServer({
     agent: runtime,
     host: options.host,
-    port: options.port
+    port: options.port,
+    telemetry
   })
 }
 
