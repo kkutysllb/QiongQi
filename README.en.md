@@ -17,6 +17,7 @@
   <a href="#-design-philosophy">Philosophy</a> ·
   <a href="#-architecture">Architecture</a> ·
   <a href="#-monorepo-package-structure">Packages</a> ·
+  <a href="./docs/packages/README.md">Technical Docs</a> ·
   <a href="./docs/PROGRESS.en.md">Progress</a>
 </p>
 
@@ -41,6 +42,13 @@ different industries.
 Core goal: **maximize the ROI of every token.** Avoid duplicate tool schemas,
 runaway tool outputs, malformed history, invalid retries, and any stable prefix
 that could be cached but is missed.
+
+The current implementation includes classic / evented turn orchestration,
+HTTP/SSE APIs, A2A task lifecycle, Skill/MCP/Web/Memory/Delegation providers,
+attachments/artifacts, hybrid SQLite+JSONL storage, Prometheus metrics,
+structured access logs, OpenTelemetry HTTP tracing, and Post-P1 runtime
+governance such as tool result budgeting, bash command audit, virtual paths,
+and terminal-state guards.
 
 ---
 
@@ -129,9 +137,9 @@ pnpm -r run build          # Build all 18 packages
 pnpm run prepare:sqlite    # Build the better-sqlite3 native binding for the current Node ABI
 pnpm run verify:sqlite     # Verify the better-sqlite3 native binding for hybrid storage
 pnpm run verify:evented-a2a # Local fake-model two-instance evented + A2A verification
-pnpm test                  # Full test suite (Vitest)
+pnpm test                  # Full test suite (65 files, 484 tests)
 pnpm test:unit             # Unit tests
-pnpm test:fast             # Fast test subset
+pnpm test:fast             # Fast test subset (64 files, 455 tests)
 ```
 
 ---
@@ -164,10 +172,12 @@ pnpm test:fast             # Fast test subset
 │           Adapters + Extensions                  │
 │  adapter-model · adapter-tools · adapter-storage │
 │  skills · memory · attachments · delegation      │
+│  tool-infra · artifacts · OpenTelemetry          │
 └───────────────────────────────────────────────────┘
 ```
 
 > Detailed architecture: [`docs/architecture.en.md`](./docs/architecture.en.md)
+> Per-package technical docs: [`docs/packages/README.md`](./docs/packages/README.md)
 
 ---
 
@@ -183,21 +193,21 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 | `@qiongqi/cache` | LRU/TTL cache, immutable prefix |
 | `@qiongqi/loop` | TurnOrchestrator/PromptBuilder/Policy |
 | `@qiongqi/services` | Thread/Turn/Usage services |
-| `@qiongqi/adapter-model` | OpenAI-compatible model client |
-| `@qiongqi/adapter-tools` | bash/read/edit/grep + MCP provider |
+| `@qiongqi/adapter-model` | Provider-neutral model compatibility client |
+| `@qiongqi/adapter-tools` | Built-in tools + MCP/Web/Memory/Delegation providers |
 | `@qiongqi/adapter-storage` | File/Hybrid/SQLite storage |
 | `@qiongqi/skills` | SkillRuntime + PluginHost |
-| `@qiongqi/memory` | Cross-session memory storage |
-| `@qiongqi/attachments` | Attachment management |
+| `@qiongqi/memory` | Cross-session memory + lexical retrieval |
+| `@qiongqi/attachments` | Attachment management + virtual path resolver |
 | `@qiongqi/adapter-fs` | Pure filesystem I/O utilities |
-| `@qiongqi/tool-infra` | Tool execution infrastructure |
-| `@qiongqi/delegation` | Child agent delegation runtime |
-| `@qiongqi/http` | HTTP/SSE server |
+| `@qiongqi/tool-infra` | Tool infrastructure, result budget, command audit |
+| `@qiongqi/delegation` | Child-agent delegation runtime + terminal-state guard |
+| `@qiongqi/http` | HTTP/SSE, A2A, metrics, artifacts, OpenTelemetry |
 | `@qiongqi/cli` | CLI entry point |
 | `@qiongqi/preset-coding` | Coding preset |
 
 > Full dependency graph: [`docs/architecture.en.md#appendix-a-complete-dependency-table`](./docs/architecture.en.md)
-> Package details: [`docs/architecture.en.md#3-package-structure`](./docs/architecture.en.md)
+> Package details: [`docs/packages/README.md`](./docs/packages/README.md)
 
 ---
 
@@ -209,19 +219,21 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 - **Token economy**: Compress tool descriptions and results
 - **Tool Storm Breaker**: Suppress repeated tool calls within the same turn
 - **Continuation Policy**: Intelligent stop/continue/fail decisions
+- **Runtime governance**: Tool result externalization, bash command audit, terminal-state guards
 
 ### 🔌 Capability Matrix
 - **MCP client**: stdio / streamable-http / SSE transports, BM25 tool search
 - **Skills system**: Plugin-based capability injection via `skill.json` / `SKILL.md`
 - **Subagent delegation**: Hierarchical agent calls with concurrency control
-- **Memory system**: Cross-session persistence, scope-based retrieval
-- **Attachment management**: Image binary stripping, dual-channel visual/text processing
+- **Memory system**: Cross-session persistence, Chinese/English lexical ranking, scope-based retrieval
+- **Attachments and artifacts**: Image binary stripping, visual/text channels, virtual-path reads
 
 ### 🌐 Server
 - **HTTP/SSE API**: Complete `/v1/*` RESTful routes
-- **Runtime diagnostics**: Capability manifest and tool diagnostics
+- **Runtime diagnostics**: Capability manifest, tool diagnostics, JSON/Prometheus metrics
 - **Thread management**: Create, fork, side threads, event replay
 - **Approval gating**: Multiple policy support
+- **Observability**: Request id, structured access logs, W3C `traceparent`, OpenTelemetry HTTP tracing
 
 ---
 
@@ -234,25 +246,25 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 ├── docs/                          # Technical docs (bilingual)
 │   ├── PROGRESS.zh.md            # Progress (Chinese)
 │   ├── PROGRESS.en.md            # Progress (English)
-│   └── architecture.{zh,en}.md   # Unified architecture (design philosophy + tech architecture + package tour)
-├── packages/                      # 18 @qiongqi/* packages
-│   ├── contracts/
-│   ├── domain/
-│   ├── ports/
-│   ├── cache/
-│   ├── loop/
-│   ├── services/
-│   ├── adapter-model/
-│   ├── adapter-tools/
-│   ├── adapter-storage/
-│   ├── skills/
-│   ├── memory/
-│   ├── attachments/
-│   ├── delegation/
-│   ├── http/
-│   ├── cli/
-│   └── preset-coding/
-├── tests/                         # Full test suite (53 files, 433 tests)
+│   ├── architecture.{zh,en}.md   # Unified architecture (philosophy + technical architecture + packages)
+│   ├── deployment.{zh,en}.md     # Production deployment, probes, metrics, OTel, A2A verification
+│   ├── packages/                 # 27 per-package technical docs
+│   └── superpowers/plans/        # Runtime governance and external A2A plans
+├── packages/                      # 18 @qiongqi/* packages (packages/<layer>/<package>)
+│   ├── foundation/contracts/
+│   ├── domain-layer/domain/
+│   ├── ports-layer/ports/
+│   ├── infrastructure/{cache,attachments,adapter-fs,tool-infra}/
+│   ├── engine/{loop,services}/
+│   ├── adapters/{adapter-model,adapter-tools,adapter-storage}/
+│   ├── capabilities/{skills,memory}/
+│   ├── delegation-layer/delegation/
+│   ├── http-layer/http/
+│   ├── cli-layer/cli/
+│   └── presets/preset-coding/
+├── tests/                         # Full test suite (65 files, 484 tests)
+├── deploy/                        # Kubernetes manifests and Prometheus rules
+├── .github/workflows/ci.yml       # CI: SQLite, typecheck, fast tests, build, A2A
 ├── scripts/                       # Migration and build helper scripts
 ├── pnpm-workspace.yaml
 ├── vitest.config.ts
@@ -267,10 +279,13 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 |----------|----------|
 | **Refactoring Progress** | [`docs/PROGRESS.en.md`](./docs/PROGRESS.en.md) |
 | **Architecture Overview** | [`docs/architecture.en.md`](./docs/architecture.en.md) |
+| **Technical Docs Index** | [`docs/packages/README.md`](./docs/packages/README.md) |
 | **Deployment** | [`docs/deployment.en.md`](./docs/deployment.en.md) |
 | **Package Dependencies** | [`docs/architecture.en.md#appendix-a-complete-dependency-table`](./docs/architecture.en.md) |
-| **Package Guide** | [`docs/architecture.en.md#3-package-structure`](./docs/architecture.en.md) |
-| **Design Specs** | [`docs/superpowers/specs/`](./docs/superpowers/specs/) |
+| **Per-Package Docs** | [`docs/packages/`](./docs/packages/) |
+| **External A2A Verification Plan** | [`docs/superpowers/plans/2026-06-23-external-a2a-interoperability.md`](./docs/superpowers/plans/2026-06-23-external-a2a-interoperability.md) |
+| **Runtime Governance Plan** | [`docs/superpowers/plans/2026-06-22-kk-oclaw-runtime-hardening.md`](./docs/superpowers/plans/2026-06-22-kk-oclaw-runtime-hardening.md) |
+| **CI / Delivery Assets** | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml), [`Dockerfile`](./Dockerfile), [`deploy/`](./deploy/) |
 | **Chinese README** | [`README.zh.md`](./README.zh.md) |
 
 ---
@@ -285,6 +300,8 @@ Qiongqi's four-stage architecture refactoring currently stands at:
 | **Stage 2** | AgentCard + AgentIdentity | Complete |
 | **Stage 3** | TurnOrchestrator event-driven | Complete |
 | **Stage 4** | A2A protocol endpoint | Nearly complete; awaiting external Agent cross-vendor interop verification |
+| **Post-P1** | Runtime governance + OpenTelemetry exporter | Complete |
+| **P2** | Real external A2A peer / cross-vendor interoperability | Awaiting external counterpart |
 
 Detailed progress: [`docs/PROGRESS.en.md`](./docs/PROGRESS.en.md).
 

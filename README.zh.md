@@ -17,6 +17,7 @@
   <a href="#-设计哲学">设计哲学</a> ·
   <a href="#-架构">架构</a> ·
   <a href="#-monorepo-包结构">包结构</a> ·
+  <a href="./docs/packages/README.md">技术文档</a> ·
   <a href="./docs/PROGRESS.zh.md">改造进度</a>
 </p>
 
@@ -33,6 +34,8 @@
 > 穷奇"状如虎，有翼"、"知人言语"——骨架不变，血肉万变。
 
 核心目标：**提高每一 token 的 ROI**。避免重复工具 schema、失控工具输出、畸形历史、无效重试，以及任何可以命中却错过的稳定前缀。
+
+当前实现覆盖 classic / evented turn orchestration、HTTP/SSE API、A2A task lifecycle、Skill/MCP/Web/Memory/Delegation provider、attachments/artifacts、hybrid SQLite+JSONL storage、Prometheus 指标、结构化 access log、OpenTelemetry HTTP tracing，以及工具输出预算、bash command audit、virtual path、terminal-state guard 等 Post-P1 运行治理能力。
 
 ---
 
@@ -120,9 +123,9 @@ pnpm -r run build          # 构建全部 18 个包
 pnpm run prepare:sqlite    # 为当前 Node ABI 编译 better-sqlite3 原生绑定
 pnpm run verify:sqlite     # 验证 hybrid 存储所需的 better-sqlite3 原生绑定
 pnpm run verify:evented-a2a # 本地 fake model 双实例验证 evented + A2A
-pnpm test                  # 全量测试（Vitest）
+pnpm test                  # 全量测试（65 个文件，484 个测试用例）
 pnpm test:unit             # 单元测试
-pnpm test:fast             # 快速测试子集
+pnpm test:fast             # 快速测试子集（64 个文件，455 个测试用例）
 ```
 
 ---
@@ -155,10 +158,12 @@ pnpm test:fast             # 快速测试子集
 │           Adapters + Extensions                  │
 │  adapter-model · adapter-tools · adapter-storage │
 │  skills · memory · attachments · delegation      │
+│  tool-infra · artifacts · OpenTelemetry          │
 └───────────────────────────────────────────────────┘
 ```
 
 > 详细架构说明见 [`docs/architecture.zh.md`](./docs/architecture.zh.md)
+> 逐包技术细节见 [`docs/packages/README.md`](./docs/packages/README.md)
 
 ---
 
@@ -174,21 +179,21 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 18 个独立 npm 包：
 | `@qiongqi/cache` | LRU/TTL 缓存、不可变前缀 |
 | `@qiongqi/loop` | TurnOrchestrator/PromptBuilder/Policy |
 | `@qiongqi/services` | Thread/Turn/Usage 服务 |
-| `@qiongqi/adapter-model` | OpenAI 兼容模型客户端 |
-| `@qiongqi/adapter-tools` | bash/read/edit/grep + MCP provider |
+| `@qiongqi/adapter-model` | Provider-neutral 模型兼容客户端 |
+| `@qiongqi/adapter-tools` | 内置工具 + MCP/Web/Memory/Delegation providers |
 | `@qiongqi/adapter-storage` | File/Hybrid/SQLite 存储 |
 | `@qiongqi/skills` | SkillRuntime + PluginHost |
-| `@qiongqi/memory` | 跨会话记忆存储 |
-| `@qiongqi/attachments` | 附件管理 |
+| `@qiongqi/memory` | 跨会话记忆存储 + lexical retrieval |
+| `@qiongqi/attachments` | 附件管理 + virtual path resolver |
 | `@qiongqi/adapter-fs` | 纯文件系统 I/O 工具 |
-| `@qiongqi/tool-infra` | 工具执行基础设施 |
-| `@qiongqi/delegation` | 子代理委派运行时 |
-| `@qiongqi/http` | HTTP/SSE 服务器 |
+| `@qiongqi/tool-infra` | 工具执行基础设施、result budget、command audit |
+| `@qiongqi/delegation` | 子代理委派运行时 + terminal-state guard |
+| `@qiongqi/http` | HTTP/SSE、A2A、metrics、artifacts、OpenTelemetry |
 | `@qiongqi/cli` | 命令行入口 |
 | `@qiongqi/preset-coding` | 编码预设 |
 
 > 完整依赖关系见 [`docs/architecture.zh.md#附录-a-完整依赖表`](./docs/architecture.zh.md)
-> 各包详细说明见 [`docs/architecture.zh.md#3-包结构`](./docs/architecture.zh.md)
+> 各包详细说明见 [`docs/packages/README.md`](./docs/packages/README.md)
 
 ---
 
@@ -200,19 +205,21 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 18 个独立 npm 包：
 - **Token 经济**：压缩工具描述与结果
 - **Tool Storm Breaker**：抑制同回合重复工具调用
 - **Continuation Policy**：智能决策停止/继续/失败
+- **运行治理**：工具输出外置、bash command audit、terminal-state guard
 
 ### 🔌 能力矩阵
 - **MCP 客户端**：stdio / streamable-http / SSE 传输，BM25 工具搜索
 - **Skills 系统**：基于 `skill.json` / `SKILL.md` 的插件化能力注入
 - **Subagent 委派**：带并发控制的分层 Agent 调用
-- **记忆系统**：跨会话持久化，按作用域检索
-- **附件管理**：图片二进制剥离，视觉/文本双通道
+- **记忆系统**：跨会话持久化，中英文 lexical ranking 与作用域检索
+- **附件与 artifacts**：图片二进制剥离、视觉/文本双通道、虚拟路径读取
 
 ### 🌐 服务器
 - **HTTP/SSE API**：完整的 `/v1/*` RESTful 路由
-- **运行时诊断**：能力清单与工具诊断
+- **运行时诊断**：能力清单、工具诊断、JSON/Prometheus 指标
 - **线程管理**：创建、Fork、Side 线程、事件回放
 - **审批门控**：支持多种策略
+- **可观测性**：request id、structured access log、W3C `traceparent`、OpenTelemetry HTTP tracing
 
 ---
 
@@ -225,25 +232,25 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 18 个独立 npm 包：
 ├── docs/                          # 技术文档（中英双语）
 │   ├── PROGRESS.zh.md            # 改造进度（中文）
 │   ├── PROGRESS.en.md            # Refactoring progress (English)
-│   └── architecture.{zh,en}.md   # 统一架构（设计哲学 + 技术架构 + 包结构）
-├── packages/                      # 18 个 @qiongqi/* 包
-│   ├── contracts/
-│   ├── domain/
-│   ├── ports/
-│   ├── cache/
-│   ├── loop/
-│   ├── services/
-│   ├── adapter-model/
-│   ├── adapter-tools/
-│   ├── adapter-storage/
-│   ├── skills/
-│   ├── memory/
-│   ├── attachments/
-│   ├── delegation/
-│   ├── http/
-│   ├── cli/
-│   └── preset-coding/
-├── tests/                         # 全量测试套件（53 文件，433 测试）
+│   ├── architecture.{zh,en}.md   # 统一架构（设计哲学 + 技术架构 + 包结构）
+│   ├── deployment.{zh,en}.md     # 生产部署、探针、指标、OTel、A2A 验证
+│   ├── packages/                 # 27 份逐包技术文档
+│   └── superpowers/plans/        # 运行治理与外部 A2A 验证计划
+├── packages/                      # 18 个 @qiongqi/* 包（packages/<layer>/<package>）
+│   ├── foundation/contracts/
+│   ├── domain-layer/domain/
+│   ├── ports-layer/ports/
+│   ├── infrastructure/{cache,attachments,adapter-fs,tool-infra}/
+│   ├── engine/{loop,services}/
+│   ├── adapters/{adapter-model,adapter-tools,adapter-storage}/
+│   ├── capabilities/{skills,memory}/
+│   ├── delegation-layer/delegation/
+│   ├── http-layer/http/
+│   ├── cli-layer/cli/
+│   └── presets/preset-coding/
+├── tests/                         # 全量测试套件（65 文件，484 测试）
+├── deploy/                        # Kubernetes 与 Prometheus 规则
+├── .github/workflows/ci.yml       # CI：SQLite、typecheck、fast tests、build、A2A
 ├── scripts/                       # 迁移与构建辅助脚本
 ├── pnpm-workspace.yaml
 ├── vitest.config.ts
@@ -258,10 +265,13 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 18 个独立 npm 包：
 |------|------|
 | **改造进度** | [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md) |
 | **架构总览** | [`docs/architecture.zh.md`](./docs/architecture.zh.md) |
+| **技术文档索引** | [`docs/packages/README.md`](./docs/packages/README.md) |
 | **生产部署** | [`docs/deployment.zh.md`](./docs/deployment.zh.md) |
 | **包依赖图** | [`docs/architecture.zh.md#附录-a-完整依赖表`](./docs/architecture.zh.md) |
-| **各包说明** | [`docs/architecture.zh.md#3-包结构`](./docs/architecture.zh.md) |
-| **设计哲学** | [`docs/superpowers/specs/`](./docs/superpowers/specs/) |
+| **逐包技术文档** | [`docs/packages/`](./docs/packages/) |
+| **外部 A2A 验证计划** | [`docs/superpowers/plans/2026-06-23-external-a2a-interoperability.md`](./docs/superpowers/plans/2026-06-23-external-a2a-interoperability.md) |
+| **运行治理实现计划** | [`docs/superpowers/plans/2026-06-22-kk-oclaw-runtime-hardening.md`](./docs/superpowers/plans/2026-06-22-kk-oclaw-runtime-hardening.md) |
+| **CI / 交付资产** | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml), [`Dockerfile`](./Dockerfile), [`deploy/`](./deploy/) |
 | **英文 README** | [`README.en.md`](./README.en.md) |
 
 ---
@@ -276,6 +286,8 @@ Qiongqi 的四阶段架构改造当前状态如下：
 | **阶段 2** | AgentCard + AgentIdentity | 完成 |
 | **阶段 3** | TurnOrchestrator 事件化 | 完成 |
 | **阶段 4** | A2A 协议端点 | 基本完成，待外部 Agent 做跨厂商互操作验证 |
+| **Post-P1** | 运行治理 + OpenTelemetry exporter | 完成 |
+| **P2** | 真实外部 A2A peer / 跨厂商互操作验证 | 待外部对端 |
 
 详细进度见 [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md)。
 

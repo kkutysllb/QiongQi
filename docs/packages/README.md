@@ -26,8 +26,8 @@
 | 文档 | 包 | 核心内容 |
 |------|----|---------|
 | [`adapter-fs.md`](./adapter-fs.md) | `@qiongqi/adapter-fs` | 纯 FS I/O（edit-diff fuzzy match / truncate UTF-8 安全 / fs-types）|
-| [`tool-infra.md`](./tool-infra.md) | `@qiongqi/tool-infra` | 工具执行基础设施（FileMutationQueue / OutputAccumulator / ToolRateLimit）|
-| [`memory.md`](./memory.md) | `@qiongqi/memory` | FileMemoryStore（跨会话记忆 + 关键词打分 + 软删除/软禁用）|
+| [`tool-infra.md`](./tool-infra.md) | `@qiongqi/tool-infra` | 工具执行基础设施（FileMutationQueue / OutputAccumulator / ToolRateLimit / ResultBudget / CommandAudit）|
+| [`memory.md`](./memory.md) | `@qiongqi/memory` | FileMemoryStore（跨会话记忆 + lexical ranking + scope filtering + 软删除/软禁用）|
 
 ### Layer 4-5 — 引擎 + 适配器
 
@@ -54,7 +54,7 @@
 | 文档 | 包 | 核心内容 |
 |------|----|---------|
 | [`http-transport.md`](./http-transport.md) | `@qiongqi/http` | Router / SSE / Auth / Response / Node HTTP / A2A transport |
-| [`http-composition-and-routes.md`](./http-composition-and-routes.md) | `@qiongqi/http` | createAgent Composition Root + ReviewService + 18 个 route handlers |
+| [`http-composition-and-routes.md`](./http-composition-and-routes.md) | `@qiongqi/http` | createAgent Composition Root + ReviewService + runtime / A2A / artifacts / memory / usage routes |
 | [`cli.md`](./cli.md) | `@qiongqi/cli` | qiongqi serve / run / chat / exec |
 | [`preset-coding.md`](./preset-coding.md) | `@qiongqi/preset-coding` | createCodingAgent + CODING_SYSTEM_PROMPT + CODING_PINNED_CONSTRAINTS |
 
@@ -77,7 +77,7 @@
 - **覆盖包数**：18 / 18
 - **总行数**：约 7000 行中文
 - **每份平均**：约 250 行
-- **最大单份**：`http-composition-and-routes.md`（18 个 route handlers + Composition Root）
+- **最大单份**：`http-composition-and-routes.md`（HTTP route handlers + Composition Root）
 - **最小单份**：`attachments.md` / `memory.md`（单文件实现）
 
 ## 写作原则
