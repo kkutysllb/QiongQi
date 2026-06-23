@@ -18,7 +18,6 @@
   <a href="#-架构">架构</a> ·
   <a href="#-monorepo-包结构">包结构</a> ·
   <a href="./docs/packages/README.md">技术文档</a> ·
-  <a href="./docs/PROGRESS.zh.md">改造进度</a>
 </p>
 
 ---
@@ -230,8 +229,6 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 18 个独立 npm 包：
 ├── assets/
 │   └── qiongqi.png               # 项目封面图
 ├── docs/                          # 技术文档（中英双语）
-│   ├── PROGRESS.zh.md            # 改造进度（中文）
-│   ├── PROGRESS.en.md            # Refactoring progress (English)
 │   ├── architecture.{zh,en}.md   # 统一架构（设计哲学 + 技术架构 + 包结构）
 │   ├── deployment.{zh,en}.md     # 生产部署、探针、指标、OTel、A2A 验证
 │   ├── packages/                 # 27 份逐包技术文档
@@ -263,7 +260,6 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 18 个独立 npm 包：
 
 | 文档 | 位置 |
 |------|------|
-| **改造进度** | [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md) |
 | **架构总览** | [`docs/architecture.zh.md`](./docs/architecture.zh.md) |
 | **技术文档索引** | [`docs/packages/README.md`](./docs/packages/README.md) |
 | **生产部署** | [`docs/deployment.zh.md`](./docs/deployment.zh.md) |
@@ -289,7 +285,7 @@ Qiongqi 的四阶段架构改造当前状态如下：
 | **Post-P1** | 运行治理 + OpenTelemetry exporter | 完成 |
 | **P2** | 真实外部 A2A peer / 跨厂商互操作验证 | 待外部对端 |
 
-详细进度见 [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md)。
+详细进度见 CHANGELOG 提交历史。
 
 ---
 

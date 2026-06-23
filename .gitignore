@@ -18,3 +18,7 @@ docs/superpowers/
 findings.md
 task_plan.md
 progress.md
+
+# Local progress tracking — kept on disk, not pushed to remote
+docs/PROGRESS.zh.md
+docs/PROGRESS.en.md

@@ -13,7 +13,6 @@
 
 <p align="center">
   🌐 <a href="./README.zh.md">中文</a> · <a href="./README.en.md">English</a><br>
-  <a href="./docs/PROGRESS.zh.md">改造进度</a> ·
   <a href="./docs/architecture.zh.md">架构文档</a> ·
   <a href="./docs/packages/README.md">技术文档</a> ·
   <a href="./docs/deployment.zh.md">生产部署</a>
@@ -23,13 +22,13 @@
 
 > **穷奇非凶，乃破局之锐。** Qiongqi 是一个领域中立的独立多 Agent 框架，以 cache-first、去中心化编排的 HTTP/SSE 引擎为骨架，搭配可插拔的技能与工具体系。
 >
-> 本项目的 **四阶段架构改造**（monorepo 拆包 → AgentCard → 事件化 → A2A）已进入收尾状态：阶段 1–3 已完成，阶段 4 基本完成；Post-P1 运行治理与 OpenTelemetry exporter 已落地，真实外部 A2A peer / 跨厂商互操作验证保留为 P2。详细进度见 [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md)。
+> 本项目的 **四阶段架构改造**（monorepo 拆包 → AgentCard → 事件化 → A2A）已进入收尾状态：阶段 1–3 已完成，阶段 4 基本完成；Post-P1 运行治理与 OpenTelemetry exporter 已落地，真实外部 A2A peer / 跨厂商互操作验证保留为 P2。详细进度见 CHANGELOG 提交历史。
 
 ---
 
 ## 📖 什么是 Qiongqi？
 
-**Qiongqi** 是一个**领域中立的独立多 Agent 框架**，以 **cache-first、去中心化编排**的 HTTP/SSE 引擎为骨架，搭配可插拔的技能与工具体系，面向不同行业组装为生产力工具。
+**Qiongqi** 是一个**领域中立的独立多 Agent 框架**，以 **cache-first、去中心化编排**的 HTTP/SSE 引擎为骨架，搭配可插拔的技能与工具体系，面向不同行业组装为生产力工具。你也可以用预置的技能完成一个coding agent实现编码生产力的工具。
 
 核心目标：**提高每一 token 的 ROI**。避免重复工具 schema、失控工具输出、畸形历史、无效重试，以及任何可以命中却错过的稳定前缀。
 
@@ -93,7 +92,6 @@ pnpm run verify:evented-a2a
 |------|------|
 | **中文 README** | [`README.zh.md`](./README.zh.md) |
 | **English README** | [`README.en.md`](./README.en.md) |
-| **改造进度** | [`docs/PROGRESS.zh.md`](./docs/PROGRESS.zh.md) |
 | **架构总览** | [`docs/architecture.zh.md`](./docs/architecture.zh.md) |
 | **技术文档索引** | [`docs/packages/README.md`](./docs/packages/README.md) |
 | **生产部署** | [`docs/deployment.zh.md`](./docs/deployment.zh.md) |

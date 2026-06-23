@@ -18,7 +18,6 @@
   <a href="#-architecture">Architecture</a> ·
   <a href="#-monorepo-package-structure">Packages</a> ·
   <a href="./docs/packages/README.md">Technical Docs</a> ·
-  <a href="./docs/PROGRESS.en.md">Progress</a>
 </p>
 
 ---
@@ -244,8 +243,6 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 ├── assets/
 │   └── qiongqi.png               # Project cover image
 ├── docs/                          # Technical docs (bilingual)
-│   ├── PROGRESS.zh.md            # Progress (Chinese)
-│   ├── PROGRESS.en.md            # Progress (English)
 │   ├── architecture.{zh,en}.md   # Unified architecture (philosophy + technical architecture + packages)
 │   ├── deployment.{zh,en}.md     # Production deployment, probes, metrics, OTel, A2A verification
 │   ├── packages/                 # 27 per-package technical docs
@@ -277,7 +274,6 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 
 | Document | Location |
 |----------|----------|
-| **Refactoring Progress** | [`docs/PROGRESS.en.md`](./docs/PROGRESS.en.md) |
 | **Architecture Overview** | [`docs/architecture.en.md`](./docs/architecture.en.md) |
 | **Technical Docs Index** | [`docs/packages/README.md`](./docs/packages/README.md) |
 | **Deployment** | [`docs/deployment.en.md`](./docs/deployment.en.md) |
@@ -303,7 +299,7 @@ Qiongqi's four-stage architecture refactoring currently stands at:
 | **Post-P1** | Runtime governance + OpenTelemetry exporter | Complete |
 | **P2** | Real external A2A peer / cross-vendor interoperability | Awaiting external counterpart |
 
-Detailed progress: [`docs/PROGRESS.en.md`](./docs/PROGRESS.en.md).
+Detailed progress: see CHANGELOG commit history.
 
 ---
 
