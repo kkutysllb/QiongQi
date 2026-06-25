@@ -71,17 +71,21 @@ export interface TurnStateV1 {
  * Serialisation contract for turn state persistence.
  *
  * Implemented by the file system adapter; swapped in tests
- * for in-memory verification without touching disk.
+ * for in-memory verification without touching disk. Operates on
+ * {@link TurnStateV2} (alias of `LoopRun`); persisted v1 blobs are
+ * upgraded transparently on load.
  */
+import type { LoopRun } from './loop-plan.js'
+
 export interface TurnStateSerializer {
   /** Persist current turn state (create or update). */
-  save(state: TurnStateV1): Promise<void>
+  save(state: LoopRun): Promise<void>
   /** Load a previously persisted state, or undefined. */
-  load(threadId: string, turnId: string): Promise<TurnStateV1 | undefined>
+  load(threadId: string, turnId: string): Promise<LoopRun | undefined>
   /** Remove persisted state (e.g. after turn completion). */
   delete(threadId: string, turnId: string): Promise<void>
   /** List all turn states for a thread. */
-  list(threadId: string): Promise<TurnStateV1[]>
+  list(threadId: string): Promise<LoopRun[]>
 }
 
 /**
