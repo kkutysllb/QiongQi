@@ -43,11 +43,12 @@ runaway tool outputs, malformed history, invalid retries, and any stable prefix
 that could be cached but is missed.
 
 The current implementation includes classic / evented turn orchestration,
-HTTP/SSE APIs, A2A task lifecycle, Skill/MCP/Web/Memory/Delegation providers,
-attachments/artifacts, hybrid SQLite+JSONL storage, Prometheus metrics,
-structured access logs, OpenTelemetry HTTP tracing, and Post-P1 runtime
-governance such as tool result budgeting, bash command audit, virtual paths,
-and terminal-state guards.
+declarative loop engineering, HTTP/SSE APIs, A2A task lifecycle,
+Skill/MCP/Web/Memory/Delegation providers, attachments/artifacts, hybrid
+SQLite+JSONL storage, Prometheus metrics, structured access logs,
+OpenTelemetry HTTP tracing, and Post-P1 runtime governance such as tool
+result budgeting, bash command audit, virtual paths, and terminal-state
+guards.
 
 ---
 
@@ -136,9 +137,9 @@ pnpm -r run build          # Build all 18 packages
 pnpm run prepare:sqlite    # Build the better-sqlite3 native binding for the current Node ABI
 pnpm run verify:sqlite     # Verify the better-sqlite3 native binding for hybrid storage
 pnpm run verify:evented-a2a # Local fake-model two-instance evented + A2A verification
-pnpm test                  # Full test suite (65 files, 484 tests)
+pnpm test                  # Full test suite (71 files, 510 tests)
 pnpm test:unit             # Unit tests
-pnpm test:fast             # Fast test subset (64 files, 455 tests)
+pnpm test:fast             # Fast test subset (70 files, 481 tests)
 ```
 
 ---
@@ -157,7 +158,8 @@ pnpm test:fast             # Fast test subset (64 files, 455 tests)
                      │
 ┌────────────────────▼────────────────────────────┐
 │              @qiongqi/loop                       │
-│  TurnOrchestrator · PromptBuilder · Policy       │
+│  TurnOrchestrator · LoopRunner · LoopPlan        │
+│  PromptBuilder · Policy · Evaluator              │
 │  ToolCallCoordinator · ContextCompactor          │
 └────────────────────┬────────────────────────────┘
                      │
@@ -190,7 +192,7 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 | `@qiongqi/domain` | Thread/Turn/Item/Event entities |
 | `@qiongqi/ports` | ModelClient/ToolHost/Stores interfaces |
 | `@qiongqi/cache` | LRU/TTL cache, immutable prefix |
-| `@qiongqi/loop` | TurnOrchestrator/PromptBuilder/Policy |
+| `@qiongqi/loop` | TurnOrchestrator/LoopRunner/LoopPlan/PromptBuilder/Policy |
 | `@qiongqi/services` | Thread/Turn/Usage services |
 | `@qiongqi/adapter-model` | Provider-neutral model compatibility client |
 | `@qiongqi/adapter-tools` | Built-in tools + MCP/Web/Memory/Delegation providers |
@@ -213,11 +215,12 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 ## ✨ Features
 
 ### 🔧 Agent Loop
+- **Declarative Loop Engineering**: the evented mode evolves into a declarative loop substrate — a `LoopPlan` linear phase sequence (build-prompt → run-model → decide → evaluate → dispatch-tools) drives a `LoopRunner`; rich events (`prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`) are materialized and appended to a `LoopRun` audit log; a pluggable deterministic `LoopEvaluator` triggers bounded retry/reflection; classic mode is retained as a regression anchor
 - **Cache-first orchestration**: Immutable prompt prefix + TTL/LRU cache + inflight tracking
 - **Context compaction**: Soft/hard threshold-triggered summarization
 - **Token economy**: Compress tool descriptions and results
 - **Tool Storm Breaker**: Suppress repeated tool calls within the same turn
-- **Continuation Policy**: Intelligent stop/continue/fail decisions
+- **Loop Policy**: Pure-function stop/continue/fail/dispatch/plan-materialize decisions
 - **Runtime governance**: Tool result externalization, bash command audit, terminal-state guards
 
 ### 🔌 Capability Matrix
@@ -259,7 +262,7 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 │   ├── http-layer/http/
 │   ├── cli-layer/cli/
 │   └── presets/preset-coding/
-├── tests/                         # Full test suite (65 files, 484 tests)
+├── tests/                         # Full test suite (71 files, 510 tests)
 ├── deploy/                        # Kubernetes manifests and Prometheus rules
 ├── .github/workflows/ci.yml       # CI: SQLite, typecheck, fast tests, build, A2A
 ├── scripts/                       # Migration and build helper scripts
@@ -297,6 +300,7 @@ Qiongqi's four-stage architecture refactoring currently stands at:
 | **Stage 3** | TurnOrchestrator event-driven | Complete |
 | **Stage 4** | A2A protocol endpoint | Nearly complete; awaiting external Agent cross-vendor interop verification |
 | **Post-P1** | Runtime governance + OpenTelemetry exporter | Complete |
+| **Loop Engineering** | Declarative loop substrate (LoopPlan/LoopRunner/Evaluator) | Complete |
 | **P2** | Real external A2A peer / cross-vendor interoperability | Awaiting external counterpart |
 
 Detailed progress: see CHANGELOG commit history.
