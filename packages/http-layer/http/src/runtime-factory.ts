@@ -38,6 +38,9 @@ import {
 import { TurnOrchestrator } from '@qiongqi/loop'
 import { EventedTurnOrchestrator } from '@qiongqi/loop'
 import { FileTurnStateStore } from '@qiongqi/loop'
+import { TurnEventBus } from '@qiongqi/loop'
+import { defaultLoopPlan } from '@qiongqi/loop'
+import { defaultLoopEvaluator } from '@qiongqi/loop'
 import { FileA2ATaskStore } from './a2a-task-store.js'
 import { ContextCompactor } from '@qiongqi/loop'
 import type { TokenEconomyConfig } from '@qiongqi/loop'
@@ -731,7 +734,13 @@ async function assembleRuntime(input: {
   }
   // Stage 3: choose classic or evented orchestrator.
   const loop = options.orchestrationMode === 'evented'
-    ? new EventedTurnOrchestrator(orchOpts, new FileTurnStateStore(join(options.dataDir, 'turn-states')))
+    ? new EventedTurnOrchestrator(
+        orchOpts,
+        new FileTurnStateStore(join(options.dataDir, 'turn-states')),
+        new TurnEventBus(),
+        defaultLoopPlan(),
+        defaultLoopEvaluator
+      )
     : new TurnOrchestrator(orchOpts)
   const capabilities = buildRuntimeCapabilityManifest({
     config: options.capabilities,

@@ -77,6 +77,10 @@ export interface StepContext {
 }
 
 /**
+ * @deprecated Since the declarative {@link LoopRunner} (loop-runner.ts) now
+ * drives the evented orchestrator, `runStepViaEventBus` is retained only for
+ * backward compatibility. New code should use {@link LoopRunner.step}.
+ *
  * Run one full step via the event bus.
  *
  * This is the event-driven equivalent of {@link runOrchestratorStep}.
