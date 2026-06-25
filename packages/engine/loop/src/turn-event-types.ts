@@ -39,7 +39,8 @@ export type TurnStepEvent =
       callCount: number
       aborted: boolean
     }
-  | { kind: 'step:end'; status: 'completed' | 'failed' | 'aborted' }
+  | { kind: 'step:retry'; reason: string; attempt: number }
+  | { kind: 'step:end'; status: 'completed' | 'failed' | 'aborted' | 'retried' }
   | { kind: 'turn:failed'; error: string }
 
 /**
@@ -95,3 +96,8 @@ export interface TurnStateSerializer {
  */
 export const ORCHESTRATION_MODES = ['classic', 'evented'] as const
 export type OrchestrationMode = (typeof ORCHESTRATION_MODES)[number]
+
+// Re-exported from loop-plan.ts so persistence code and consumers reference
+// a single shape under its persistence-schema name. `LoopRun` is the
+// conceptual name; `TurnStateV2` is the evolved `TurnStateV1` schema.
+export type { LoopRun as TurnStateV2 } from './loop-plan.js'
