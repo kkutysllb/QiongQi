@@ -1,11 +1,15 @@
 import type { TurnOrchestratorOptions } from './turn-orchestrator.js'
-import { runOrchestratorStep } from './turn-orchestrator.js'
-import { runStepViaEventBus, type TurnEventBus } from './turn-event-bus.js'
-import type { TurnStateV1, TurnStateSerializer, TurnStepEvent } from './turn-event-types.js'
+import { TurnEventBus } from './turn-event-bus.js'
+import type { TurnStateSerializer } from './turn-event-types.js'
 import type { UserInputResolution } from '@qiongqi/ports'
 import { ToolCallCoordinator } from './tool-call-coordinator.js'
 import { ModelStepRunner } from './model-step-runner.js'
 import { PromptBuilder } from './prompt-builder.js'
+import { LoopRunner } from './loop-runner.js'
+import { defaultLoopPlan } from './loop-plan.js'
+import type { LoopPlan, LoopRun } from './loop-plan.js'
+import type { LoopEvaluator } from './loop-evaluator.js'
+import { defaultLoopEvaluator } from './loop-evaluator.js'
 
 type AwaitUserInputFn = (
   threadId: string,
@@ -20,17 +24,16 @@ type AwaitUserInputFn = (
 ) => Promise<UserInputResolution>
 
 /**
- * Stage 3: event-driven turn orchestrator.
+ * Event-driven turn orchestrator, evolved into a declarative loop shell.
  *
- * Replaces the classic for-loop with a step loop that:
- * 1. Emits a {@link TurnStepEvent} before each step.
- * 2. Calls the shared {@link runOrchestratorStep} (same logic as classic).
- * 3. Persists {@link TurnStateV1} after each step for crash recovery.
- * 4. On restart, detects a stale state and resumes from the last step.
+ * It is now a thin wrapper that drives {@link LoopRunner} over a
+ * {@link LoopPlan}: signal checks, {@link LoopRun} persistence, the
+ * stepIndex loop, retry/budget guards, and cleanup. All step logic lives
+ * in {@link LoopRunner}, which emits the full rich-event stream and
+ * appends to the run log.
  *
- * The same PromptBuilder/ModelStepRunner/ToolCallCoordinator instances
- * are used as in the classic path, so tool approval, model streaming,
- * and continuation decisions are identical.
+ * Classic {@link TurnOrchestrator} is untouched and remains the default
+ * regression anchor.
  */
 export class EventedTurnOrchestrator {
   private readonly opts: TurnOrchestratorOptions
@@ -38,12 +41,22 @@ export class EventedTurnOrchestrator {
   private readonly coordinator: ToolCallCoordinator
   private readonly modelStepRunner: ModelStepRunner
   private readonly promptBuilder: PromptBuilder
-  private readonly eventBus?: TurnEventBus
+  private readonly eventBus: TurnEventBus
+  private readonly plan: LoopPlan
+  private readonly evaluator?: LoopEvaluator
 
-  constructor(opts: TurnOrchestratorOptions, serializer: TurnStateSerializer, eventBus?: TurnEventBus) {
+  constructor(
+    opts: TurnOrchestratorOptions,
+    serializer: TurnStateSerializer,
+    eventBus: TurnEventBus = new TurnEventBus(),
+    plan: LoopPlan = defaultLoopPlan(),
+    evaluator: LoopEvaluator = defaultLoopEvaluator
+  ) {
     this.opts = opts
     this.serializer = serializer
     this.eventBus = eventBus
+    this.plan = plan
+    this.evaluator = evaluator
     const awaitUserInput: AwaitUserInputFn = (threadId, turnId, input, signal) =>
       this.coordinator.awaitUserInput(threadId, turnId, input, signal)
     this.coordinator = new ToolCallCoordinator({
@@ -93,45 +106,64 @@ export class EventedTurnOrchestrator {
   }
 
   /**
-   * Run a turn through an event-driven loop that emits
-   * {@link TurnStepEvent}s and persists {@link TurnStateV1} after
-   * each step.
+   * Run a turn through the declarative loop: persists a {@link LoopRun}
+   * before each step (crash-recovery resume point), drives {@link LoopRunner}
+   * over the {@link LoopPlan}, and deletes the persisted state on exit.
    *
-   * If a previous turn state exists (crash recovery), resumes from
-   * the last known step.
+   * On restart, a stale run is detected and the stepIndex is resumed.
+   * A `retry` outcome reruns the same stepIndex without advancing (bounded
+   * by the evaluate phase's `maxRetries`).
    */
-  async runTurn(
-    threadId: string,
-    turnId: string
-  ): Promise<'completed' | 'failed' | 'aborted'> {
+  async runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> {
     const signal = this.opts.turns.getAbortController(turnId)
     if (!signal) return 'failed'
     if (signal.aborted) return 'aborted'
 
+    const runner = new LoopRunner({
+      promptBuilder: this.promptBuilder,
+      modelStepRunner: this.modelStepRunner,
+      coordinator: this.coordinator,
+      evaluator: this.evaluator,
+      events: this.opts.events,
+      turns: this.opts.turns,
+      ids: this.opts.ids
+    })
+
     const startedAt = this.opts.nowIso()
 
-    // Crash recovery: if a previous state exists, resume from it.
+    // Crash recovery: if a previous run exists, resume from its stepIndex.
     const previous = await this.serializer.load(threadId, turnId)
-    let stepIndex = 0
-    if (previous) {
-      stepIndex = previous.stepIndex
-    }
+    let stepIndex = previous?.stepIndex ?? 0
 
     let status: 'completed' | 'failed' | 'aborted' = 'failed'
     try {
-      for (; ; stepIndex += 1) {
+      for (;; stepIndex += 1) {
         if (signal.aborted) {
           status = 'aborted'
           break
         }
 
-        // Persist current state before the step so a crash mid-step
-        // can resume from this point.
-        const stateBefore: TurnStateV1 = {
-          version: 1,
+        // Budget guard: a runaway loop must terminate.
+        const maxSteps = this.plan.budget?.maxSteps ?? Number.POSITIVE_INFINITY
+        if (stepIndex >= maxSteps) {
+          await this.opts.events.record({
+            kind: 'error',
+            threadId,
+            turnId,
+            message: `Loop exceeded maxSteps budget (${maxSteps})`,
+            code: 'loop_budget_exceeded'
+          })
+          status = 'failed'
+          break
+        }
+
+        // Persist state before the step so a crash mid-step can resume here.
+        const stateBefore: LoopRun = {
+          version: 2,
           threadId,
           turnId,
           stepIndex,
+          phaseCursor: 0,
           events: [],
           items: [],
           status: 'running',
@@ -140,48 +172,34 @@ export class EventedTurnOrchestrator {
         }
         await this.serializer.save(stateBefore)
 
-        const stepStatus = this.eventBus
-          ? await runStepViaEventBus({
-              eventBus: this.eventBus,
-              threadId, turnId, signal,
-              deps: {
-                promptBuilder: this.promptBuilder,
-                modelStepRunner: this.modelStepRunner,
-                coordinator: this.coordinator,
-                events: this.opts.events,
-                turns: this.opts.turns,
-                ids: this.opts.ids
-              }
-            }, stepIndex)
-          : await runOrchestratorStep({
-              threadId,
-              turnId,
-              signal,
-              stepIndex,
-              promptBuilder: this.promptBuilder,
-              modelStepRunner: this.modelStepRunner,
-              coordinator: this.coordinator,
-              events: this.opts.events,
-              turns: this.opts.turns,
-              ids: this.opts.ids
-            })
+        const outcome = await runner.step({
+          run: stateBefore,
+          plan: this.plan,
+          signal,
+          stepIndex,
+          bus: this.eventBus
+        })
 
-        if (stepStatus === 'stop') {
+        if (outcome.action === 'stop') {
           status = 'completed'
           break
         }
-        if (stepStatus === 'failed') {
+        if (outcome.action === 'failed') {
           status = 'failed'
           break
         }
-        if (stepStatus === 'aborted') {
+        if (outcome.action === 'aborted') {
           status = 'aborted'
           break
         }
-        // 'continue' — loop to next step
+        if (outcome.action === 'retry') {
+          // Rerun the same stepIndex; do NOT advance.
+          continue
+        }
+        // 'continue' — advance stepIndex
       }
     } finally {
-      // Clean up persisted state on completion/failure/abort.
+      // Clean up persisted state on completion / failure / abort.
       await this.serializer.delete(threadId, turnId)
     }
 
