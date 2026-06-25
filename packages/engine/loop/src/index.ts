@@ -1,6 +1,7 @@
 export * from './append-only-session-log.js'
 export * from './auto-model-router.js'
 export * from './compaction-marker.js'
+export * from './loop-plan.js'
 export * from './context-compactor.js'
 export * from './context-estimator.js'
 export * from './continuation-policy.js'
