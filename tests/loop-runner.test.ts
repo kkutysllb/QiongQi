@@ -129,4 +129,26 @@ describe('LoopRunner.step', () => {
     const o2 = await runner.step({ run, plan: defaultLoopPlan(), signal: new AbortController().signal, stepIndex: 0, bus })
     expect(o2.action).toBe('stop')
   })
+
+  it('does not retry truncated output when the plan omits the evaluate phase', async () => {
+    const deps = mkDeps({
+      modelStepRunner: {
+        run: async () => ({
+          kind: 'ran', text: 'half', textItemId: 'i', reasoning: '', reasoningItemId: 'r',
+          completedToolCalls: [], stopReason: 'length'
+        })
+      }
+    })
+    const runner = new LoopRunner(deps)
+    const bus = new TurnEventBus()
+    const run = mkRun()
+    const plan = {
+      ...defaultLoopPlan(),
+      phases: defaultLoopPlan().phases.filter((phase) => phase.kind !== 'evaluate')
+    }
+    const outcome = await runner.step({ run, plan, signal: new AbortController().signal, stepIndex: 0, bus })
+
+    expect(outcome.action).toBe('stop')
+    expect(run.events.some((event) => event.kind === 'step:retry')).toBe(false)
+  })
 })

@@ -621,9 +621,9 @@ The event-driven refactor introduced in Stage 3. `QiongqiServeRuntimeOptions.orc
 | Mode | Orchestrator | Crash recovery | Use case |
 |------|--------------|----------------|----------|
 | `classic` | `TurnOrchestrator` (explicit step advancement) | none | default, low overhead |
-| `evented` | `EventedTurnOrchestrator` (subscriber collaboration) | yes (`FileTurnStateStore` persists `TurnStateV1`) | critical workflows, long turns |
+| `evented` | `EventedTurnOrchestrator` + `LoopRunner` (declarative phase interpretation) | yes (`FileTurnStateStore` persists `LoopRun` / `TurnStateV2`, with `TurnStateV1` upgrade on load) | critical workflows, long turns |
 
-**Shared logic**: `runOrchestratorStep` pure function is shared by both orchestrators; the evented path uses `runStepViaEventBus` to publish `step:start` / `step:end` boundary events, letting subscribers observe step boundaries and gradually attach collaboration logic.
+**Shared policy**: the classic path keeps using `runOrchestratorStep`; the evented path interprets `LoopPlan.phases` through `LoopRunner` (build-prompt → run-model → decide → evaluate → dispatch-tools), publishes rich events such as `prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`, and appends them to `LoopRun.events`. `runStepViaEventBus` is retained only as a compatibility API.
 
 **Real backlog**: `createPromptSubscriber` is still a placeholder; peer-style orchestration is a future direction (the honest annotation on Proposition ① in §1.2).
 
@@ -660,7 +660,7 @@ Four-stage refactor plan, **as of 2026-06-22**:
 |-------|------|--------|------------------|
 | **Stage 1** | SDK extraction + monorepo split | ✅ **Complete** | 18 packages + pnpm workspace + vitest aliases + Composition Root split + PricingProvider abstraction + CLI required-field validation |
 | **Stage 2** | AgentCard + AgentIdentity | ✅ **Complete** | AgentCard / PeerRegistry / SkillRegistry / TaskThreadMap + `GET /.well-known/agent-card.json` + `POST /a2a` + HttpPeerTransport + cross-instance A2A closed loop verification |
-| **Stage 3** | TurnOrchestrator event-driven | ✅ **Complete** | TurnStateV1 / FileTurnStateStore / EventedTurnOrchestrator / TurnEventBus / shared `runOrchestratorStep` + end-to-end kill -9 crash recovery verification |
+| **Stage 3** | TurnOrchestrator event-driven | ✅ **Complete** | LoopPlan / LoopRunner / LoopRun(TurnStateV2) / FileTurnStateStore / EventedTurnOrchestrator / TurnEventBus + end-to-end kill -9 crash recovery verification |
 | **Stage 4** | A2A protocol endpoints | 🔄 **Nearly complete** | A2ATaskRecord / FileA2ATaskStore + async `POST /a2a/tasks` + synchronous compatible `POST /a2a` + `GET /a2a/tasks/:id` + interruptible `cancel` + `artifacts` + SSE `subscribe` + ArtifactSchema bridge. **Awaiting external Agent for cross-vendor interop verification** |
 
 **Current verification baseline** (synchronized with `PROGRESS.zh.md`):

@@ -60,6 +60,8 @@ export class LoopRunner {
   }): Promise<LoopStepOutcome> {
     const { run, plan, signal, stepIndex, bus } = input
     const { promptBuilder, modelStepRunner, coordinator, evaluator, events, turns, ids } = this.deps
+    const phaseKinds = new Set(plan.phases.map((phase) => phase.kind))
+    const evaluatePhase = plan.phases.find((phase) => phase.kind === 'evaluate')
 
     if (signal.aborted) {
       await append(run, bus, { kind: 'step:end', status: 'aborted' })
@@ -69,7 +71,9 @@ export class LoopRunner {
     await append(run, bus, { kind: 'step:start', stepIndex })
 
     try {
-      // build-prompt phase
+      if (!phaseKinds.has('build-prompt')) {
+        throw new Error('LoopPlan missing required build-prompt phase')
+      }
       const built = await promptBuilder.build({ threadId: run.threadId, turnId: run.turnId, signal, stepIndex })
       if (built.kind === 'aborted') {
         await append(run, bus, { kind: 'step:end', status: 'aborted' })
@@ -86,7 +90,9 @@ export class LoopRunner {
         promptTokens: 0
       })
 
-      // run-model phase
+      if (!phaseKinds.has('run-model')) {
+        throw new Error('LoopPlan missing required run-model phase')
+      }
       const stepResult: StepResult = await modelStepRunner.run({
         request: ctx.request,
         threadId: run.threadId,
@@ -109,7 +115,9 @@ export class LoopRunner {
         toolCalls: ran.completedToolCalls.map((c) => ({ callId: c.callId, toolName: c.toolName }))
       })
 
-      // decide phase
+      if (!phaseKinds.has('decide')) {
+        throw new Error('LoopPlan missing required decide phase')
+      }
       const decision: LoopDecision = decideLoopContinuation({
         stepResult: ran,
         ctx,
@@ -125,10 +133,22 @@ export class LoopRunner {
           : {})
       })
 
+      if (
+        decision.action === 'failed' ||
+        decision.action === 'failed_with_error'
+      ) {
+        return await this.executeDecision(decision, {
+          ran, ctx, signal, run, bus, events, turns, ids, coordinator
+        })
+      }
+
       // evaluate phase (optional, pluggable)
-      if (evaluator) {
+      if (phaseKinds.has('evaluate') && evaluator) {
         const retryCount = run.events.filter((e) => e.kind === 'step:retry').length
-        const evaluation = evaluator({ decision, stepResult: ran, ctx, retryCount })
+        const maxRetries = evaluatePhase?.maxRetries ?? Number.POSITIVE_INFINITY
+        const evaluation = retryCount >= maxRetries
+          ? { verdict: 'pass' as const }
+          : evaluator({ decision, stepResult: ran, ctx, retryCount })
         if (evaluation.verdict === 'retry') {
           await append(run, bus, { kind: 'step:retry', reason: evaluation.reason, attempt: retryCount + 1 })
           await append(run, bus, { kind: 'step:end', status: 'retried' })

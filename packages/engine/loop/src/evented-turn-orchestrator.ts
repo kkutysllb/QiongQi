@@ -134,10 +134,22 @@ export class EventedTurnOrchestrator {
     // Crash recovery: if a previous run exists, resume from its stepIndex.
     const previous = await this.serializer.load(threadId, turnId)
     let stepIndex = previous?.stepIndex ?? 0
+    const run: LoopRun = previous ?? {
+      version: 2,
+      threadId,
+      turnId,
+      stepIndex,
+      phaseCursor: 0,
+      events: [],
+      items: [],
+      status: 'running',
+      startedAt,
+      updatedAt: this.opts.nowIso()
+    }
 
     let status: 'completed' | 'failed' | 'aborted' = 'failed'
     try {
-      for (;; stepIndex += 1) {
+      for (;;) {
         if (signal.aborted) {
           status = 'aborted'
           break
@@ -158,27 +170,20 @@ export class EventedTurnOrchestrator {
         }
 
         // Persist state before the step so a crash mid-step can resume here.
-        const stateBefore: LoopRun = {
-          version: 2,
-          threadId,
-          turnId,
-          stepIndex,
-          phaseCursor: 0,
-          events: [],
-          items: [],
-          status: 'running',
-          startedAt,
-          updatedAt: this.opts.nowIso()
-        }
-        await this.serializer.save(stateBefore)
+        run.stepIndex = stepIndex
+        run.phaseCursor = 0
+        run.status = 'running'
+        run.updatedAt = this.opts.nowIso()
+        await this.serializer.save(run)
 
         const outcome = await runner.step({
-          run: stateBefore,
+          run,
           plan: this.plan,
           signal,
           stepIndex,
           bus: this.eventBus
         })
+        run.updatedAt = this.opts.nowIso()
 
         if (outcome.action === 'stop') {
           status = 'completed'
@@ -197,6 +202,7 @@ export class EventedTurnOrchestrator {
           continue
         }
         // 'continue' — advance stepIndex
+        stepIndex += 1
       }
     } finally {
       // Clean up persisted state on completion / failure / abort.

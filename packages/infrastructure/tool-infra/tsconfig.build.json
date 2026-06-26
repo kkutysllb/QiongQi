@@ -5,10 +5,8 @@
     "declarationMap": true,
     "sourceMap": true,
     "noEmit": false,
-    "paths": {
-      "@qiongqi/tool-infra": [
-        "../../infrastructure/tool-infra/src"
-      ]
-    }
+    "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {}
   }
 }

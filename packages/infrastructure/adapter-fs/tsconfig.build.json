@@ -5,13 +5,8 @@
     "declarationMap": true,
     "sourceMap": true,
     "noEmit": false,
-    "paths": {
-      "@qiongqi/adapter-fs": [
-        "../../infrastructure/adapter-fs/src"
-      ],
-      "@qiongqi/tool-infra": [
-        "../../infrastructure/tool-infra/src"
-      ]
-    }
+    "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {}
   }
 }

@@ -23,7 +23,6 @@
     "@qiongqi/domain": "workspace:*",
     "@qiongqi/ports": "workspace:*",
     "@qiongqi/loop": "workspace:*",
-    "@qiongqi/adapter-tools": "workspace:*",
     "@qiongqi/tool-infra": "workspace:*",
     "@qiongqi/cache": "workspace:*"
   },

@@ -32,7 +32,7 @@
 
 核心目标：**提高每一 token 的 ROI**。避免重复工具 schema、失控工具输出、畸形历史、无效重试，以及任何可以命中却错过的稳定前缀。
 
-当前能力包括 classic / evented turn orchestration、声明式 loop engineering（LoopPlan/LoopRunner/Evaluator）、HTTP/SSE API、A2A task lifecycle、Skill/MCP/Web/Memory/Delegation provider、attachments/artifacts、hybrid SQLite+JSONL storage、Prometheus metrics、structured access logs、OpenTelemetry HTTP tracing，以及工具输出预算、bash command audit、virtual path、terminal-state guard 等运行治理能力。
+当前能力包括 classic / evented turn orchestration、声明式 loop engineering（LoopRunner 解释 LoopPlan phases，并通过 Evaluator 做有界 retry）、HTTP/SSE API、A2A task lifecycle、Skill/MCP/Web/Memory/Delegation provider、attachments/artifacts、hybrid SQLite+JSONL storage、Prometheus metrics、structured access logs、OpenTelemetry HTTP tracing，以及工具输出预算、bash command audit、virtual path、terminal-state guard 等运行治理能力。
 
 > 完整介绍请阅读 **[中文 README](./README.zh.md)** 或 **[English README](./README.en.md)**。
 

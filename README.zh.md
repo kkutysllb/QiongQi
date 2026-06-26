@@ -34,7 +34,7 @@
 
 核心目标：**提高每一 token 的 ROI**。避免重复工具 schema、失控工具输出、畸形历史、无效重试，以及任何可以命中却错过的稳定前缀。
 
-当前实现覆盖 classic / evented turn orchestration、声明式 loop engineering、HTTP/SSE API、A2A task lifecycle、Skill/MCP/Web/Memory/Delegation provider、attachments/artifacts、hybrid SQLite+JSONL storage、Prometheus 指标、结构化 access log、OpenTelemetry HTTP tracing，以及工具输出预算、bash command audit、virtual path、terminal-state guard 等 Post-P1 运行治理能力。
+当前实现覆盖 classic / evented turn orchestration、声明式 loop engineering（LoopRunner 解释 LoopPlan phases，并通过 Evaluator 做有界 retry）、HTTP/SSE API、A2A task lifecycle、Skill/MCP/Web/Memory/Delegation provider、attachments/artifacts、hybrid SQLite+JSONL storage、Prometheus 指标、结构化 access log、OpenTelemetry HTTP tracing，以及工具输出预算、bash command audit、virtual path、terminal-state guard 等 Post-P1 运行治理能力。
 
 ---
 
@@ -200,7 +200,7 @@ Qiongqi 采用 pnpm monorepo 多包结构，共 18 个独立 npm 包：
 ## ✨ 特性
 
 ### 🔧 Agent Loop
-- **声明式 Loop Engineering**：evented 模式演进为声明式 loop 基质——`LoopPlan` 线性 phase 序列（build-prompt → run-model → decide → evaluate → dispatch-tools）驱动 `LoopRunner`，富事件（`prompt:built`/`model:ran`/`decision`/`tools:dispatched`/`step:retry`）真实化并写入 `LoopRun` 审计日志；可插拔确定性 `LoopEvaluator` 触发有界 retry/reflection；classic 模式保留为回归锚
+- **声明式 Loop Engineering**：evented 模式演进为声明式 loop 基质——`LoopRunner` 解释 `LoopPlan` phase 集合（build-prompt → run-model → decide → 可选 evaluate → dispatch-tools），富事件（`prompt:built`/`model:ran`/`decision`/`tools:dispatched`/`step:retry`）真实化并写入 `LoopRun` 审计日志；可插拔确定性 `LoopEvaluator` 按 phase retry budget 触发有界 retry/reflection；classic 模式保留为回归锚
 - **Cache-first 编排**：不可变 prompt 前缀 + TTL/LRU 缓存 + inflight 跟踪
 - **上下文压缩**：软/硬阈值触发摘要压缩
 - **Token 经济**：压缩工具描述与结果

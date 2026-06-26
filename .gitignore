@@ -3,6 +3,13 @@ dist/
 node_modules/
 *.tsbuildinfo
 
+# Guard against stray tsc emit landing inside src/ (a misconfigured outDir
+# can drop .js/.d.ts next to the .ts sources). Sources are .ts only.
+packages/**/src/**/*.js
+packages/**/src/**/*.js.map
+packages/**/src/**/*.d.ts
+packages/**/src/**/*.d.ts.map
+
 # Local data and caches
 *.log
 .DS_Store

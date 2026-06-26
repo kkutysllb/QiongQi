@@ -5,7 +5,8 @@
   "description": "Qiongqi — 独立多 Agent 框架，骨架不变，血肉万变",
   "type": "module",
   "scripts": {
-    "build": "pnpm -r run build",
+    "build": "node scripts/build.mjs",
+    "build:clean": "node scripts/build.mjs --clean",
     "test": "vitest run",
     "test:unit": "vitest run tests/cache.test.ts tests/contracts.test.ts tests/domain.test.ts tests/ports.test.ts",
     "test:fast": "vitest run --exclude '**/builtin-tools.test.ts'",

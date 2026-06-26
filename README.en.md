@@ -43,7 +43,7 @@ runaway tool outputs, malformed history, invalid retries, and any stable prefix
 that could be cached but is missed.
 
 The current implementation includes classic / evented turn orchestration,
-declarative loop engineering, HTTP/SSE APIs, A2A task lifecycle,
+declarative loop engineering (LoopRunner interprets LoopPlan phases and uses the Evaluator for bounded retry), HTTP/SSE APIs, A2A task lifecycle,
 Skill/MCP/Web/Memory/Delegation providers, attachments/artifacts, hybrid
 SQLite+JSONL storage, Prometheus metrics, structured access logs,
 OpenTelemetry HTTP tracing, and Post-P1 runtime governance such as tool
@@ -215,7 +215,7 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 ## ✨ Features
 
 ### 🔧 Agent Loop
-- **Declarative Loop Engineering**: the evented mode evolves into a declarative loop substrate — a `LoopPlan` linear phase sequence (build-prompt → run-model → decide → evaluate → dispatch-tools) drives a `LoopRunner`; rich events (`prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`) are materialized and appended to a `LoopRun` audit log; a pluggable deterministic `LoopEvaluator` triggers bounded retry/reflection; classic mode is retained as a regression anchor
+- **Declarative Loop Engineering**: the evented mode evolves into a declarative loop substrate — `LoopRunner` interprets the `LoopPlan` phase set (build-prompt → run-model → decide → optional evaluate → dispatch-tools); rich events (`prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`) are materialized and appended to a `LoopRun` audit log; a pluggable deterministic `LoopEvaluator` triggers bounded retry/reflection according to the phase retry budget; classic mode is retained as a regression anchor
 - **Cache-first orchestration**: Immutable prompt prefix + TTL/LRU cache + inflight tracking
 - **Context compaction**: Soft/hard threshold-triggered summarization
 - **Token economy**: Compress tool descriptions and results

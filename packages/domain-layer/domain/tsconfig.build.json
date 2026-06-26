@@ -22,60 +22,7 @@
     "types": [
       "node"
     ],
-    "baseUrl": ".",
-    "paths": {
-      "@qiongqi/adapter-model": [
-        "../../adapters/adapter-model/src"
-      ],
-      "@qiongqi/adapter-storage": [
-        "../../adapters/adapter-storage/src"
-      ],
-      "@qiongqi/adapter-tools": [
-        "../../adapters/adapter-tools/src"
-      ],
-      "@qiongqi/attachments": [
-        "../../infrastructure/attachments/src"
-      ],
-      "@qiongqi/cache": [
-        "../../infrastructure/cache/src"
-      ],
-      "@qiongqi/cli": [
-        "../../cli-layer/cli/src"
-      ],
-      "@qiongqi/contracts": [
-        "../../foundation/contracts/src"
-      ],
-      "@qiongqi/delegation": [
-        "../../delegation-layer/delegation/src"
-      ],
-      "@qiongqi/domain": [
-        "../../domain-layer/domain/src"
-      ],
-      "@qiongqi/http": [
-        "../../http-layer/http/src"
-      ],
-      "@qiongqi/loop": [
-        "../../engine/loop/src"
-      ],
-      "@qiongqi/memory": [
-        "../../capabilities/memory/src"
-      ],
-      "@qiongqi/ports": [
-        "../../ports-layer/ports/src"
-      ],
-      "@qiongqi/services": [
-        "../../engine/services/src"
-      ],
-      "@qiongqi/skills": [
-        "../../capabilities/skills/src"
-      ],
-      "@qiongqi/adapter-fs": [
-        "../../infrastructure/adapter-fs/src"
-      ],
-      "@qiongqi/tool-infra": [
-        "../../infrastructure/tool-infra/src"
-      ]
-    }
+    "rootDir": "./src"
   },
   "include": [
     "src"

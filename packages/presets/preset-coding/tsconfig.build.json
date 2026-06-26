@@ -6,26 +6,9 @@
     "declarationMap": true,
     "sourceMap": true,
     "outDir": "dist",
-    "paths": {
-      "@qiongqi/contracts": ["../../foundation/contracts/src"],
-      "@qiongqi/domain": ["../../domain-layer/domain/src"],
-      "@qiongqi/ports": ["../../ports-layer/ports/src"],
-      "@qiongqi/cache": ["../../infrastructure/cache/src"],
-      "@qiongqi/attachments": ["../../infrastructure/attachments/src"],
-      "@qiongqi/adapter-fs": ["../../infrastructure/adapter-fs/src"],
-      "@qiongqi/tool-infra": ["../../infrastructure/tool-infra/src"],
-      "@qiongqi/loop": ["../../engine/loop/src"],
-      "@qiongqi/services": ["../../engine/services/src"],
-      "@qiongqi/adapter-storage": ["../../adapters/adapter-storage/src"],
-      "@qiongqi/adapter-model": ["../../adapters/adapter-model/src"],
-      "@qiongqi/adapter-tools": ["../../adapters/adapter-tools/src"],
-      "@qiongqi/skills": ["../../capabilities/skills/src"],
-      "@qiongqi/memory": ["../../capabilities/memory/src"],
-      "@qiongqi/delegation": ["../../delegation-layer/delegation/src"],
-      "@qiongqi/http": ["../../http-layer/http/src"],
-      "@qiongqi/cli": ["../../cli-layer/cli/src"],
-      "@qiongqi/preset-coding": ["../../presets/preset-coding/src"]
-    }
+    "rootDir": "./src",
+    "baseUrl": ".",
+    "paths": {}
   },
   "include": [
     "src"
