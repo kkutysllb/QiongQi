@@ -1,9 +1,12 @@
 import {
   RuntimeEvent as RuntimeEventSchema,
+  type UsageEvent,
   type RuntimeEvent
 } from '@qiongqi/contracts'
 import type { EventBus } from '@qiongqi/ports'
 import type { SessionStore } from '@qiongqi/ports'
+import type { RunEventEnvelope } from '@qiongqi/contracts'
+import type { RunEventStore } from '@qiongqi/ports'
 
 type RuntimeEventWithoutStamp<Event extends RuntimeEvent> = Omit<Event, 'seq' | 'timestamp'> &
   Partial<Pick<Event, 'seq' | 'timestamp'>>
@@ -19,6 +22,8 @@ export type RuntimeEventRecorderOptions = {
   sessionStore: SessionStore
   allocateSeq: (threadId: string) => number
   nowIso: () => string
+  usageSink?: (event: UsageEvent) => Promise<void> | void
+  runEventStore?: RunEventStore
 }
 
 /**
@@ -45,6 +50,14 @@ export class RuntimeEventRecorder {
     })
     this.options.eventBus.publish(event)
     await this.options.sessionStore.appendEvent(event.threadId, event)
+    if (event.kind === 'usage') {
+      await this.options.usageSink?.(event)
+    }
     return event
+  }
+
+  async recordKernelEvent(event: RunEventEnvelope): Promise<RunEventEnvelope> {
+    if (!this.options.runEventStore) throw new Error('run event store is not configured')
+    return this.options.runEventStore.append(event)
   }
 }
