@@ -4,6 +4,7 @@ import { emptyUsageSnapshot, type UsageSnapshot } from '@qiongqi/contracts'
 import { isToolResultBridgeItem, repairModelHistoryItems } from '@qiongqi/domain'
 import { repairToolArguments } from './tool-argument-repair.js'
 import { isDeepSeekHost, probeDeepSeekReachable } from './model-error-probe.js'
+import { compatibilityProfileForModel } from './provider-compatibility.js'
 import {
   DEFAULT_MODEL_ENDPOINT_FORMAT,
   modelEndpointPath,
@@ -142,6 +143,10 @@ type PendingToolCall = {
   name?: string
   arguments: string
 }
+type InlineToolCallState = {
+  buffer: string
+  nextId: number
+}
 type StreamReadResult =
   | { kind: 'chunk'; value?: Uint8Array; done: boolean }
   | { kind: 'timeout' }
@@ -150,6 +155,12 @@ type StreamReadResult =
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 45_000
 const DEFAULT_MESSAGES_MAX_TOKENS = 4096
+const STRICT_PROVIDER_EMPTY_CONTENT_PLACEHOLDER = '\u200b'
+const ACTIVE_TASK_CONTINUATION_MESSAGE = [
+  'Continue the active task from the conversation summary and recent context above.',
+  'Use the latest unresolved next action as your immediate next step.',
+  'Do not ask the user what to do unless the summary explicitly says user input is required or the task is blocked.'
+].join(' ')
 
 /**
  * Provider-agnostic model compatibility client.
@@ -326,8 +337,13 @@ export class ModelCompatClient implements ModelClient {
   ): Record<string, unknown> {
     const requestModel = request.model?.trim()
     const model = requestModel || this.config.model
-    const messages = this.collectMessages(request, model)
     const endpointFormat = this.endpointFormat()
+    const messages = this.collectMessages(request, model, endpointFormat)
+    const compatibility = compatibilityProfileForModel({
+      baseUrl: this.config.baseUrl,
+      model,
+      endpointFormat
+    })
     if (endpointFormat === 'responses') {
       return this.buildResponsesRequestBody(request, model, messages, stream)
     }
@@ -339,6 +355,8 @@ export class ModelCompatClient implements ModelClient {
       stream,
       messages
     }
+    const finalMessages = sanitizeEmptyMessageContent(messages, this.config.baseUrl, model)
+    body.messages = finalMessages
     if (request.maxTokens !== undefined) {
       body.max_tokens = request.maxTokens
     }
@@ -354,15 +372,23 @@ export class ModelCompatClient implements ModelClient {
     if (stream && options.includeStreamUsage !== false) {
       body.stream_options = { include_usage: true }
     }
-    const includeThinking = !isAzureOpenAiEndpoint(this.config.baseUrl)
-    applyReasoningEffort(body, request.reasoningEffort, { includeThinking })
+    const thinkingDialect = requestThinkingDialect(
+      compatibility.thinkingDialect,
+      request.reasoningEffort,
+      model
+    )
+    if (compatibility.supportsReasoningEffort) {
+      applyReasoningEffort(body, request.reasoningEffort, { thinkingDialect })
+    }
     if (
-      includeThinking &&
-      isDeepSeekHost(this.config.baseUrl) &&
+      compatibility.requestFlags.deepseekThinking &&
       !Object.prototype.hasOwnProperty.call(body, 'thinking') &&
       isThinkingProducerModel(model)
     ) {
       body.thinking = { type: 'enabled' }
+    }
+    if (compatibility.requestFlags.reasoningSplit) {
+      body.reasoning_split = true
     }
     const tools = normalizeToolSpecs(request.tools)
     if (tools.length > 0) {
@@ -374,6 +400,9 @@ export class ModelCompatClient implements ModelClient {
           parameters: tool.inputSchema
         }
       }))
+      if (stream && compatibility.requestFlags.zaiToolStream) {
+        body.tool_stream = true
+      }
     }
     return body
   }
@@ -451,8 +480,17 @@ export class ModelCompatClient implements ModelClient {
     return body
   }
 
-  private collectMessages(request: ModelRequest, model: string): ChatMessage[] {
+  private collectMessages(
+    request: ModelRequest,
+    model: string,
+    endpointFormat: ModelEndpointFormat
+  ): ChatMessage[] {
     const out: ChatMessage[] = []
+    const compatibility = compatibilityProfileForModel({
+      baseUrl: this.config.baseUrl,
+      model,
+      endpointFormat
+    })
     if (request.systemPrompt) {
       out.push({ role: 'system', content: request.systemPrompt })
     }
@@ -466,7 +504,8 @@ export class ModelCompatClient implements ModelClient {
     const history = windowSize
       ? limitHistoryPreservingCompaction(request.history, windowSize)
       : request.history
-    const thinkingMode = requiresReasoningRoundTrip(request.reasoningEffort, model, this.config.baseUrl)
+    const thinkingMode = !compatibility.foldToolHistory &&
+      requiresReasoningRoundTrip(request.reasoningEffort, model, this.config.baseUrl)
     out.push(...this.itemsToMessages(
       repairModelHistoryItems([...request.prefix, ...history]),
       thinkingMode
@@ -477,7 +516,14 @@ export class ModelCompatClient implements ModelClient {
     if (request.attachmentTextFallbacks?.length) {
       attachTextFallbacksToLatestUserMessage(out, request.attachmentTextFallbacks)
     }
-    return normalizeThinkingAssistantMessages(healToolMessagePairs(out), thinkingMode)
+    const healed = normalizeThinkingAssistantMessages(healToolMessagePairs(out), thinkingMode)
+    const sanitized = sanitizeEmptyMessageContent(healed, this.config.baseUrl, model)
+    const withUser = endpointFormat === 'messages'
+      ? sanitized
+      : ensureUserMessagePresent(sanitized)
+    return compatibility.foldToolHistory
+      ? normalizeGlmMessages(withUser)
+      : withUser
   }
 
   private itemsToMessages(items: TurnItem[], thinkingMode: boolean): ChatMessage[] {
@@ -651,6 +697,7 @@ export class ModelCompatClient implements ModelClient {
     const pendingArguments = new Map<string, PendingToolCall>()
     const pendingByIndex = new Map<number, string>()
     const completedToolCalls = new Set<string>()
+    const inlineToolCallState: InlineToolCallState = { buffer: '', nextId: 1 }
     let usage: UsageSnapshot | null = null
     let textAccumulator = ''
     let reasoningAccumulator = ''
@@ -705,12 +752,13 @@ export class ModelCompatClient implements ModelClient {
             completedToolCalls,
             textAccumulator,
             reasoningAccumulator,
-            endpointFormat
+            endpointFormat,
+            inlineToolCallState
           )
           textAccumulator = result.text
           reasoningAccumulator = result.reasoning
           if (result.usage) usage = mergeUsageSnapshots(usage, result.usage)
-          if (result.finishReason) finishReason = result.finishReason
+          if (result.finishReason && finishReason !== 'tool_calls') finishReason = result.finishReason
           for (const chunk of result.chunks) yield chunk
         }
         if (sawDone) break
@@ -749,7 +797,8 @@ export class ModelCompatClient implements ModelClient {
     completedToolCalls: Set<string>,
     textAccumulator: string,
     reasoningAccumulator: string,
-    endpointFormat: ModelEndpointFormat
+    endpointFormat: ModelEndpointFormat,
+    inlineToolCallState: InlineToolCallState
   ): {
     chunks: ModelStreamChunk[]
     text: string
@@ -786,16 +835,6 @@ export class ModelCompatClient implements ModelClient {
     if (choice && typeof choice === 'object') {
       const delta = choice.delta as Record<string, unknown> | undefined
       if (delta && typeof delta === 'object') {
-        const content = delta.content
-        if (typeof content === 'string' && content.length > 0) {
-          text += content
-          chunks.push({ kind: 'assistant_text_delta', text: content })
-        }
-        const reasoningContent = delta.reasoning_content ?? delta.reasoning
-        if (typeof reasoningContent === 'string' && reasoningContent.length > 0) {
-          reasoning += reasoningContent
-          chunks.push({ kind: 'assistant_reasoning_delta', text: reasoningContent })
-        }
         const toolCalls = delta.tool_calls as
           | {
               index?: number
@@ -803,6 +842,32 @@ export class ModelCompatClient implements ModelClient {
               function?: { name?: string; arguments?: string }
             }[]
           | undefined
+        const suppressContentForToolCall = Array.isArray(toolCalls) || pendingArguments.size > 0
+        const content = delta.content
+        if (typeof content === 'string' && content.length > 0 && !suppressContentForToolCall) {
+          const inlineToolCall = consumeInlineToolCallContent(content, inlineToolCallState)
+          if (inlineToolCall.consumed) {
+            if (inlineToolCall.call) {
+              chunks.push({
+                kind: 'tool_call_complete',
+                callId: inlineToolCall.call.callId,
+                toolName: inlineToolCall.call.toolName,
+                arguments: inlineToolCall.call.arguments
+              })
+              finishReason = 'tool_calls'
+            }
+          }
+          const visibleContent = inlineToolCall.consumed ? inlineToolCall.visibleText : content
+          if (visibleContent) {
+            text += visibleContent
+            chunks.push({ kind: 'assistant_text_delta', text: visibleContent })
+          }
+        }
+        const reasoningContent = delta.reasoning_content ?? delta.reasoning
+        if (typeof reasoningContent === 'string' && reasoningContent.length > 0) {
+          reasoning += reasoningContent
+          chunks.push({ kind: 'assistant_reasoning_delta', text: reasoningContent })
+        }
         if (Array.isArray(toolCalls)) {
           for (const call of toolCalls) {
             const id = resolveToolCallDeltaId(call, pendingArguments)
@@ -823,7 +888,7 @@ export class ModelCompatClient implements ModelClient {
           }
         }
       }
-      if (typeof choice.finish_reason === 'string') {
+      if (typeof choice.finish_reason === 'string' && finishReason !== 'tool_calls') {
         finishReason = choice.finish_reason
       }
     }
@@ -1576,17 +1641,17 @@ function mergeUsageSnapshots(current: UsageSnapshot | null, next: UsageSnapshot)
 function applyReasoningEffort(
   body: Record<string, unknown>,
   effort: string | undefined,
-  options: { includeThinking?: boolean } = {}
+  options: { thinkingDialect?: ThinkingDialect } = {}
 ): void {
   const normalized = effort?.trim().toLowerCase()
   if (!normalized) return
-  const includeThinking = options.includeThinking !== false
+  const thinkingDialect = options.thinkingDialect ?? 'none'
   switch (normalized) {
     case 'off':
     case 'disabled':
     case 'none':
     case 'false':
-      if (includeThinking) body.thinking = { type: 'disabled' }
+      applyThinking(body, thinkingDialect, false)
       break
     case 'low':
     case 'minimal':
@@ -1594,13 +1659,50 @@ function applyReasoningEffort(
     case 'mid':
     case 'high':
       body.reasoning_effort = 'high'
-      if (includeThinking) body.thinking = { type: 'enabled' }
+      applyThinking(body, thinkingDialect, true)
       break
     case 'max':
     case 'maximum':
     case 'xhigh':
       body.reasoning_effort = 'max'
-      if (includeThinking) body.thinking = { type: 'enabled' }
+      applyThinking(body, thinkingDialect, true)
+      break
+  }
+}
+
+type ThinkingDialect = 'deepseek' | 'minimax' | 'zai' | 'none'
+
+function requestThinkingDialect(
+  dialect: string,
+  effort: string | undefined,
+  model: string | undefined
+): ThinkingDialect {
+  if (dialect === 'deepseek' || dialect === 'minimax' || dialect === 'zai') {
+    return dialect
+  }
+  // Preserve upstream behavior for an explicit reasoning-effort override on
+  // DeepSeek-family models routed through a generic OpenAI-compatible proxy.
+  // Passive auto-injection is still disabled off the official DeepSeek host.
+  if (effort?.trim() && isThinkingProducerModel(model)) return 'deepseek'
+  return 'none'
+}
+
+function applyThinking(
+  body: Record<string, unknown>,
+  dialect: ThinkingDialect,
+  enabled: boolean
+): void {
+  switch (dialect) {
+    case 'deepseek':
+      body.thinking = { type: enabled ? 'enabled' : 'disabled' }
+      break
+    case 'minimax':
+      body.thinking = { type: enabled ? 'adaptive' : 'disabled' }
+      break
+    case 'zai':
+      body.thinking = enabled ? { type: 'enabled', clear_thinking: true } : { type: 'disabled' }
+      break
+    case 'none':
       break
   }
 }
@@ -1712,6 +1814,237 @@ function normalizeThinkingAssistantMessages(
     }
     return next
   })
+}
+
+type InlineToolCallParseResult = {
+  toolName: string
+  arguments: Record<string, unknown>
+}
+
+function consumeInlineToolCallContent(
+  content: string,
+  state: InlineToolCallState
+): {
+  consumed: boolean
+  visibleText: string
+  call?: { callId: string; toolName: string; arguments: Record<string, unknown> }
+} {
+  const combined = state.buffer ? `${state.buffer}${content}` : content
+  const markerIndex = inlineToolCallMarkerIndex(combined)
+  if (markerIndex < 0) {
+    return { consumed: false, visibleText: content }
+  }
+  const visibleText = state.buffer ? '' : combined.slice(0, markerIndex)
+  const protocolText = combined.slice(markerIndex)
+  const parsed = parseInlineToolCallProtocol(protocolText)
+  if (!parsed) {
+    state.buffer = protocolText.slice(-32_768)
+    return { consumed: true, visibleText }
+  }
+  state.buffer = ''
+  const callId = `call_inline_${state.nextId++}`
+  return {
+    consumed: true,
+    visibleText,
+    call: {
+      callId,
+      toolName: parsed.toolName,
+      arguments: parsed.arguments
+    }
+  }
+}
+
+function inlineToolCallMarkerIndex(text: string): number {
+  const markers = [
+    /\(\s*tool\s+call\b/i,
+    /<function_calls>/i,
+    /<tool_call\b/i,
+    /<invoke\s+name=/i,
+    /<action>\s*\w+/i,
+    /\[<invoke\s+name=/i,
+    /\[<parameter\s+name=/i
+  ]
+  let index = -1
+  for (const marker of markers) {
+    const match = marker.exec(text)
+    if (!match) continue
+    index = index < 0 ? match.index : Math.min(index, match.index)
+  }
+  return index
+}
+
+function parseInlineToolCallProtocol(text: string): InlineToolCallParseResult | null {
+  const json = extractFirstBalancedJsonObject(text)
+  const explicitToolName = toolNameFromInlineToolCall(text)
+  if (json) {
+    const repaired = repairToolArguments(json).arguments
+    if (Object.keys(repaired).length > 0) {
+      return {
+        toolName: explicitToolName ?? 'bash',
+        arguments: repaired
+      }
+    }
+  }
+
+  const actionMatch = text.match(/<action>\s*([a-zA-Z0-9_-]+)\s*(?:\]\[)?<\/action>\]?\s*([\s\S]*)/i)
+  if (actionMatch?.[1]) {
+    const command = cleanInlineToolCommand(actionMatch[2] ?? '')
+    if (command) {
+      return {
+        toolName: explicitToolName ?? 'bash',
+        arguments: { action: actionMatch[1], command }
+      }
+    }
+  }
+
+  const commandMatch = text.match(/\[?<command>([\s\S]*?)(?:<\/command>\]?|\[<\/command>\]|$)/i)
+  if (commandMatch?.[1]) {
+    const command = cleanInlineToolCommand(commandMatch[1])
+    if (command) {
+      return {
+        toolName: explicitToolName ?? 'bash',
+        arguments: { action: 'run', command }
+      }
+    }
+  }
+
+  const bracketParameterMatch = text.match(/\[<parameter\s+name="([^"]+)">([\s\S]*?)(?:\]\s*(?:\[|$)|$)/i)
+  if (bracketParameterMatch?.[1]) {
+    const value = cleanInlineToolCommand(bracketParameterMatch[2] ?? '')
+    if (value) {
+      return {
+        toolName: explicitToolName ?? 'bash',
+        arguments: { [bracketParameterMatch[1]]: value }
+      }
+    }
+  }
+
+  return null
+}
+
+function toolNameFromInlineToolCall(text: string): string | undefined {
+  return text.match(/\(\s*tool\s+call\s+([a-zA-Z0-9_.-]+)\s*:/i)?.[1] ??
+    text.match(/\[?<invoke\s+name="([^"]+)">\]?/i)?.[1]
+}
+
+function extractFirstBalancedJsonObject(text: string): string | null {
+  const start = text.indexOf('{')
+  if (start < 0) return null
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i]
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (char === '\\') {
+        escape = true
+      } else if (char === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (char === '"') {
+      inString = true
+      continue
+    }
+    if (char === '{') depth += 1
+    if (char === '}') {
+      depth -= 1
+      if (depth === 0) return text.slice(start, i + 1)
+    }
+  }
+  return null
+}
+
+function cleanInlineToolCommand(value: string): string {
+  return value
+    .replace(/\[<\/(?:action|command|parameter|invoke|tool_call|function_calls)>\]/gi, '')
+    .replace(/<\/(?:action|command|parameter|invoke|tool_call|function_calls)>/gi, '')
+    .replace(/<\]minimax\[>/gi, '')
+    .replace(/\]\s*$/g, '')
+    .trim()
+}
+
+function sanitizeEmptyMessageContent(messages: ChatMessage[], baseUrl?: string, model?: string): ChatMessage[] {
+  const requireAssistantContent = compatibilityProfileForModel({
+    baseUrl: baseUrl ?? '',
+    model
+  }).requiresAssistantContentForToolCalls
+  return messages.map((message) => {
+    if (!isEmptyContent(message.content)) return message
+    if (message.role === 'assistant') {
+      if (requireAssistantContent) {
+        return { ...message, content: STRICT_PROVIDER_EMPTY_CONTENT_PLACEHOLDER }
+      }
+      return message
+    }
+    if (message.role === 'tool') {
+      return requireAssistantContent
+        ? { ...message, content: STRICT_PROVIDER_EMPTY_CONTENT_PLACEHOLDER }
+        : message
+    }
+    return message
+  })
+}
+
+function isEmptyContent(content: unknown): boolean {
+  if (content === null || content === undefined) return true
+  if (typeof content === 'string') return content.trim().length === 0
+  if (Array.isArray(content)) {
+    if (content.length === 0) return true
+    return content.every((part) => {
+      if (part && typeof part === 'object' && 'type' in part && part.type === 'text') {
+        return typeof (part as { text?: unknown }).text === 'string' &&
+          (part as { text: string }).text.trim().length === 0
+      }
+      return false
+    })
+  }
+  return false
+}
+
+function ensureUserMessagePresent(messages: ChatMessage[]): ChatMessage[] {
+  const hasNonSystem = messages.some((message) => message.role !== 'system')
+  if (hasNonSystem) return messages
+  return [...messages, { role: 'user', content: ACTIVE_TASK_CONTINUATION_MESSAGE }]
+}
+
+function normalizeGlmMessages(messages: ChatMessage[]): ChatMessage[] {
+  const systemContent: string[] = []
+  const nonSystemMessages: ChatMessage[] = []
+
+  for (const message of messages) {
+    if (message.role !== 'system') {
+      nonSystemMessages.push(message)
+      continue
+    }
+    const content = chatMessageTextContent(message.content).trim()
+    if (content) systemContent.push(content)
+  }
+
+  if (systemContent.length === 0) return nonSystemMessages
+  const systemMessage: ChatMessage = {
+    role: 'system',
+    content: systemContent.join('\n\n')
+  }
+  if (nonSystemMessages.length === 0) {
+    return [systemMessage, { role: 'user', content: ACTIVE_TASK_CONTINUATION_MESSAGE }]
+  }
+  if (nonSystemMessages[0]?.role !== 'user') {
+    return [systemMessage, { role: 'user', content: ACTIVE_TASK_CONTINUATION_MESSAGE }, ...nonSystemMessages]
+  }
+  return [systemMessage, ...nonSystemMessages]
+}
+
+function chatMessageTextContent(content: ChatMessage['content']): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((part): part is Extract<ChatMessageContentPart, { type: 'text' }> => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n')
 }
 
 function canonicalizeSchema(value: unknown): Record<string, unknown> {

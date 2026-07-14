@@ -151,7 +151,10 @@ export class ContextCompactor {
       mode: input.mode,
       budgetTokens: input.budgetTokens
     })
-    const summary = appendDigestMarker(summaryBase, digestMarker)
+    const summary = appendDigestMarker(
+      ensureTaskResumptionState(summaryBase, { history, prefix: input.prefix }),
+      digestMarker
+    )
     const summaryItem = makeCompactionItem({
       id: `compaction_${input.turnId}_${Date.now()}`,
       turnId: input.turnId,
@@ -256,7 +259,107 @@ function buildCompactionSummary(input: {
   } else {
     lines.push(...summaryLines)
   }
+  appendTaskResumptionState(lines, input.history, input.prefix)
   return lines.join('\n')
+}
+
+function ensureTaskResumptionState(
+  summary: string,
+  input: { history: TurnItem[]; prefix: ImmutablePrefix }
+): string {
+  if (/^Task resumption state:/im.test(summary)) return summary
+  const lines = [summary.trimEnd()]
+  appendTaskResumptionState(lines, input.history, input.prefix)
+  return lines.join('\n')
+}
+
+function appendTaskResumptionState(
+  lines: string[],
+  history: TurnItem[],
+  prefix: ImmutablePrefix
+): void {
+  lines.push('')
+  lines.push('Task resumption state:')
+  lines.push(`- Active objective: ${activeObjectiveFromHistory(history)}`)
+  lines.push(`- Current state: ${currentStateFromHistory(history)}`)
+  lines.push('- Next actions:')
+  for (const action of nextActionsFromHistory(history, prefix)) {
+    lines.push(`  - ${action}`)
+  }
+  lines.push(
+    '- Do not ask the user what to do unless this summary explicitly says user input is required or the next action is blocked.'
+  )
+}
+
+function activeObjectiveFromHistory(history: TurnItem[]): string {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index]
+    if (item.kind === 'user_message' && item.text.trim()) {
+      if (isContinuationOnlyMessage(item.text)) continue
+      return clipText(item.text, 600)
+    }
+  }
+  return 'Continue the latest unresolved user request from the conversation summary above.'
+}
+
+function currentStateFromHistory(history: TurnItem[]): string {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index]
+    if (item.kind === 'assistant_text' && item.text.trim()) {
+      return clipText(item.text, 600)
+    }
+    if (item.kind === 'tool_result') {
+      return `Latest tool result from ${item.toolName}: ${clipText(stringifyCompact(item.output), 600)}`
+    }
+    if (item.kind === 'tool_call') {
+      return `Latest tool call was ${item.toolName}: ${clipText(item.summary || stringifyCompact(item.arguments), 600)}`
+    }
+  }
+  return 'Use the preserved summary and recent verbatim turns as the source of truth.'
+}
+
+function nextActionsFromHistory(history: TurnItem[], prefix: ImmutablePrefix): string[] {
+  const actions: string[] = []
+  for (let index = history.length - 1; index >= 0 && actions.length < 3; index -= 1) {
+    const item = history[index]
+    const text = item.kind === 'assistant_text' ? item.text : item.kind === 'user_message' ? item.text : ''
+    if (!text.trim()) continue
+    for (const sentence of splitActionSentences(text)) {
+      if (actions.length >= 3) break
+      if (isContinuationOnlyMessage(sentence)) continue
+      if (looksLikeNextAction(sentence)) actions.push(clipText(sentence, 500))
+    }
+  }
+  for (const pinned of prefix.pinnedConstraints) {
+    if (/同步|sync|upstream|上游|QiongQi/i.test(pinned) && !actions.some((action) => action.includes(pinned))) {
+      actions.push(clipText(pinned, 500))
+      break
+    }
+  }
+  if (actions.length === 0) {
+    actions.push('Continue with the latest unresolved next step from the summary above.')
+  }
+  return [...new Set(actions)]
+}
+
+function splitActionSentences(text: string): string[] {
+  return text
+    .split(/(?<=[。.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+}
+
+function looksLikeNextAction(text: string): boolean {
+  return /(?:下一步|继续|修复|同步|验证|测试|实现|next|continue|fix|sync|verify|test|implement)/i.test(text)
+}
+
+function isContinuationOnlyMessage(text: string): boolean {
+  const compact = text
+    .replace(/[。.!！?？\s]+/g, '')
+    .trim()
+    .toLowerCase()
+  if (!compact) return true
+  return /^(继续|接着|继续推进|继续做|全部做|都做|开始吧|执行|接着来|goon|continue|proceed|doit|doall)$/.test(compact)
 }
 
 function extractSkillPins(history: TurnItem[]): string[] {

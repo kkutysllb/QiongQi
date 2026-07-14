@@ -418,6 +418,163 @@ describe('DeepseekCompatModelClient', () => {
     expect((sentBodies[0] as { thinking: { type: string } }).thinking).toMatchObject({ type: 'enabled' })
   })
 
+  it('enables MiniMax M3 official reasoning/tool-call split mode', async () => {
+    const response = {
+      id: 'minimax-m3',
+      model: 'MiniMax-M3',
+      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }]
+    }
+    const sentBodies: Array<Record<string, unknown>> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M3'
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    expect(sentBodies[0]?.reasoning_split).toBe(true)
+  })
+
+  it('enables MiniMax M3 compatibility mode behind local vLLM', async () => {
+    const response = {
+      id: 'local-minimax-m3',
+      model: 'MiniMax-M3',
+      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }]
+    }
+    const sentBodies: Array<{ reasoning_split?: unknown; messages?: Array<Record<string, unknown>> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'http://127.0.0.1:8000/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M3'
+    request.history = [
+      makeToolCallItem({
+        id: 'call_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        arguments: { text: 'a' }
+      }),
+      makeToolResultItem({
+        id: 'result_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        output: 'a'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => Array.isArray(message.tool_calls))
+    expect(sentBodies[0]?.reasoning_split).toBe(true)
+    expect(assistantMessage?.content).toBe('\u200b')
+  })
+
+  it('MiniMax injects an executable resume instruction when the request has only system messages', async () => {
+    const response = {
+      id: 'minimax-system-only',
+      model: 'MiniMax-M3',
+      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }]
+    }
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.history = []
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const user = sentBodies[0]?.messages?.find((message) => message.role === 'user')
+    expect(user?.content).toContain('Continue the active task')
+    expect(user?.content).toContain('Do not ask the user what to do')
+  })
+
+  it('GLM injects an executable resume instruction before an assistant-leading conversation', async () => {
+    const response = {
+      id: 'glm-assistant-leading',
+      model: 'glm-5.2',
+      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }]
+    }
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'assistant_first',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I will continue the implementation.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const firstNonSystem = sentBodies[0]?.messages?.find((message) => message.role !== 'system')
+    expect(firstNonSystem?.role).toBe('user')
+    expect(firstNonSystem?.content).toContain('Continue the active task')
+    expect(firstNonSystem?.content).toContain('Do not ask the user what to do')
+  })
+
   it('sends per-request router controls when requested', async () => {
     const response = {
       id: 'router',
@@ -1477,6 +1634,210 @@ describe('DeepseekCompatModelClient', () => {
     expect(complete && complete.kind === 'tool_call_complete' ? complete.callId : '').toBe('call_1')
     expect(complete && complete.kind === 'tool_call_complete' ? complete.arguments : {}).toEqual({ text: 'hi' })
     expect(chunks.find((c) => c.kind === 'usage')).toBeDefined()
+  })
+
+  it('does not emit official MiniMax tool-call protocol content as assistant text while streaming tool calls', async () => {
+    const frames = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"echo","arguments":"{\\"score\\":"}}],"content":"(tool call)]score\\"|\\"bias\\"|\\"name\\""}}]}\n\n',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"80}"}}]}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      'data: [DONE]\n\n'
+    ]
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame))
+        controller.close()
+      }
+    })
+    const fetchImpl: typeof fetch = async () =>
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl
+    })
+
+    const chunks = []
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M3'
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+
+    const text = chunks
+      .filter((c) => c.kind === 'assistant_text_delta')
+      .map((c) => (c as { text: string }).text)
+      .join('')
+    const complete = chunks.find((c) => c.kind === 'tool_call_complete')
+    expect(text).toBe('')
+    expect(complete && complete.kind === 'tool_call_complete' ? complete.arguments : {}).toEqual({ score: 80 })
+    expect(chunks.find((c) => c.kind === 'completed')).toMatchObject({ stopReason: 'tool_calls' })
+  })
+
+  it('converts official MiniMax inline JSON tool-call text into a real tool call', async () => {
+    const frames = [
+      'data: {"choices":[{"delta":{"content":"(tool call bash: {\\"action\\":\\"run\\",\\"command\\":\\"cat /Users/libing/.kworks-workspace/skills/builtin/finance/chart-visualization/references/generate_radar_chart.md && echo === && cat /Users/libing/.kworks-workspace/skills/builtin/finance/chart-visualization/references/generate_bar_chart.md\\"}) name=\\"bash\\">"}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n'
+    ]
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame))
+        controller.close()
+      }
+    })
+    const fetchImpl: typeof fetch = async () =>
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl
+    })
+
+    const chunks = []
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M3'
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+
+    const text = chunks
+      .filter((c) => c.kind === 'assistant_text_delta')
+      .map((c) => (c as { text: string }).text)
+      .join('')
+    const complete = chunks.find((c) => c.kind === 'tool_call_complete')
+    expect(text).toBe('')
+    expect(complete).toMatchObject({
+      kind: 'tool_call_complete',
+      toolName: 'bash',
+      arguments: {
+        action: 'run',
+        command: expect.stringContaining('generate_radar_chart.md')
+      }
+    })
+    expect(chunks.find((c) => c.kind === 'completed')).toMatchObject({ stopReason: 'tool_calls' })
+  })
+
+  it('converts official MiniMax inline action-tag tool-call text into a real tool call', async () => {
+    const frames = [
+      'data: {"choices":[{"delta":{"content":"(tool call ] <action>run][</action>]ls /Users/libing/.kworks-workspace/skills/builtin/finance/chart-visualization/references/ | sort]"}}]}\n\n',
+      'data: [DONE]\n\n'
+    ]
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame))
+        controller.close()
+      }
+    })
+    const fetchImpl: typeof fetch = async () =>
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl
+    })
+
+    const chunks = []
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M3'
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+
+    const complete = chunks.find((c) => c.kind === 'tool_call_complete')
+    expect(chunks.some((c) => c.kind === 'assistant_text_delta')).toBe(false)
+    expect(complete).toMatchObject({
+      kind: 'tool_call_complete',
+      toolName: 'bash',
+      arguments: {
+        action: 'run',
+        command: 'ls /Users/libing/.kworks-workspace/skills/builtin/finance/chart-visualization/references/ | sort'
+      }
+    })
+    expect(chunks.find((c) => c.kind === 'completed')).toMatchObject({ stopReason: 'tool_calls' })
+  })
+
+  it('converts official MiniMax inline invoke-command text into a real tool call', async () => {
+    const frames = [
+      'data: {"choices":[{"delta":{"content":"(tool call)[<invoke name=\\"bash\\">][<command>ls /Users/libing/.kworks-workspace/skills/builtin/finance/chart-visualization/references/ | sort</command>][</invoke>]"}}]}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+      'data: [DONE]\n\n'
+    ]
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame))
+        controller.close()
+      }
+    })
+    const fetchImpl: typeof fetch = async () =>
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl
+    })
+
+    const chunks = []
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M3'
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+
+    const complete = chunks.find((c) => c.kind === 'tool_call_complete')
+    expect(chunks.some((c) => c.kind === 'assistant_text_delta')).toBe(false)
+    expect(complete).toMatchObject({
+      kind: 'tool_call_complete',
+      toolName: 'bash',
+      arguments: {
+        action: 'run',
+        command: 'ls /Users/libing/.kworks-workspace/skills/builtin/finance/chart-visualization/references/ | sort'
+      }
+    })
+    expect(chunks.find((c) => c.kind === 'completed')).toMatchObject({ stopReason: 'tool_calls' })
+  })
+
+  it('does not mistake MiniMax parameter names for tool names when parsing inline tool calls', async () => {
+    const frames = [
+      'data: {"choices":[{"delta":{"content":"(tool call)[<parameter name=\\"command\\">pwd]"}}]}\n\n',
+      'data: [DONE]\n\n'
+    ]
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const frame of frames) controller.enqueue(encoder.encode(frame))
+        controller.close()
+      }
+    })
+    const fetchImpl: typeof fetch = async () =>
+      new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl
+    })
+
+    const chunks = []
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M3'
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks.find((c) => c.kind === 'tool_call_complete')).toMatchObject({
+      kind: 'tool_call_complete',
+      toolName: 'bash',
+      arguments: { command: 'pwd' }
+    })
   })
 
   it('keeps reading streamed usage sent after finish_reason', async () => {

@@ -1,6 +1,8 @@
-import { mkdir } from 'node:fs/promises'
+import { copyFile, mkdir, stat } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import { LocalToolHost, type LocalTool } from './local-tool-host.js'
 import { auditShellCommand, OutputAccumulator, type CommandAuditResult } from '@qiongqi/tool-infra'
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from '@qiongqi/adapter-fs'
@@ -49,6 +51,7 @@ type BashPayload = {
   exit_code: number | null
   output: string
   full_output_path: string | null
+  result_files?: BashResultFile[]
   truncation: null | {
     total_lines: number
     output_lines: number
@@ -70,6 +73,12 @@ type BashPayload = {
     reasons: string[]
     command: string
   }
+}
+
+type BashResultFile = {
+  path: string
+  relative_path: string
+  source_path?: string
 }
 
 const bashSessions = new Map<string, BashSession>()
@@ -276,7 +285,7 @@ function truncationPayload(truncated: TextSlice): BashPayload['truncation'] {
     : null
 }
 
-function resultPayload(input: {
+async function resultPayload(input: {
   command: string
   cwd: string
   shell: string
@@ -284,7 +293,8 @@ function resultPayload(input: {
   output: string
   truncated: TextSlice
   fullOutputPath?: string
-}): BashPayload {
+}): Promise<BashPayload> {
+  const resultFiles = await materializeResultFiles(input.command, input.cwd)
   return {
     command: input.command,
     cwd: input.cwd,
@@ -292,6 +302,7 @@ function resultPayload(input: {
     exit_code: input.exitCode,
     output: appendTruncationNotice(input.output, input.truncated, 'tail'),
     full_output_path: input.fullOutputPath ?? null,
+    ...(resultFiles.length > 0 ? { result_files: resultFiles } : {}),
     truncation: truncationPayload(input.truncated)
   }
 }
@@ -313,6 +324,8 @@ async function sessionPayload(
   }
   const snapshot = session.output.snapshot({ persistIfTruncated: true })
   const truncated = textSliceFromSnapshot(snapshot)
+  const resultFiles =
+    session.status === 'running' ? [] : await materializeResultFiles(session.command, session.cwd)
   return {
     command: session.command,
     cwd: session.cwd,
@@ -320,6 +333,7 @@ async function sessionPayload(
     exit_code: session.exitCode,
     output: appendTruncationNotice(snapshot.content, truncated, 'tail'),
     full_output_path: snapshot.fullOutputPath ?? null,
+    ...(resultFiles.length > 0 ? { result_files: resultFiles } : {}),
     truncation: truncationPayload(truncated),
     session_id: session.id,
     status: session.status,
@@ -330,6 +344,70 @@ async function sessionPayload(
     ...(options.stopSent ? { stop_sent: true } : {}),
     ...(session.error ? { error: session.error } : {})
   }
+}
+
+async function materializeResultFiles(command: string, cwd: string): Promise<BashResultFile[]> {
+  const files: BashResultFile[] = []
+  const seen = new Set<string>()
+  for (const rawPath of extractResultFilePaths(command)) {
+    const sourcePath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(cwd, rawPath)
+    if (seen.has(sourcePath)) continue
+    seen.add(sourcePath)
+    const info = await stat(sourcePath).catch(() => null)
+    if (!info?.isFile()) continue
+
+    const sourceInsideWorkspace = isInside(cwd, sourcePath)
+    if (!sourceInsideWorkspace && !isMaterializableExternalPath(sourcePath)) continue
+
+    const targetPath = sourceInsideWorkspace ? sourcePath : resolve(cwd, basename(sourcePath))
+    if (targetPath !== sourcePath) {
+      await copyFile(sourcePath, targetPath)
+    }
+    files.push({
+      path: targetPath,
+      relative_path: relative(cwd, targetPath) || '.',
+      ...(targetPath !== sourcePath ? { source_path: sourcePath } : {})
+    })
+  }
+  return files
+}
+
+function extractResultFilePaths(command: string): string[] {
+  const paths: string[] = []
+  const redirectPattern = /(?:^|[\s;|&])\d?>{1,2}\s*(?:"([^"]+)"|'([^']+)'|([^\s'";|&<>]+))/g
+  const teePattern = /(?:^|[\s;|&])tee(?:\s+-a)?\s+(?:"([^"]+)"|'([^']+)'|([^\s'";|&<>]+))/g
+  collectShellPathMatches(command, redirectPattern, paths)
+  collectShellPathMatches(command, teePattern, paths)
+  return paths.filter(hasResultFileExtension)
+}
+
+function collectShellPathMatches(command: string, pattern: RegExp, paths: string[]): void {
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(command)) !== null) {
+    const path = match[1] ?? match[2] ?? match[3]
+    if (path?.trim()) paths.push(path.trim())
+  }
+}
+
+function hasResultFileExtension(path: string): boolean {
+  return /\.(?:md|html?|csv|json|txt|xlsx?|pdf|png|jpe?g|svg)$/i.test(path)
+}
+
+function isMaterializableExternalPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/')
+  const tmpRoot = resolve(tmpdir()).replace(/\\/g, '/')
+  return (
+    normalized.startsWith('/tmp/') ||
+    normalized.startsWith('/private/tmp/') ||
+    normalized.startsWith('/var/tmp/') ||
+    normalized.startsWith('/var/folders/') ||
+    (tmpRoot !== '/' && normalized.startsWith(`${tmpRoot}/`))
+  )
+}
+
+function isInside(root: string, absolutePath: string): boolean {
+  const rel = relative(root, absolutePath)
+  return rel === '' || (!rel.startsWith('..') && !rel.includes(`..${sep}`) && !resolve(rel).startsWith('/..'))
 }
 
 function scheduleSessionCleanup(session: BashSession): void {
@@ -603,7 +681,7 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
           onUpdate,
           bashOps.exec
         )
-        const payload = resultPayload({
+        const payload = await resultPayload({
           command,
           cwd,
           shell: result.shell,

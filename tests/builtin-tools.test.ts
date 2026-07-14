@@ -375,6 +375,28 @@ describe('Qiongqi built-in tools', () => {
     expect(output.truncation).toBe(null)
   })
 
+  it('materializes bash result files written to tmp back into the workspace', async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), 'kun-bash-result-'))
+    const outsidePath = join(outsideDir, 'market_linkage_daily.txt')
+    try {
+      const output = await executeTool(host, workspace, 'bash', {
+        command: `printf linkage > ${JSON.stringify(outsidePath)}`
+      })
+
+      expect(output.exit_code).toBe(0)
+      expect(output.result_files).toEqual([
+        {
+          path: join(workspace, 'market_linkage_daily.txt'),
+          relative_path: 'market_linkage_daily.txt',
+          source_path: outsidePath
+        }
+      ])
+      expect(await readFile(join(workspace, 'market_linkage_daily.txt'), 'utf8')).toBe('linkage')
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true })
+    }
+  })
+
   it('finishes bash commands after the shell exits even when a background child keeps stdio open', async () => {
     const startedAt = Date.now()
     const output = await executeTool(host, workspace, 'bash', {

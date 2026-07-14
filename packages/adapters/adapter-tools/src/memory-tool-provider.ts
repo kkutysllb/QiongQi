@@ -32,7 +32,9 @@ export function buildMemoryToolProviders(store: MemoryStore | undefined): Capabi
             output: {
               memory: await store.create({
                 content,
-                scope: args.scope === 'user' || args.scope === 'project' ? args.scope : 'workspace',
+                scope: args.scope === 'user' || args.scope === 'workspace' || args.scope === 'project'
+                  ? args.scope
+                  : 'project',
                 workspace: typeof args.workspace === 'string' ? args.workspace : context.workspace,
                 sourceThreadId: context.threadId,
                 sourceTurnId: context.turnId,

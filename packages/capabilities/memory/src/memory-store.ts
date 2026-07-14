@@ -15,7 +15,7 @@ export interface MemoryStore {
   update(id: string, patch: MemoryUpdateRequest): Promise<MemoryRecord>
   delete(id: string): Promise<MemoryRecord>
   list(filter?: { workspace?: string; includeDeleted?: boolean }): Promise<MemoryRecord[]>
-  retrieve(input: { query: string; workspace?: string; limit: number }): Promise<MemoryRecord[]>
+  retrieve(input: { query: string; workspace?: string; threadId?: string; limit: number }): Promise<MemoryRecord[]>
   diagnostics(): Promise<MemoryDiagnostics>
   setLastInjected(ids: string[]): void
 }
@@ -88,12 +88,13 @@ export class FileMemoryStore implements MemoryStore {
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   }
 
-  async retrieve(input: { query: string; workspace?: string; limit: number }): Promise<MemoryRecord[]> {
+  async retrieve(input: { query: string; workspace?: string; threadId?: string; limit: number }): Promise<MemoryRecord[]> {
     if (!this.options.config.enabled) return []
     return rankMemoryRecords({
       query: input.query,
       records: await this.readAll(),
       workspace: input.workspace,
+      threadId: input.threadId,
       limit: input.limit
     })
   }

@@ -323,6 +323,8 @@ export function buildModelCompactionPrompt(input: {
   return [
     'Summarize the following Qiongqi conversation history for a context fold.',
     'Preserve user goals, requirements, decisions, files touched, tool outcomes, errors, constraints, active/pinned skills, and unresolved next steps.',
+    'End with a "Task resumption state:" section containing "Active objective:", "Current state:", and "Next actions:" so the next model turn can continue without asking what to do.',
+    'In that section, explicitly say not to ask the user what to do unless the history says user input is required or the task is blocked.',
     'Do not invent facts. Do not include generic advice. Prefer concise bullets grouped by topic.',
     '',
     'Existing heuristic summary to cross-check:',
