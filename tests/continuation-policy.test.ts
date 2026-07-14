@@ -12,6 +12,89 @@ import {
 } from './loop-test-harness.js'
 
 describe('ContinuationPolicy', () => {
+  it('recovers once from an empty stop response before accepting completion', async () => {
+    let calls = 0
+    const h = makeHarness({
+      provider: 'empty-stop-runner',
+      model: 'empty-stop-runner',
+      async *stream(): AsyncIterable<ModelStreamChunk> {
+        calls += 1
+        if (calls === 1) {
+          yield { kind: 'completed', stopReason: 'stop' }
+          return
+        }
+        yield { kind: 'assistant_text_delta', text: 'Recovered final answer.' }
+        yield { kind: 'completed', stopReason: 'stop' }
+      }
+    })
+    await bootstrapThread(h)
+
+    const status = await h.loop.runTurn(h.threadId, h.turnId)
+
+    expect(status).toBe('completed')
+    expect(calls).toBe(2)
+  })
+
+  it('continues after a non-terminal action preamble until the model actually uses tools', async () => {
+    let calls = 0
+    const h = makeHarness({
+      provider: 'preamble-runner',
+      model: 'preamble-runner',
+      async *stream(): AsyncIterable<ModelStreamChunk> {
+        calls += 1
+        if (calls === 1) {
+          yield { kind: 'assistant_text_delta', text: '我将先读取当前目录并继续分析。' }
+          yield { kind: 'completed', stopReason: 'stop' }
+          return
+        }
+        if (calls === 2) {
+          yield {
+            kind: 'tool_call_complete',
+            callId: 'call_pwd',
+            toolName: 'pwd',
+            arguments: {}
+          }
+          yield { kind: 'completed', stopReason: 'tool_calls' }
+          return
+        }
+        yield { kind: 'assistant_text_delta', text: '分析完成。' }
+        yield { kind: 'completed', stopReason: 'stop' }
+      }
+    }, { toolStorm: { enabled: false } })
+    await bootstrapThread(h)
+
+    const status = await h.loop.runTurn(h.threadId, h.turnId)
+
+    expect(status).toBe('completed')
+    expect(calls).toBe(3)
+  })
+
+  it('fails a classic turn that exceeds its loop step budget', async () => {
+    const h = makeHarness({
+      provider: 'runaway-runner',
+      model: 'runaway-runner',
+      async *stream(): AsyncIterable<ModelStreamChunk> {
+        yield {
+          kind: 'tool_call_complete',
+          callId: `call_pwd_${Math.random()}`,
+          toolName: 'pwd',
+          arguments: {}
+        }
+        yield { kind: 'completed', stopReason: 'tool_calls' }
+      }
+    }, {
+      loopBudget: { maxSteps: 3 },
+      toolStorm: { enabled: false }
+    })
+    await bootstrapThread(h)
+
+    const status = await h.loop.runTurn(h.threadId, h.turnId)
+    const items = await h.sessionStore.loadItems(h.threadId)
+
+    expect(status).toBe('failed')
+    expect(items.some((item) => item.kind === 'error' && item.code === 'loop_budget_exceeded')).toBe(true)
+  })
+
   it('keeps running past the legacy eight-step ceiling until the model stops', async () => {
     let calls = 0
     const h = makeHarness(

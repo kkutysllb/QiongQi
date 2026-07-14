@@ -92,8 +92,34 @@ export function decideLoopContinuation(input: LoopPolicyInput): LoopDecision {
     if (stepResult.stopReason === 'stop' && ctx.activeGoalInstruction) {
       return { action: 'continue' }
     }
+    if (shouldContinueAfterNonTerminalStop(stepResult, ctx)) {
+      return { action: 'continue' }
+    }
     return { action: 'stop' }
   }
 
   return { action: 'dispatch' }
+}
+
+function shouldContinueAfterNonTerminalStop(
+  stepResult: Extract<StepResult, { kind: 'ran' }>,
+  ctx: BuildContext
+): boolean {
+  if (stepResult.stopReason !== 'stop') return false
+  if (stepResult.completedToolCalls.length > 0) return false
+  if ((ctx.toolSpecs?.length ?? 0) === 0) return false
+  const text = stepResult.text.trim()
+  if (!text) return false
+  if (looksTerminal(text)) return false
+  return looksLikeActionPreamble(text)
+}
+
+function looksTerminal(text: string): boolean {
+  const compact = text.replace(/\s+/g, '')
+  return /(?:分析完成|任务完成|已完成|修复完成|结论|总结|根因|最终答案|finalanswer|completed|done|hereis|result|summary)/i.test(compact)
+}
+
+function looksLikeActionPreamble(text: string): boolean {
+  const compact = text.replace(/\s+/g, '')
+  return /(?:我将|我会|我先|先读取|先检查|先分析|现在开始|接下来|下一步|继续分析|继续执行|需要先|让我|letme|i(?:'ll|will|needto|should)|nexti|nowi)/i.test(compact)
 }

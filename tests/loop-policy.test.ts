@@ -94,6 +94,34 @@ describe('decideLoopContinuation', () => {
     expect(decision.action).toBe('continue')
   })
 
+  it('continues when the model stop text is an action preamble rather than a terminal answer', () => {
+    const decision = decideLoopContinuation({
+      stepResult: mkRan({ stopReason: 'stop', text: '我将先读取项目文件并继续深入分析。' }),
+      ctx: mkCtx({
+        request: { messages: [] },
+        toolSpecs: [{ name: 'bash', description: 'Run shell commands', inputSchema: {} }]
+      }),
+      ids: { next: () => 'x' } as never,
+      threadId: 't1',
+      turnId: 'tu1'
+    })
+    expect(decision.action).toBe('continue')
+  })
+
+  it('still stops for a terminal answer even when tools are available', () => {
+    const decision = decideLoopContinuation({
+      stepResult: mkRan({ stopReason: 'stop', text: '分析完成：根因是配置缺失，已给出修复路径。' }),
+      ctx: mkCtx({
+        request: { messages: [] },
+        toolSpecs: [{ name: 'bash', description: 'Run shell commands', inputSchema: {} }]
+      }),
+      ids: { next: () => 'x' } as never,
+      threadId: 't1',
+      turnId: 'tu1'
+    })
+    expect(decision.action).toBe('stop')
+  })
+
   it('materializes plan text when requiredToolName is create_plan and text is present', () => {
     const decision = decideLoopContinuation({
       stepResult: mkRan({ stopReason: 'stop', text: '## Plan\nDo it.' }),

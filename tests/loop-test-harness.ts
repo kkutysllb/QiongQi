@@ -80,6 +80,9 @@ export function makeHarness(
     tokenEconomy?: TokenEconomyConfig
     contextCompaction?: ContextCompactionConfig
     toolStorm?: ToolStormBreakerOptions & { enabled?: boolean }
+    loopBudget?: {
+      maxSteps?: number
+    }
     nowMs?: () => number
     toolArgumentRepair?: {
       maxStringBytes?: number
@@ -137,6 +140,7 @@ export function makeHarness(
     ...(options.tokenEconomy ? { tokenEconomy: options.tokenEconomy } : {}),
     ...(options.contextCompaction ? { contextCompaction: options.contextCompaction } : {}),
     ...(options.toolStorm ? { toolStorm: options.toolStorm } : {}),
+    ...(options.loopBudget ? { loopBudget: options.loopBudget } : {}),
     ...(options.toolArgumentRepair ? { toolArgumentRepair: options.toolArgumentRepair } : {})
   })
 

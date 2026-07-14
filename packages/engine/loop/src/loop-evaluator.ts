@@ -44,5 +44,25 @@ export function defaultLoopEvaluator(input: LoopEvaluationInput): LoopEvaluation
     return { verdict: 'retry', reason: 'model output truncated (length stop reason); retrying' }
   }
 
+  // Provider/gateway compatibility guard: some OpenAI-compatible endpoints
+  // occasionally finish a turn with `stop` but no visible text, no reasoning,
+  // and no tool calls. Treat the first occurrence as a recoverable stalled
+  // model step instead of accepting an empty terminal answer.
+  if (
+    decision.action === 'stop' &&
+    stepResult.stopReason === 'stop' &&
+    stepResult.completedToolCalls.length === 0 &&
+    !stepResult.text.trim() &&
+    !stepResult.reasoning.trim() &&
+    !hasPriorToolResult(input.ctx) &&
+    retryCount < DEFAULT_EVALUATOR_MAX_RETRIES
+  ) {
+    return { verdict: 'retry', reason: 'model returned an empty stop response; retrying once' }
+  }
+
   return { verdict: 'pass' }
+}
+
+function hasPriorToolResult(ctx: BuildContext): boolean {
+  return (ctx.healedItems ?? []).some((item) => item.kind === 'tool_result')
 }

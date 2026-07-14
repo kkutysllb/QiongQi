@@ -14,7 +14,7 @@ describe('defaultLoopEvaluator', () => {
   it('passes a normal stop decision', () => {
     const result = defaultLoopEvaluator({
       decision: { action: 'stop' } as LoopDecision,
-      stepResult: mkRan({ stopReason: 'stop' }),
+      stepResult: mkRan({ stopReason: 'stop', text: 'done' }),
       ctx, retryCount: 0
     })
     expect(result.verdict).toBe('pass')
@@ -45,6 +45,27 @@ describe('defaultLoopEvaluator', () => {
       ctx, retryCount: 0
     })
     expect(result.verdict).toBe('retry')
+  })
+
+  it('retries an empty stop with no tool calls once', () => {
+    const result = defaultLoopEvaluator({
+      decision: { action: 'stop' } as LoopDecision,
+      stepResult: mkRan({ stopReason: 'stop', text: '', reasoning: '' }),
+      ctx, retryCount: 0
+    })
+    expect(result.verdict).toBe('retry')
+  })
+
+  it('accepts an empty stop after prior tool results', () => {
+    const result = defaultLoopEvaluator({
+      decision: { action: 'stop' } as LoopDecision,
+      stepResult: mkRan({ stopReason: 'stop', text: '', reasoning: '' }),
+      ctx: {
+        healedItems: [{ kind: 'tool_result', callId: 'c1' }]
+      } as unknown as BuildContext,
+      retryCount: 0
+    })
+    expect(result.verdict).toBe('pass')
   })
 
   it('stops retrying once retryCount reaches 1', () => {
