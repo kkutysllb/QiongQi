@@ -14,6 +14,7 @@ import { CREATE_PLAN_TOOL_NAME } from '@qiongqi/adapter-tools'
 import { latestUserMessageText } from './loop-helpers.js'
 import type { BuildContext } from './prompt-builder.js'
 import type { StepResult } from './model-step-runner.js'
+import { hasRecoverableTaskState, looksLikeContextLossClarification } from './context-recovery-guard.js'
 
 export interface LoopPolicyInput {
   stepResult: Extract<StepResult, { kind: 'ran' }>
@@ -110,6 +111,7 @@ function shouldContinueAfterNonTerminalStop(
   if ((ctx.toolSpecs?.length ?? 0) === 0) return false
   const text = stepResult.text.trim()
   if (!text) return false
+  if (looksLikeContextLossClarification(text) && hasRecoverableTaskState(ctx)) return false
   if (looksTerminal(text)) return false
   return looksLikeActionPreamble(text)
 }

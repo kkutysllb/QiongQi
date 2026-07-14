@@ -39,17 +39,16 @@ import type { AttachmentStore } from '@qiongqi/attachments'
 import type { MemoryStore } from '@qiongqi/memory'
 import type { TokenEconomyConfig } from './token-economy.js'
 import type { ToolStormBreakerOptions } from './tool-storm-breaker.js'
-import { touchThread } from '@qiongqi/domain'
-import { makeErrorItem } from '@qiongqi/domain'
+import { makeAssistantTextItem, makeErrorItem, touchThread } from '@qiongqi/domain'
 import { CREATE_PLAN_TOOL_NAME } from '@qiongqi/adapter-tools'
 import { createImmutablePrefix } from '@qiongqi/cache'
 import { recordPipelineStage } from './loop-events.js'
 import { type GoalElapsedTimer } from './loop-helpers.js'
 import { ToolCallCoordinator } from './tool-call-coordinator.js'
-import { ModelStepRunner } from './model-step-runner.js'
-import { PromptBuilder } from './prompt-builder.js'
+import { ModelStepRunner, type StepResult } from './model-step-runner.js'
+import { PromptBuilder, type BuildContext } from './prompt-builder.js'
 import { decideContinuation } from './continuation-policy.js'
-import { defaultLoopEvaluator } from './loop-evaluator.js'
+import { DEFAULT_EVALUATOR_MAX_RETRIES, defaultLoopEvaluator } from './loop-evaluator.js'
 
 export type TurnOrchestratorOptions = {
   threadStore: ThreadStore
@@ -449,7 +448,22 @@ export async function runOrchestratorStep(input: {
     ctx,
     retryCount
   })
-  if (evaluation.verdict === 'retry') return 'retry'
+  if (evaluation.verdict === 'retry') {
+    await markRetriedModelOutputFailed({ turns, threadId, stepResult })
+    return 'retry'
+  }
+  if (shouldMaterializeEmptyTerminalFallback({ decision, stepResult, ctx, retryCount })) {
+    await turns.applyItem(
+      threadId,
+      makeAssistantTextItem({
+        id: ids.next('item_text'),
+        turnId,
+        threadId,
+        text: emptyTerminalFallbackText(ctx),
+        status: 'completed'
+      })
+    )
+  }
 
   switch (decision.action) {
     case 'stop':
@@ -525,4 +539,43 @@ export async function runOrchestratorStep(input: {
       return 'continue'
     }
   }
+}
+
+async function markRetriedModelOutputFailed(input: {
+  turns: TurnService
+  threadId: string
+  stepResult: Extract<StepResult, { kind: 'ran' }>
+}): Promise<void> {
+  const patch = { status: 'failed' as const, finishedAt: new Date().toISOString() }
+  if (input.stepResult.textItemId) {
+    await input.turns.updateItem(input.threadId, input.stepResult.textItemId, patch)
+  }
+  if (input.stepResult.reasoningItemId) {
+    await input.turns.updateItem(input.threadId, input.stepResult.reasoningItemId, patch)
+  }
+}
+
+function shouldMaterializeEmptyTerminalFallback(input: {
+  decision: ReturnType<typeof decideContinuation>
+  stepResult: Extract<StepResult, { kind: 'ran' }>
+  ctx: BuildContext
+  retryCount: number
+}): boolean {
+  if (input.decision.action !== 'stop') return false
+  if (input.retryCount < DEFAULT_EVALUATOR_MAX_RETRIES) return false
+  if (input.stepResult.stopReason !== 'stop') return false
+  if (input.stepResult.completedToolCalls.length > 0) return false
+  if (input.stepResult.text.trim() || input.stepResult.reasoning.trim()) return false
+  return input.ctx.healedItems.some((item) => item.kind === 'tool_result')
+}
+
+function emptyTerminalFallbackText(ctx: BuildContext): string {
+  const toolNames = [...new Set(
+    ctx.healedItems
+      .filter((item) => item.kind === 'tool_result')
+      .map((item) => item.kind === 'tool_result' ? item.toolName : '')
+      .filter(Boolean)
+  )].slice(-5)
+  const suffix = toolNames.length > 0 ? ` 最近完成的工具: ${toolNames.join(', ')}。` : ''
+  return `工具已经执行完成，但模型没有生成最终答复。${suffix}请查看上方工具结果；如需继续，我会基于这些结果补充分析。`
 }
