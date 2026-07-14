@@ -8,12 +8,20 @@ import type { UsageSnapshot } from '@qiongqi/contracts'
  */
 export type ModelStreamChunk =
   | { kind: 'assistant_text_delta'; text: string }
-  | { kind: 'assistant_reasoning_delta'; text: string }
+  | { kind: 'assistant_reasoning_delta'; text: string; signature?: string }
   | { kind: 'tool_call_delta'; callId: string; toolName?: string; argumentsDelta?: string }
   | { kind: 'tool_call_complete'; callId: string; toolName: string; arguments: Record<string, unknown> }
   | { kind: 'usage'; usage: UsageSnapshot }
-  | { kind: 'completed'; stopReason: 'stop' | 'tool_calls' | 'length' | 'error' }
-  | { kind: 'error'; message: string; code?: string }
+  | {
+      kind: 'completed'
+      stopReason: 'stop' | 'tool_calls' | 'length' | 'error'
+      stopClass?: 'normal' | 'tool_calls' | 'length' | 'safety' | 'refusal' | 'transport_error' | 'protocol_error' | 'unknown'
+      providerReason?: string
+      endpointFormat?: 'chat_completions' | 'responses' | 'messages'
+      provider?: string
+      rawMetadata?: Record<string, unknown>
+    }
+  | { kind: 'error'; message: string; code?: string; providerReason?: string; rawMetadata?: Record<string, unknown> }
 
 /**
  * A single model turn request: the immutable prefix items, the running

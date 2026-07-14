@@ -163,6 +163,51 @@ export const ToolEffectPolicySchema = z.object({
 }).strict()
 export type ToolEffectPolicy = z.infer<typeof ToolEffectPolicySchema>
 
+export const ModelStopClassSchema = z.enum([
+  'normal',
+  'tool_calls',
+  'length',
+  'safety',
+  'refusal',
+  'transport_error',
+  'protocol_error',
+  'unknown'
+])
+export type ModelStopClass = z.infer<typeof ModelStopClassSchema>
+
+export const ModelToolIntentSchema = z.object({
+  callId: NonEmptyString,
+  toolName: NonEmptyString,
+  arguments: z.record(z.string(), z.unknown())
+}).strict()
+export type ModelToolIntent = z.infer<typeof ModelToolIntentSchema>
+
+export const ModelIntegritySchema = z.object({
+  leakedProtocolText: z.boolean(),
+  malformedToolCall: z.boolean(),
+  completeToolCalls: z.boolean()
+}).strict()
+export type ModelIntegrity = z.infer<typeof ModelIntegritySchema>
+
+export const NormalizedModelCompletionSchema = z.object({
+  stopClass: ModelStopClassSchema,
+  providerReason: z.string().optional(),
+  endpointFormat: z.enum(['chat_completions', 'responses', 'messages']).optional(),
+  provider: z.string().optional(),
+  rawMetadata: z.record(z.string(), z.unknown()).optional(),
+  integrity: ModelIntegritySchema,
+  text: z.string(),
+  reasoning: z.string(),
+  toolIntents: z.array(ModelToolIntentSchema)
+}).strict()
+export type NormalizedModelCompletion = z.infer<typeof NormalizedModelCompletionSchema>
+
+export const ModelProposalSchema = NormalizedModelCompletionSchema.extend({
+  proposalId: NonEmptyString,
+  model: NonEmptyString
+}).strict()
+export type ModelProposal = z.infer<typeof ModelProposalSchema>
+
 export function makeRunIdentity(input: unknown): RunIdentity {
   return RunIdentitySchema.parse(input)
 }

@@ -1,0 +1,122 @@
+import { randomUUID } from 'node:crypto'
+import {
+  ModelProposalSchema,
+  NormalizedModelCompletionSchema,
+  type ModelProposal,
+  type NormalizedModelCompletion
+} from '@qiongqi/contracts'
+import type { ModelStreamChunk } from '@qiongqi/ports'
+
+export type ModelProtocolNormalizerOptions = {
+  provider?: string
+  model?: string
+  endpointFormat?: 'chat_completions' | 'responses' | 'messages'
+}
+
+const LEAKED_PROTOCOL_MARKERS = [
+  '<action>',
+  '</action>',
+  '<tool_call>',
+  '</tool_call>',
+  '(tool call)',
+  '[tool call]',
+  '<|tool|>'
+]
+
+function hasLeakedProtocolText(text: string): boolean {
+  const lower = text.toLowerCase()
+  return LEAKED_PROTOCOL_MARKERS.some((marker) => lower.includes(marker))
+}
+
+function stopClassFor(chunk: Extract<ModelStreamChunk, { kind: 'completed' }>): NormalizedModelCompletion['stopClass'] {
+  if (chunk.stopClass) return chunk.stopClass
+  if (chunk.stopReason === 'tool_calls') return 'tool_calls'
+  if (chunk.stopReason === 'length') return 'length'
+  if (chunk.stopReason === 'error') return 'protocol_error'
+  return 'normal'
+}
+
+export async function normalizeModelCompletion(
+  input: AsyncIterable<ModelStreamChunk> | Iterable<ModelStreamChunk>,
+  options: ModelProtocolNormalizerOptions = {}
+): Promise<NormalizedModelCompletion> {
+  let text = ''
+  let reasoning = ''
+  let completed: Extract<ModelStreamChunk, { kind: 'completed' }> | undefined
+  let providerReason: string | undefined
+  let rawMetadata: Record<string, unknown> | undefined
+  let malformedToolCall = false
+  const pending = new Map<string, { toolName?: string; arguments: string }>()
+  const intents = new Map<string, { callId: string; toolName: string; arguments: Record<string, unknown> }>()
+
+  for await (const chunk of input) {
+    switch (chunk.kind) {
+      case 'assistant_text_delta':
+        text += chunk.text
+        break
+      case 'assistant_reasoning_delta':
+        reasoning += chunk.text
+        break
+      case 'tool_call_delta': {
+        const current = pending.get(chunk.callId) ?? { arguments: '' }
+        if (chunk.toolName) current.toolName = chunk.toolName
+        if (chunk.argumentsDelta) current.arguments += chunk.argumentsDelta
+        pending.set(chunk.callId, current)
+        break
+      }
+      case 'tool_call_complete':
+        if (!chunk.callId || !chunk.toolName || !chunk.arguments || typeof chunk.arguments !== 'object' || Array.isArray(chunk.arguments)) {
+          malformedToolCall = true
+        } else {
+          intents.set(chunk.callId, { callId: chunk.callId, toolName: chunk.toolName, arguments: chunk.arguments })
+          pending.delete(chunk.callId)
+        }
+        break
+      case 'completed':
+        completed = chunk
+        providerReason = chunk.providerReason
+        rawMetadata = chunk.rawMetadata
+        break
+      case 'error':
+        completed = { kind: 'completed', stopReason: 'error', stopClass: 'transport_error', providerReason: chunk.providerReason ?? chunk.code, rawMetadata: chunk.rawMetadata }
+        providerReason = chunk.providerReason ?? chunk.code
+        rawMetadata = chunk.rawMetadata
+        break
+      case 'usage':
+        break
+    }
+  }
+
+  for (const [callId, call] of pending) {
+    try {
+      const parsed = JSON.parse(call.arguments)
+      if (!call.toolName || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid tool arguments')
+      intents.set(callId, { callId, toolName: call.toolName, arguments: parsed as Record<string, unknown> })
+    } catch {
+      malformedToolCall = true
+    }
+  }
+  const stop = completed ?? { kind: 'completed' as const, stopReason: 'stop' as const }
+  const leakedProtocolText = hasLeakedProtocolText(text)
+  const integrity = {
+    leakedProtocolText,
+    malformedToolCall,
+    completeToolCalls: pending.size === 0 && !malformedToolCall
+  }
+  const normalized = NormalizedModelCompletionSchema.parse({
+    stopClass: stopClassFor(stop),
+    providerReason,
+    endpointFormat: stop.endpointFormat ?? options.endpointFormat,
+    provider: stop.provider ?? options.provider,
+    rawMetadata,
+    integrity,
+    text,
+    reasoning,
+    toolIntents: leakedProtocolText || malformedToolCall ? [] : [...intents.values()]
+  })
+  return normalized
+}
+
+export function makeModelProposal(completion: NormalizedModelCompletion, options: { model: string; proposalId?: string }): ModelProposal {
+  return ModelProposalSchema.parse({ ...completion, proposalId: options.proposalId ?? randomUUID(), model: options.model })
+}
