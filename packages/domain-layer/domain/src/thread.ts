@@ -28,6 +28,7 @@ export function createThreadRecord(input: {
   model: string
   mode?: ThreadMode
   workModeId?: string
+  workModeModuleId?: string
   status?: ThreadStatus
   approvalPolicy?: ApprovalPolicy
   sandboxMode?: SandboxMode
@@ -53,6 +54,7 @@ export function createThreadRecord(input: {
     model: input.model,
     mode: input.mode ?? 'agent',
     workModeId: input.workModeId ?? 'office',
+    ...(input.workModeModuleId ? { workModeModuleId: input.workModeModuleId } : {}),
     status: input.status ?? 'idle',
     approvalPolicy: input.approvalPolicy ?? DEFAULT_APPROVAL_POLICY,
     sandboxMode: input.sandboxMode ?? DEFAULT_SANDBOX_MODE,
@@ -84,6 +86,7 @@ export function toThreadSummary(
   'id' | 'title' | 'workspace' | 'model' | 'mode' | 'status' | 'createdAt' | 'updatedAt'
   | 'ownerUserId'
   | 'workModeId'
+  | 'workModeModuleId'
   | 'costBudgetUsd' | 'costBudgetWarningSent'
   | 'relation' | 'parentThreadId'
   | 'forkedFromThreadId' | 'forkedFromTitle' | 'forkedAt' | 'forkedFromMessageCount' | 'forkedFromTurnCount'
@@ -97,6 +100,7 @@ export function toThreadSummary(
     model: thread.model,
     mode: thread.mode,
     workModeId: thread.workModeId ?? 'office',
+    ...(thread.workModeModuleId ? { workModeModuleId: thread.workModeModuleId } : {}),
     status: thread.status,
     ...(thread.costBudgetUsd !== undefined ? { costBudgetUsd: thread.costBudgetUsd } : {}),
     ...(thread.costBudgetWarningSent !== undefined ? { costBudgetWarningSent: thread.costBudgetWarningSent } : {}),

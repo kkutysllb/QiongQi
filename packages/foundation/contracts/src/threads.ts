@@ -98,6 +98,7 @@ export const ThreadSchema = z.object({
   model: z.string(),
   mode: ThreadMode,
   workModeId: z.string().min(1).default('office'),
+  workModeModuleId: z.string().min(1).optional(),
   status: ThreadStatus,
   approvalPolicy: ApprovalPolicySchema.default(DEFAULT_APPROVAL_POLICY),
   sandboxMode: SandboxModeSchema.default(DEFAULT_SANDBOX_MODE),
@@ -126,6 +127,7 @@ export const ThreadSummarySchema = ThreadSchema.pick({
   model: true,
   mode: true,
   workModeId: true,
+  workModeModuleId: true,
   status: true,
   costBudgetUsd: true,
   costBudgetWarningSent: true,
@@ -150,6 +152,7 @@ export const CreateThreadRequest = z.object({
   model: z.string().min(1).optional(),
   mode: ThreadMode.default('agent'),
   workModeId: z.string().min(1).optional(),
+  workModeModuleId: z.string().min(1).optional(),
   approvalPolicy: ApprovalPolicySchema.optional(),
   sandboxMode: SandboxModeSchema.optional(),
   costBudgetUsd: z.number().positive().optional()
@@ -235,6 +238,7 @@ export const UpdateThreadRequest = z
     approvalPolicy: ApprovalPolicySchema.optional(),
     sandboxMode: SandboxModeSchema.optional(),
     workModeId: z.string().min(1).optional(),
+    workModeModuleId: z.string().min(1).optional(),
     costBudgetUsd: z.number().positive().nullable().optional(),
     costBudgetWarningSent: z.boolean().optional(),
     relation: ThreadRelation.optional()
@@ -247,6 +251,7 @@ export const UpdateThreadRequest = z
       value.approvalPolicy !== undefined ||
       value.sandboxMode !== undefined ||
       value.workModeId !== undefined ||
+      value.workModeModuleId !== undefined ||
       value.costBudgetUsd !== undefined ||
       value.costBudgetWarningSent !== undefined ||
       value.relation !== undefined,

@@ -136,6 +136,7 @@ export class ThreadService {
       model,
       mode: request.mode,
       workModeId: request.workModeId,
+      workModeModuleId: request.workModeModuleId,
       approvalPolicy: request.approvalPolicy,
       sandboxMode: request.sandboxMode,
       ...(request.costBudgetUsd !== undefined ? { costBudgetUsd: request.costBudgetUsd } : {}),
@@ -161,6 +162,8 @@ export class ThreadService {
     costBudgetUsd?: number | null
     costBudgetWarningSent?: boolean
     relation?: ThreadRelation
+    workModeId?: string
+    workModeModuleId?: string
   }): Promise<ThreadRecord> {
     const current = await this.threadStore.get(threadId)
     if (!current) throw new Error(`thread not found: ${threadId}`)
@@ -397,6 +400,8 @@ export class ThreadService {
       workspace: current.workspace,
       model: current.model,
       mode: current.mode,
+      workModeId: current.workModeId,
+      ...(current.workModeModuleId ? { workModeModuleId: current.workModeModuleId } : {}),
       status: 'idle',
       approvalPolicy: current.approvalPolicy,
       sandboxMode: current.sandboxMode,
@@ -462,6 +467,8 @@ export class ThreadService {
       workspace: options.workspace ?? sourceThread?.workspace ?? '~',
       model: options.model ?? sourceThread?.model ?? DEFAULT_QIONGQI_MODEL,
       mode: options.mode ?? sourceThread?.mode ?? 'agent',
+      workModeId: sourceThread?.workModeId,
+      ...(sourceThread?.workModeModuleId ? { workModeModuleId: sourceThread.workModeModuleId } : {}),
       status: 'idle',
       approvalPolicy: sourceThread?.approvalPolicy,
       sandboxMode: sourceThread?.sandboxMode,
