@@ -12,7 +12,7 @@ import { FileAttachmentStore } from '@qiongqi/attachments'
 import { InMemoryApprovalGate } from '@qiongqi/adapter-storage'
 import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
 import { InMemoryEventBus } from '@qiongqi/adapter-storage'
-import { FileSessionStore, FileThreadStore } from '@qiongqi/adapter-storage'
+import { FileSessionStore, FileThreadStore, FileRunEventStore, FileRunStateStore } from '@qiongqi/adapter-storage'
 import { HybridSessionStore, HybridThreadStore } from '@qiongqi/adapter-storage'
 import {
   DynamicRoutedModelCompatClient,
@@ -36,7 +36,7 @@ import {
   type QiongqiCapabilitiesConfig
 } from '@qiongqi/contracts'
 import type { ApprovalPolicy, SandboxMode } from '@qiongqi/contracts'
-import { normalizeOrchestrationMode, type OrchestrationMode } from '@qiongqi/loop'
+import { EffectCommitCoordinator, KernelTurnRunner, normalizeOrchestrationMode, ToolRuntimeV3, type OrchestrationMode } from '@qiongqi/loop'
 import type {
   ToolHost,
   ToolHostContext,
@@ -113,6 +113,7 @@ import {
 } from './kworks-workspace-paths.js'
 import {
   KWorksUserDataAuthStore,
+  FileKWorksUserDataStore,
   type KWorksUserDataStore
 } from './kworks-user-data-store.js'
 import { SqliteKWorksUserDataStore } from './kworks-sqlite-user-data-store.js'
@@ -284,8 +285,16 @@ export async function createCore(
   const userInputGate = new InMemoryUserInputGate()
   const workspaceInspector = new LocalWorkspaceInspector()
   const usageService = new UsageService()
-  const kworksUserDataStore = new SqliteKWorksUserDataStore({ workspaceRoot })
-  await kworksUserDataStore.ready()
+  let kworksUserDataStore: KWorksUserDataStore
+  try {
+    const sqliteStore = new SqliteKWorksUserDataStore({ workspaceRoot })
+    await sqliteStore.ready()
+    kworksUserDataStore = sqliteStore
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.warn(`[qiongqi] user-data sqlite unavailable; using file fallback: ${message}`)
+    kworksUserDataStore = new FileKWorksUserDataStore({ workspaceRoot })
+  }
   const authService = new AuthService({
     store: new KWorksUserDataAuthStore(kworksUserDataStore),
     now: () => new Date()
@@ -360,7 +369,11 @@ export async function createCore(
     threadService,
     storageDiagnostics: stores.diagnostics,
     storesShutdown: stores.shutdown,
-    userDataShutdown: () => kworksUserDataStore.close()
+    userDataShutdown: () => {
+      if ('close' in kworksUserDataStore && typeof kworksUserDataStore.close === 'function') {
+        kworksUserDataStore.close()
+      }
+    }
   }
 }
 
@@ -1098,6 +1111,12 @@ async function assembleRuntime(input: {
     ...(tokenEconomy ? { tokenEconomy } : {}),
     ...(options.runtime ? { runtime: options.runtime } : {})
   })
+  const orchestrationMode = normalizeOrchestrationMode(options.orchestrationMode)
+  const runtimeV3Root = join(options.dataDir, 'runtime-v3')
+  const runtimeV3Events = orchestrationMode === 'kernel_v3' ? new FileRunEventStore(runtimeV3Root) : undefined
+  const toolRuntime = runtimeV3Events
+    ? new ToolRuntimeV3({ toolHost: tools.toolHost, effects: new EffectCommitCoordinator({ events: runtimeV3Events, nowIso: core.nowIso }) })
+    : undefined
   const orchOpts = {
     threadStore: core.threadStore,
     sessionStore: core.sessionStore,
@@ -1131,10 +1150,12 @@ async function assembleRuntime(input: {
         markdown,
         preserveCompleted: true
       })
-    }
+    },
+    ...(toolRuntime ? { toolRuntime } : {})
   }
-  // Stage 3: choose classic or evented orchestrator.
-  const orchestrationMode = normalizeOrchestrationMode(options.orchestrationMode)
+  // Stage 3/Kernel V3: choose one orchestrator. Kernel V3 wraps exactly one
+  // classic delegate so lease/checkpoint/outcome ownership is durable without
+  // launching a second turn loop.
   const loop = orchestrationMode === 'evented_v2'
     ? new EventedTurnOrchestrator(
         orchOpts,
@@ -1143,7 +1164,30 @@ async function assembleRuntime(input: {
         defaultLoopPlan(),
         defaultLoopEvaluator
       )
-    : new TurnOrchestrator(orchOpts)
+    : (() => {
+        const classic = new TurnOrchestrator(orchOpts)
+        if (orchestrationMode !== 'kernel_v3') return classic
+        const snapshots = new FileRunStateStore(runtimeV3Root)
+        const events = runtimeV3Events ?? new FileRunEventStore(runtimeV3Root)
+        return new KernelTurnRunner({
+          snapshots,
+          events,
+          leases: snapshots,
+          holderId: `qiongqi:${process.pid}`,
+          identityForTurn: async (threadId, turnId) => {
+            const thread = await core.threadStore.get(threadId)
+            return {
+              ownerUserId: thread?.ownerUserId ?? 'local-default-owner',
+              workspaceKey: thread?.workspace ?? options.dataDir,
+              threadId,
+              turnId,
+              runId: `run_${threadId}_${turnId}`
+            }
+          },
+          delegate: (threadId, turnId) => classic.runTurn(threadId, turnId),
+          nowIso: core.nowIso
+        })
+      })()
   const currentCapabilities = () => {
     const config = configStore.snapshot?.() ?? qiongqiConfigFromRuntimeOptions(options)
     const effectiveCapabilities = withRuntimeMountedSkillRoots(

@@ -1,4 +1,4 @@
-import type { ApprovalPolicy, ToolEffectPolicy } from '@qiongqi/contracts'
+import type { ApprovalPolicy, RunIdentity, RunStateV3, ToolEffectPolicy } from '@qiongqi/contracts'
 import type { ApprovalRequest } from '@qiongqi/domain'
 import type { TurnItem } from '@qiongqi/contracts'
 import type { ModelCapabilityMetadata } from '@qiongqi/contracts'
@@ -96,6 +96,9 @@ export type ToolHostContext = {
   awaitUserInput?: (
     input: Omit<UserInputRequest, 'threadId' | 'turnId'>
   ) => Promise<UserInputResolution>
+  runtimeIdentity?: RunIdentity
+  runtimeState?: RunStateV3
+  runtimeStateSink?: (state: RunStateV3) => void
 }
 
 export type ToolCallLike = {

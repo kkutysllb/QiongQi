@@ -171,24 +171,28 @@ export function buildRouter(runtime: ServerRuntime): Router {
     return readThreadArtifact(runtime, ctx.params.id, request)
   })
   router.add('GET', '/v1/memory', async (request) => {
-    if (!authorize(request, runtime)) return ERRORS.unauthorized()
-    return listMemories(runtime.memoryStore, request)
+    const owner = await memoryOwner(request, runtime)
+    if (owner === null) return ERRORS.unauthorized()
+    return listMemories(runtime.memoryStore, request, owner)
   })
   router.add('POST', '/v1/memory', async (request) => {
-    if (!authorize(request, runtime)) return ERRORS.unauthorized()
-    return createMemory(runtime.memoryStore, request)
+    const owner = await memoryOwner(request, runtime)
+    if (owner === null) return ERRORS.unauthorized()
+    return createMemory(runtime.memoryStore, request, owner)
   })
   router.add('GET', '/v1/memory/diagnostics', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     return memoryDiagnostics(runtime.memoryStore)
   })
   router.add('PATCH', '/v1/memory/:id', async (request, ctx) => {
-    if (!authorize(request, runtime)) return ERRORS.unauthorized()
-    return updateMemory(runtime.memoryStore, ctx.params.id, request)
+    const owner = await memoryOwner(request, runtime)
+    if (owner === null) return ERRORS.unauthorized()
+    return updateMemory(runtime.memoryStore, ctx.params.id, request, owner)
   })
   router.add('DELETE', '/v1/memory/:id', async (request, ctx) => {
-    if (!authorize(request, runtime)) return ERRORS.unauthorized()
-    return deleteMemory(runtime.memoryStore, ctx.params.id)
+    const owner = await memoryOwner(request, runtime)
+    if (owner === null) return ERRORS.unauthorized()
+    return deleteMemory(runtime.memoryStore, ctx.params.id, owner)
   })
   router.add('GET', '/v1/workspace/status', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
@@ -330,6 +334,14 @@ export function buildRouter(runtime: ServerRuntime): Router {
 
 function authorize(request: Request, runtime: ServerRuntime): boolean {
   return isAuthorized(request.headers, runtime.runtimeToken, runtime.insecure)
+}
+
+async function memoryOwner(request: Request, runtime: ServerRuntime): Promise<string | undefined | null> {
+  if (runtime.authService) {
+    const actor = await runtime.authService.verifyToken(bearerToken(request.headers))
+    if (actor) return actor.userId
+  }
+  return authorize(request, runtime) ? undefined : null
 }
 
 void bearerToken

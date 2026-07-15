@@ -16,7 +16,7 @@ import { SequentialIdGenerator } from '@qiongqi/ports'
 import { createThreadRecord } from '@qiongqi/domain'
 import { createImmutablePrefix } from '@qiongqi/cache'
 import type { ModelClient, ModelRequest, ModelStreamChunk } from '@qiongqi/ports'
-import type { SkillRuntime } from '@qiongqi/skills'
+import type { SkillPluginHost, SkillRuntime } from '@qiongqi/skills'
 import type { AttachmentStore } from '@qiongqi/attachments'
 import type { ModelCapabilityMetadata } from '@qiongqi/contracts'
 import type { MemoryStore } from '@qiongqi/memory'
@@ -74,7 +74,9 @@ export function makeHarness(
     compactor?: ContextCompactor
     tools?: LocalTool[]
     skillRuntime?: SkillRuntime
+    skillPluginHost?: SkillPluginHost
     attachmentStore?: AttachmentStore
+    runtimeDataDir?: string
     memoryStore?: MemoryStore
     modelCapabilities?: (model: string) => ModelCapabilityMetadata
     tokenEconomy?: TokenEconomyConfig
@@ -134,7 +136,9 @@ export function makeHarness(
     nowIso,
     nowMs,
     ...(options.skillRuntime ? { skillRuntime: options.skillRuntime } : {}),
+    ...(options.skillPluginHost ? { skillPluginHost: options.skillPluginHost } : {}),
     ...(options.attachmentStore ? { attachmentStore: options.attachmentStore } : {}),
+    ...(options.runtimeDataDir ? { runtimeDataDir: options.runtimeDataDir } : {}),
     ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
     ...(options.modelCapabilities ? { modelCapabilities: options.modelCapabilities } : {}),
     ...(options.tokenEconomy ? { tokenEconomy: options.tokenEconomy } : {}),
@@ -172,15 +176,25 @@ export function makeHarness(
 export async function bootstrapThread(
   h: Harness,
   options: {
+    threadId?: string
     workspace?: string
+    thread?: Partial<Parameters<typeof createThreadRecord>[0]>
     request?: Parameters<TurnService['startTurn']>[0]['request']
   } = {}
 ): Promise<void> {
+  const threadId = options.threadId ?? h.threadId
+  h.threadId = threadId
   await h.threadStore.upsert(
-    createThreadRecord({ id: h.threadId, title: 'demo', workspace: options.workspace ?? '/tmp', model: 'fake' })
+    createThreadRecord({
+      id: threadId,
+      title: 'demo',
+      workspace: options.workspace ?? '/tmp',
+      model: 'fake',
+      ...options.thread
+    })
   )
   const response = await h.turns.startTurn({
-    threadId: h.threadId,
+    threadId,
     request: options.request ?? { prompt: 'hello' }
   })
   h.turnId = response.turnId

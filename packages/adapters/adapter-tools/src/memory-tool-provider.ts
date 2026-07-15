@@ -31,6 +31,7 @@ export function buildMemoryToolProviders(store: MemoryStore | undefined): Capabi
           return {
             output: {
               memory: await store.create({
+                ownerUserId: context.ownerUserId,
                 content,
                 scope: args.scope === 'user' || args.scope === 'workspace' || args.scope === 'project'
                   ? args.scope
@@ -58,8 +59,11 @@ export function buildMemoryToolProviders(store: MemoryStore | undefined): Capabi
           additionalProperties: false
         },
         policy: 'on-request',
-        execute: async (args) => {
+        execute: async (args, context) => {
           if (typeof args.id !== 'string') return { output: { error: 'id is required' }, isError: true }
+          if (!(await canMutateMemory(store, args.id, context))) {
+            return { output: { error: `memory not found: ${args.id}` }, isError: true }
+          }
           return {
             output: {
               memory: await store.update(args.id, {
@@ -80,11 +84,30 @@ export function buildMemoryToolProviders(store: MemoryStore | undefined): Capabi
           additionalProperties: false
         },
         policy: 'on-request',
-        execute: async (args) => {
+        execute: async (args, context) => {
           if (typeof args.id !== 'string') return { output: { error: 'id is required' }, isError: true }
+          if (!(await canMutateMemory(store, args.id, context))) {
+            return { output: { error: `memory not found: ${args.id}` }, isError: true }
+          }
           return { output: { memory: await store.delete(args.id) } }
         }
       })
     ]
   }]
+}
+
+async function canMutateMemory(
+  store: MemoryStore,
+  id: string,
+  context: { ownerUserId?: string; workspace: string; threadId: string }
+): Promise<boolean> {
+  if (!context.ownerUserId) return true
+  const memories = await store.list({
+    includeDeleted: true,
+    ownerUserId: context.ownerUserId,
+    workspace: context.workspace
+  })
+  const memory = memories.find((candidate) => candidate.id === id)
+  if (!memory) return false
+  return memory.sourceThreadId === context.threadId
 }

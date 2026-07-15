@@ -2,7 +2,7 @@
 import process from 'node:process'
 import {
   parseServeOptionsSafe,
-  qiongqiRuntimeListeningMessage,
+  qiongqiRuntimeStartupInfo,
   SERVE_USAGE,
   ServeExitCode
 } from './serve.js'
@@ -64,21 +64,11 @@ async function serveMain(argv: readonly string[]): Promise<number> {
     telemetry
   })
   const info = handle.runtime.info()
-  const startupInfo = {
-    service: 'qiongqi',
-    mode: 'serve',
+  const startupInfo = qiongqiRuntimeStartupInfo({
     host: handle.host,
     port: handle.port,
-    configPath: info.configPath,
-    dataDir: info.dataDir,
-    model: info.model,
-    approvalPolicy: info.approvalPolicy,
-    sandboxMode: info.sandboxMode,
-    insecure: info.insecure,
-    startedAt: info.startedAt,
-    pid: info.pid,
-    message: qiongqiRuntimeListeningMessage(handle.host, handle.port)
-  }
+    info
+  })
   process.stdout.write(`${QIONGQI_READY_PREFIX}${JSON.stringify(startupInfo)}\n`)
   process.stdout.write(JSON.stringify(startupInfo, null, 2) + '\n')
   await new Promise<void>((resolve) => {

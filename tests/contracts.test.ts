@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -31,16 +31,18 @@ import {
   parseServeOptions,
   validateServeOptions,
   SERVE_USAGE,
-  ServeExitCode
+  defaultKWorksRuntimeDataDir
 } from '@qiongqi/cli'
 
 describe('contracts', () => {
   it('round-trips a thread creation payload through zod', () => {
     const parsed = CreateThreadRequest.parse({
+      id: 'kworks-thread-1',
       title: 'demo',
       workspace: '/tmp/ws',
       model: 'deepseek-chat'
     })
+    expect(parsed.id).toBe('kworks-thread-1')
     expect(parsed.title).toBe('demo')
     expect(parsed.mode).toBe('agent')
   })
@@ -119,6 +121,16 @@ describe('contracts', () => {
       reasoningEffort: 'max'
     })
     expect(parsed.reasoningEffort).toBe('max')
+  })
+
+  it('accepts per-turn approval and sandbox policy on start turn payloads', () => {
+    const parsed = StartTurnRequest.parse({
+      prompt: 'Run pwd',
+      approvalPolicy: 'on-request',
+      sandboxMode: 'danger-full-access'
+    })
+    expect(parsed.approvalPolicy).toBe('on-request')
+    expect(parsed.sandboxMode).toBe('danger-full-access')
   })
 
   it('accepts turn failure lifecycle messages', () => {
@@ -301,6 +313,7 @@ describe('cli', () => {
     expect(parsed.port).toBe(8787)
     expect(parsed.tokenEconomyMode).toBe(true)
     expect(parsed.tokenEconomy?.enabled).toBe(true)
+    expect(parsed.runtime?.modelStreamIdleTimeoutMs).toBe(120_000)
     expect(parsed.insecure).toBe(true)
   })
 
@@ -317,6 +330,81 @@ describe('cli', () => {
     expect(parsed.port).toBe(9090)
     expect(parsed.dataDir).toBe('/srv/ca')
     expect(parsed.storage.backend).toBe('file')
+  })
+
+  it('enables KWorks skill roots from KWorks_SKILLS_PATH without migrating data', () => {
+    const parsed = parseServeOptions([
+      '--api-key=test-key',
+      '--base-url=https://example.invalid/v1'
+    ], {
+      KWorks_SKILLS_PATH: '/Users/tester/.kworks-workspace/skills'
+    })
+
+    expect(parsed.capabilities.skills).toMatchObject({
+      enabled: true,
+      legacySkillMd: true,
+      roots: [
+        '/Users/tester/.kworks-workspace/skills/builtin/core',
+        '/Users/tester/.kworks-workspace/skills/builtin/task',
+        '/Users/tester/.kworks-workspace/skills/builtin/coding',
+        '/Users/tester/.kworks-workspace/skills/builtin/finance',
+        '/Users/tester/.kworks-workspace/skills/custom/shared'
+      ]
+    })
+  })
+
+  it('retains KWorks public skills when unified skill roots also exist', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kworks-skills-'))
+    try {
+      await mkdir(join(dir, 'builtin', 'core'), { recursive: true })
+      await mkdir(join(dir, 'public', 'deep-research'), { recursive: true })
+      await writeFile(join(dir, 'public', 'deep-research', 'SKILL.md'), '---\nname: deep-research\n---\n')
+
+      const parsed = parseServeOptions([
+        '--api-key=test-key',
+        '--base-url=https://example.invalid/v1'
+      ], {
+        KWorks_SKILLS_PATH: dir
+      })
+
+      expect(parsed.capabilities.skills.roots).toEqual([
+        join(dir, 'builtin', 'core'),
+        join(dir, 'builtin', 'task'),
+        join(dir, 'builtin', 'coding'),
+        join(dir, 'builtin', 'finance'),
+        join(dir, 'custom', 'shared'),
+        join(dir, 'public', 'deep-research')
+      ])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not duplicate KWorks public skills already migrated into unified roots', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kworks-skills-'))
+    try {
+      await mkdir(join(dir, 'builtin', 'task', 'deep-research'), { recursive: true })
+      await writeFile(join(dir, 'builtin', 'task', 'deep-research', 'SKILL.md'), '---\nname: deep-research\n---\n')
+      await mkdir(join(dir, 'public', 'deep-research'), { recursive: true })
+      await writeFile(join(dir, 'public', 'deep-research', 'SKILL.md'), '---\nname: deep-research\n---\n')
+
+      const parsed = parseServeOptions([
+        '--api-key=test-key',
+        '--base-url=https://example.invalid/v1'
+      ], {
+        KWorks_SKILLS_PATH: dir
+      })
+
+      expect(parsed.capabilities.skills.roots).toEqual([
+        join(dir, 'builtin', 'core'),
+        join(dir, 'builtin', 'task'),
+        join(dir, 'builtin', 'coding'),
+        join(dir, 'builtin', 'finance'),
+        join(dir, 'custom', 'shared')
+      ])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   it('loads serve and context compaction settings from an explicit config file', async () => {
@@ -493,7 +581,7 @@ describe('cli', () => {
     }
   })
 
-  it('normalizes capability config to disabled defaults', () => {
+  it('normalizes capability config while keeping attachments built in', () => {
     const config = QiongqiCapabilitiesConfig.parse({})
     expect(config.mcp.enabled).toBe(false)
     expect(config.mcp.search.enabled).toBe(false)
@@ -501,10 +589,16 @@ describe('cli', () => {
     expect(config.web.enabled).toBe(false)
     expect(config.skills.enabled).toBe(false)
     expect(config.subagents.maxParallel).toBe(0)
+    expect(config.attachments.enabled).toBe(true)
     expect(config.attachments.allowedMimeTypes).toContain('image/png')
+    expect(config.attachments.allowedMimeTypes).toContain('application/zip')
+    expect(config.attachments.allowedMimeTypes).toContain('application/pdf')
+    expect(QiongqiCapabilitiesConfig.parse({ attachments: { enabled: false } }).attachments.enabled).toBe(true)
     expect(config.attachments.textFallbackMaxBase64Bytes).toBe(512 * 1024)
     expect(config.attachments.textFallbackMaxImageDimension).toBe(1280)
     expect(config.attachments.textFallbackPreferredMimeType).toBe('image/webp')
+    expect(config.memory.enabled).toBe(true)
+    expect(QiongqiCapabilitiesConfig.parse({ memory: { enabled: false } }).memory.enabled).toBe(true)
     expect(config.memory.scopes).toEqual(['user', 'workspace', 'project'])
   })
 
@@ -549,6 +643,91 @@ describe('cli', () => {
     expect(model.inputModalities).toEqual(['text', 'image'])
     expect(model.supportsToolCalling).toBe(false)
     expect(model.messageParts).toEqual(['text', 'image_url'])
+  })
+
+  it('derives general model thresholds from context windows without manual profile tuning', () => {
+    const profiles = modelContextProfilesFromConfig({
+      models: {
+        profiles: {
+          'ordinary-128k': {
+            contextWindowTokens: 128_000
+          }
+        }
+      }
+    })
+    const profile = profiles.find((candidate) => candidate.canonicalModel === 'ordinary-128k')
+
+    expect(profile?.softThreshold).toBe(102_400)
+    expect(profile?.hardThreshold).toBe(115_200)
+  })
+
+  it('keeps custom profiles usable when ordinary users leave advanced context fields blank', () => {
+    const profiles = modelContextProfilesFromConfig({
+      models: {
+        profiles: {
+          'custom-provider-model': {}
+        }
+      }
+    })
+    const profile = profiles.find((candidate) => candidate.canonicalModel === 'custom-provider-model')
+
+    expect(profile?.contextWindowTokens).toBe(24_000)
+    expect(profile?.softThreshold).toBe(16_000)
+    expect(profile?.hardThreshold).toBe(24_000)
+    expect(modelCapabilitiesForModel('custom-provider-model', profiles)).toMatchObject({
+      inputModalities: ['text'],
+      messageParts: ['text']
+    })
+  })
+
+  it('infers known model context windows when advanced fields are left blank', () => {
+    const profiles = modelContextProfilesFromConfig({
+      models: {
+        profiles: {
+          'gpt-4o': {}
+        }
+      }
+    })
+    const profile = profiles.find((candidate) => candidate.canonicalModel === 'gpt-4o')
+
+    expect(profile?.contextWindowTokens).toBe(128_000)
+    expect(profile?.softThreshold).toBe(102_400)
+    expect(profile?.hardThreshold).toBe(115_200)
+    expect(modelCapabilitiesForModel('gpt-4o', profiles)).toMatchObject({
+      inputModalities: ['text', 'image'],
+      messageParts: ['text', 'image_url']
+    })
+  })
+
+  it('infers multimodal capability defaults for known vision model ids', () => {
+    const profiles = modelContextProfilesFromConfig({
+      models: {
+        profiles: {
+          'gpt-4o': {
+            contextWindowTokens: 128_000
+          },
+          'claude-3-5-sonnet': {
+            contextWindowTokens: 200_000
+          },
+          'plain-coding-model': {
+            contextWindowTokens: 64_000
+          }
+        }
+      }
+    })
+
+    expect(modelCapabilitiesForModel('gpt-4o', profiles)).toMatchObject({
+      inputModalities: ['text', 'image'],
+      messageParts: ['text', 'image_url']
+    })
+    expect(modelCapabilitiesForModel('claude-3-5-sonnet', profiles)).toMatchObject({
+      inputModalities: ['text', 'image'],
+      messageParts: ['text', 'image_url']
+    })
+    expect(modelCapabilitiesForModel('plain-coding-model', profiles)).toMatchObject({
+      inputModalities: ['text'],
+      messageParts: ['text']
+    })
   })
 
   it('keeps legacy contextCompaction model profiles as a compatibility path', () => {
@@ -641,16 +820,18 @@ describe('cli', () => {
     }
   })
 
-  it('returns a structured error when data-dir is missing', () => {
+  it('defaults serve data-dir to the KWorks per-user web workspace', () => {
     const result = parseServeOptionsSafe([
       '--host',
       '127.0.0.1',
-      '--port',
-      '8899'
-    ])
-    expect(result.ok).toBe(false)
-    if (!result.ok) {
-      expect(result.exitCode).toBe(ServeExitCode.config)
+      '--port=8899',
+      '--api-key=test-key',
+      '--base-url=https://example.invalid/v1'
+    ], { HOME: '/Users/tester' })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.options.dataDir).toBe('/Users/tester/.kworks-workspace-web/users/runtime')
+      expect(result.options.dataDir).toBe(defaultKWorksRuntimeDataDir({ HOME: '/Users/tester' }))
     }
   })
 

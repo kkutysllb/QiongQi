@@ -21,8 +21,8 @@ import type { UserInputGate, UserInputResolution } from '@qiongqi/ports'
 import type { RuntimeEventRecorder } from '@qiongqi/services'
 import type { TurnService } from '@qiongqi/services'
 import type { IdGenerator } from '@qiongqi/ports'
-import type { ModelCapabilityMetadata } from '@qiongqi/contracts'
-import type { TurnItem } from '@qiongqi/contracts'
+import type { ModelCapabilityMetadata, RunIdentity, RunStateV3, ToolEffectPolicy, TurnItem } from '@qiongqi/contracts'
+import { join } from 'node:path'
 import {
   makeToolResultItem,
   makeUserInputItem
@@ -35,6 +35,11 @@ import {
   PARALLEL_READ_ONLY_TOOL_NAMES,
   MAX_PARALLEL_TOOL_CALLS
 } from './loop-helpers.js'
+import type { ToolRuntimeV3 } from './tool-runtime-v3.js'
+
+const TOOL_OUTPUT_MAX_INLINE_BYTES = 64 * 1024
+const TOOL_OUTPUT_PREVIEW_HEAD_BYTES = 4 * 1024
+const TOOL_OUTPUT_PREVIEW_TAIL_BYTES = 4 * 1024
 
 export type ToolCallCoordinatorDeps = {
   toolHost: ToolHost
@@ -46,6 +51,7 @@ export type ToolCallCoordinatorDeps = {
   ids: IdGenerator
   nowIso: () => string
   memoryStoreEnabled: boolean
+  runtimeDataDir?: string
   toolStorm?: ToolStormBreakerOptions & { enabled?: boolean }
   onPlanWritten?: (input: {
     threadId: string
@@ -54,10 +60,12 @@ export type ToolCallCoordinatorDeps = {
     relativePath: string
     markdown: string
   }) => Promise<void>
+  toolRuntime?: ToolRuntimeV3
 }
 
 export class ToolCallCoordinator {
   private readonly toolStormBreakers = new Map<string, ToolStormBreaker>()
+  private readonly runtimeStates = new Map<string, RunStateV3>()
 
   constructor(private readonly deps: ToolCallCoordinatorDeps) {}
 
@@ -69,6 +77,7 @@ export class ToolCallCoordinator {
 
   cleanupTurn(turnId: string): void {
     this.toolStormBreakers.delete(turnId)
+    this.runtimeStates.delete(turnId)
   }
 
   async dispatch(input: {
@@ -76,6 +85,7 @@ export class ToolCallCoordinator {
     threadId: string
     turnId: string
     workspace: string
+    ownerUserId?: string
     threadMode?: 'agent' | 'plan'
     activePlanContext?: GuiPlanContext
     modelCapabilities: ModelCapabilityMetadata
@@ -85,7 +95,14 @@ export class ToolCallCoordinator {
     approvalPolicy: ToolHostContext['approvalPolicy']
     signal: AbortSignal
   }): Promise<'continue' | 'aborted'> {
-    const context = this.createToolContext(input)
+    const runtimeIdentity = this.deps.toolRuntime ? makeRuntimeIdentity(input) : undefined
+    const runtimeState = runtimeIdentity ? this.runtimeStates.get(input.turnId) ?? makeRuntimeState(runtimeIdentity) : undefined
+    if (runtimeState) this.runtimeStates.set(input.turnId, runtimeState)
+    const context = this.createToolContext({
+      ...input,
+      ...(runtimeIdentity ? { runtimeIdentity } : {}),
+      ...(runtimeState ? { runtimeState, runtimeStateSink: (next: RunStateV3) => this.runtimeStates.set(input.turnId, next) } : {})
+    })
     let index = 0
 
     while (index < input.calls.length) {
@@ -184,6 +201,7 @@ export class ToolCallCoordinator {
     threadId: string
     turnId: string
     workspace: string
+    ownerUserId?: string
     threadMode?: 'agent' | 'plan'
     activePlanContext?: GuiPlanContext
     modelCapabilities: ModelCapabilityMetadata
@@ -191,17 +209,31 @@ export class ToolCallCoordinator {
     allowedToolNames?: readonly string[]
     approvalPolicy: ToolHostContext['approvalPolicy']
     signal: AbortSignal
+    runtimeIdentity?: RunIdentity
+    runtimeState?: RunStateV3
+    runtimeStateSink?: (state: RunStateV3) => void
   }): ToolHostContext {
     return {
       threadId: input.threadId,
       turnId: input.turnId,
       workspace: input.workspace,
+      ...(input.ownerUserId ? { ownerUserId: input.ownerUserId } : {}),
       threadMode: input.threadMode,
       ...(input.activePlanContext ? { guiPlan: input.activePlanContext } : {}),
       model: input.modelCapabilities,
       activeSkillIds: input.activeSkillIds,
       memoryPolicy: { enabled: this.deps.memoryStoreEnabled },
       delegationPolicy: { enabled: false },
+      ...(this.deps.runtimeDataDir
+        ? {
+            outputBudget: {
+              outputDir: join(this.deps.runtimeDataDir, 'threads', input.threadId, 'tool-output'),
+              maxInlineBytes: TOOL_OUTPUT_MAX_INLINE_BYTES,
+              previewHeadBytes: TOOL_OUTPUT_PREVIEW_HEAD_BYTES,
+              previewTailBytes: TOOL_OUTPUT_PREVIEW_TAIL_BYTES
+            }
+          }
+        : {}),
       ...(input.allowedToolNames ? { allowedToolNames: input.allowedToolNames } : {}),
       approvalPolicy: input.approvalPolicy,
       abortSignal: input.signal,
@@ -219,6 +251,9 @@ export class ToolCallCoordinator {
       },
       awaitUserInput: (inputRequest) =>
         this.awaitUserInput(input.threadId, input.turnId, inputRequest, input.signal)
+      ,...(input.runtimeIdentity ? { runtimeIdentity: input.runtimeIdentity } : {})
+      ,...(input.runtimeState ? { runtimeState: input.runtimeState } : {})
+      ,...(input.runtimeStateSink ? { runtimeStateSink: input.runtimeStateSink } : {})
     }
   }
 
@@ -238,6 +273,18 @@ export class ToolCallCoordinator {
       },
       async () => {
         try {
+          if (this.deps.toolRuntime && input.context.runtimeIdentity && input.context.runtimeState) {
+            const execution = await this.deps.toolRuntime.execute({
+              identity: input.context.runtimeIdentity,
+              state: input.context.runtimeState,
+              call: input.call,
+              context: input.context,
+              policy: input.call.effectPolicy ?? defaultEffectPolicy(input.call)
+            })
+            input.context.runtimeStateSink?.(execution.state)
+            if (execution.outcome) throw new Error(`tool runtime suspended: ${execution.outcome.reason}`)
+            if (execution.result) return execution.result
+          }
           return await this.deps.toolHost.execute(input.call, input.context, async (item) => {
             const existing = await this.deps.turns.updateItem(input.threadId, item.id, {
               output: item.kind === 'tool_result' ? item.output : undefined,
@@ -475,4 +522,18 @@ export class ToolCallCoordinator {
     this.deps.userInputGate.resolve(input.id, { status: 'cancelled' })
     throw new Error('cancelled while awaiting user input')
   }
+}
+
+function defaultEffectPolicy(call: ToolCallLike): ToolEffectPolicy {
+  if (call.toolKind === 'file_change') return { effect: 'non-idempotent-write', replay: 'never' }
+  return { effect: 'read', replay: 'safe' }
+}
+
+function makeRuntimeIdentity(input: { ownerUserId?: string; workspace: string; threadId: string; turnId: string }): RunIdentity {
+  return { ownerUserId: input.ownerUserId ?? 'local-default-owner', workspaceKey: input.workspace || 'local-default-workspace', threadId: input.threadId, turnId: input.turnId, runId: `run_${input.threadId}_${input.turnId}` }
+}
+
+function makeRuntimeState(identity: RunIdentity): RunStateV3 {
+  const now = new Date().toISOString()
+  return { version: 3, graphVersion: 'kernel-v3-tool-runtime', runtimeMode: 'kernel_v3', ...identity, status: 'running', cursor: { stepIndex: 0, nodeId: 'tool', attempt: 0, checkpointSeq: 0 }, budgets: { stepsUsed: 0, toolCallsUsed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }, recovery: { attempts: 0, maxAttempts: 1 }, middleware: {}, pendingEffects: [], committedEffects: [], createdAt: now, updatedAt: now }
 }

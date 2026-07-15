@@ -92,10 +92,12 @@ export type ThreadTodoList = z.infer<typeof ThreadTodoListSchema>
 
 export const ThreadSchema = z.object({
   id: z.string().min(1),
+  ownerUserId: z.string().min(1).optional(),
   title: z.string(),
   workspace: z.string(),
   model: z.string(),
   mode: ThreadMode,
+  workModeId: z.string().min(1).default('office'),
   status: ThreadStatus,
   approvalPolicy: ApprovalPolicySchema.default(DEFAULT_APPROVAL_POLICY),
   sandboxMode: SandboxModeSchema.default(DEFAULT_SANDBOX_MODE),
@@ -118,10 +120,12 @@ export type ThreadRecord = z.infer<typeof ThreadSchema>
 
 export const ThreadSummarySchema = ThreadSchema.pick({
   id: true,
+  ownerUserId: true,
   title: true,
   workspace: true,
   model: true,
   mode: true,
+  workModeId: true,
   status: true,
   costBudgetUsd: true,
   costBudgetWarningSent: true,
@@ -140,10 +144,12 @@ export const ThreadSummarySchema = ThreadSchema.pick({
 export type ThreadSummary = z.infer<typeof ThreadSummarySchema>
 
 export const CreateThreadRequest = z.object({
+  id: z.string().min(1).optional(),
   title: z.string().optional(),
-  workspace: z.string().min(1),
-  model: z.string().min(1),
+  workspace: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
   mode: ThreadMode.default('agent'),
+  workModeId: z.string().min(1).optional(),
   approvalPolicy: ApprovalPolicySchema.optional(),
   sandboxMode: SandboxModeSchema.optional(),
   costBudgetUsd: z.number().positive().optional()
@@ -228,6 +234,7 @@ export const UpdateThreadRequest = z
     status: ThreadStatus.optional(),
     approvalPolicy: ApprovalPolicySchema.optional(),
     sandboxMode: SandboxModeSchema.optional(),
+    workModeId: z.string().min(1).optional(),
     costBudgetUsd: z.number().positive().nullable().optional(),
     costBudgetWarningSent: z.boolean().optional(),
     relation: ThreadRelation.optional()
@@ -239,6 +246,7 @@ export const UpdateThreadRequest = z
       value.status !== undefined ||
       value.approvalPolicy !== undefined ||
       value.sandboxMode !== undefined ||
+      value.workModeId !== undefined ||
       value.costBudgetUsd !== undefined ||
       value.costBudgetWarningSent !== undefined ||
       value.relation !== undefined,

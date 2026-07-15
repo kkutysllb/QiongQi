@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import {
   ApprovalPolicySchema,
   DEFAULT_APPROVAL_POLICY,
@@ -11,6 +13,7 @@ import {
   DEFAULT_STORAGE_CONFIG,
   ModelConfigSchema,
   ObservabilityConfigSchema,
+  type RuntimeTuningConfig,
   RuntimeTuningConfigSchema,
   StorageConfigSchema,
   TokenEconomyConfigSchema
@@ -27,6 +30,9 @@ import {
 
 export const DEFAULT_SERVE_PORT = 8899
 export const DEFAULT_SERVE_MODEL = DEFAULT_QIONGQI_MODEL
+export const DEFAULT_SERVE_RUNTIME_TUNING: RuntimeTuningConfig = {
+  modelStreamIdleTimeoutMs: 120_000
+}
 
 /**
  * Built-in agent presets available via `--preset`.
@@ -62,8 +68,8 @@ export const ServeOptionsSchema = z.object({
   port: z.number().int().min(0).max(65_535).default(DEFAULT_SERVE_PORT),
   dataDir: z.string().min(1),
   runtimeToken: z.string().default(''),
-  /** Provider API key (e.g. DeepSeek, OpenAI, vLLM). Required. */
-  apiKey: z.string().min(1),
+  /** Provider API key (e.g. DeepSeek, OpenAI, vLLM). Empty is allowed so the desktop can boot before model setup. */
+  apiKey: z.string().default(''),
   /** Provider base URL (OpenAI-compatible endpoint). Required. */
   baseUrl: z.string().min(1),
   endpointFormat: z.preprocess(normalizeModelEndpointFormat, z.enum(MODEL_ENDPOINT_FORMATS)).default(DEFAULT_MODEL_ENDPOINT_FORMAT),
@@ -76,7 +82,7 @@ export const ServeOptionsSchema = z.object({
   storage: StorageConfigSchema.default(DEFAULT_STORAGE_CONFIG),
   models: ModelConfigSchema.optional(),
   contextCompaction: ContextCompactionConfigSchema.optional(),
-  runtime: RuntimeTuningConfigSchema.optional(),
+  runtime: RuntimeTuningConfigSchema.default(DEFAULT_SERVE_RUNTIME_TUNING),
   observability: ObservabilityConfigSchema.optional(),
   capabilities: QiongqiCapabilitiesConfig.default(DEFAULT_QIONGQI_CAPABILITIES_CONFIG),
   /**
@@ -105,6 +111,30 @@ export const DEFAULT_SERVE_OPTIONS: Omit<ServeOptions, 'baseUrl' | 'apiKey'> = {
   tokenEconomyMode: false,
   insecure: false,
   storage: DEFAULT_STORAGE_CONFIG,
+  runtime: DEFAULT_SERVE_RUNTIME_TUNING,
   capabilities: DEFAULT_QIONGQI_CAPABILITIES_CONFIG,
   preset: 'coding'
+}
+
+export type KWorksRuntimeTarget = 'desktop' | 'web'
+
+export function defaultKWorksWorkspaceRoot(
+  env: Record<string, string | undefined> = process.env,
+  target: KWorksRuntimeTarget = env.KWORKS_RUNTIME_TARGET === 'desktop' ? 'desktop' : 'web'
+): string {
+  if (env.KWORKS_WORKSPACE_DIR?.trim()) return env.KWORKS_WORKSPACE_DIR.trim()
+  return join(env.HOME || env.USERPROFILE || homedir(), target === 'desktop' ? '.kworks-workspace' : '.kworks-workspace-web')
+}
+
+export function defaultKWorksRuntimeDataDir(
+  env: Record<string, string | undefined> = process.env,
+  target: KWorksRuntimeTarget = env.KWORKS_RUNTIME_TARGET === 'desktop' ? 'desktop' : 'web',
+  userId = 'runtime'
+): string {
+  return join(defaultKWorksWorkspaceRoot(env, target), 'users', sanitizeKWorksUserId(userId))
+}
+
+function sanitizeKWorksUserId(userId: string): string {
+  const cleaned = userId.trim().replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+$/, '_')
+  return cleaned || 'default'
 }

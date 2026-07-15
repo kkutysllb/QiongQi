@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { TurnItem } from './items.js'
 import { isGuiPlanRelativePath } from './gui-plan.js'
-import { ApprovalPolicySchema } from './policy.js'
+import { ApprovalPolicySchema, SandboxModeSchema } from './policy.js'
 
 /**
  * Mode enum, inlined here (instead of importing `ThreadMode` from
@@ -64,6 +64,7 @@ export const TurnSchema = z.object({
   finishedAt: z.string().optional(),
   items: z.array(TurnItem).default([]),
   attachmentIds: z.array(z.string().min(1)).default([]),
+  workModeId: z.string().min(1).optional(),
   activeSkillIds: z.array(z.string().min(1)).default([]),
   injectedMemoryIds: z.array(z.string().min(1)).default([]),
   skillInjectionBytes: z.number().int().nonnegative().optional(),
@@ -87,6 +88,8 @@ export const StartTurnRequest = z.object({
   model: z.string().optional(),
   reasoningEffort: TurnReasoningEffortSchema.optional(),
   approvalPolicy: ApprovalPolicySchema.optional(),
+  sandboxMode: SandboxModeSchema.optional(),
+  workModeId: z.string().min(1).optional(),
   /**
    * Optional per-turn mode. Overrides the thread mode for this turn so
    * the GUI can toggle Plan/agent without recreating the thread. In Plan

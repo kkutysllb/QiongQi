@@ -1,5 +1,4 @@
-import type { CapabilityToolProvider } from '@qiongqi/adapter-tools'
-import type { LocalTool } from '@qiongqi/adapter-tools'
+import type { CapabilityToolProvider, LocalTool } from '@qiongqi/adapter-tools'
 import type { ToolHostContext } from '@qiongqi/ports'
 import type { LoadedSkillPlugin } from './plugin-host.js'
 

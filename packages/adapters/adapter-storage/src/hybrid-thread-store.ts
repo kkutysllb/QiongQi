@@ -32,6 +32,7 @@ type ThreadRow = {
   workspace: string
   model: string
   mode: ThreadMode
+  work_mode_id: string
   status: ThreadStatus
   approval_policy: ApprovalPolicy
   sandbox_mode: SandboxMode
@@ -229,6 +230,7 @@ export class HybridThreadStore implements ThreadStore {
         workspace TEXT NOT NULL,
         model TEXT NOT NULL,
         mode TEXT NOT NULL,
+        work_mode_id TEXT NOT NULL DEFAULT 'office',
         status TEXT NOT NULL,
         approval_policy TEXT NOT NULL,
         sandbox_mode TEXT NOT NULL,
@@ -264,6 +266,7 @@ export class HybridThreadStore implements ThreadStore {
       CREATE INDEX IF NOT EXISTS threads_relation_updated_idx
         ON threads(relation, updated_at_ms DESC, id DESC);
     `)
+    addColumnIfMissing(this.db, 'threads', "work_mode_id TEXT NOT NULL DEFAULT 'office'")
     addColumnIfMissing(this.db, 'threads', 'todos_json TEXT')
   }
 
@@ -342,7 +345,7 @@ export class HybridThreadStore implements ThreadStore {
       this.db
         .prepare(`
           INSERT INTO threads (
-            id, title, workspace, model, mode, status, approval_policy, sandbox_mode,
+            id, title, workspace, model, mode, work_mode_id, status, approval_policy, sandbox_mode,
             cost_budget_usd, cost_budget_warning_sent, relation, parent_thread_id,
             forked_from_thread_id, forked_from_title, forked_at, forked_from_message_count,
             forked_from_turn_count, goal_json, todos_json, created_at, updated_at, created_at_ms,
@@ -350,7 +353,7 @@ export class HybridThreadStore implements ThreadStore {
             messages_path, events_path, search_text
           )
           VALUES (
-            @id, @title, @workspace, @model, @mode, @status, @approval_policy, @sandbox_mode,
+            @id, @title, @workspace, @model, @mode, @work_mode_id, @status, @approval_policy, @sandbox_mode,
             @cost_budget_usd, @cost_budget_warning_sent, @relation, @parent_thread_id,
             @forked_from_thread_id, @forked_from_title, @forked_at, @forked_from_message_count,
             @forked_from_turn_count, @goal_json, @todos_json, @created_at, @updated_at, @created_at_ms,
@@ -362,6 +365,7 @@ export class HybridThreadStore implements ThreadStore {
             workspace = excluded.workspace,
             model = excluded.model,
             mode = excluded.mode,
+            work_mode_id = excluded.work_mode_id,
             status = excluded.status,
             approval_policy = excluded.approval_policy,
             sandbox_mode = excluded.sandbox_mode,
@@ -719,6 +723,7 @@ function rowFromIndexRecord(
     workspace: thread.workspace,
     model: thread.model,
     mode: thread.mode,
+    work_mode_id: thread.workModeId,
     status: thread.status,
     approval_policy: thread.approvalPolicy,
     sandbox_mode: thread.sandboxMode,
@@ -760,6 +765,7 @@ function summaryFromRow(row: ThreadRow): ThreadSummary {
     workspace: row.workspace,
     model: row.model,
     mode: row.mode,
+    workModeId: row.work_mode_id === 'task' ? 'office' : (row.work_mode_id || 'office'),
     status: row.status,
     ...(row.cost_budget_usd !== null ? { costBudgetUsd: row.cost_budget_usd } : {}),
     ...(row.cost_budget_warning_sent !== null ? { costBudgetWarningSent: Boolean(row.cost_budget_warning_sent) } : {}),

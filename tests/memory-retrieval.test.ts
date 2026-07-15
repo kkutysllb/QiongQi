@@ -61,7 +61,7 @@ describe('memory retrieval ranking', () => {
 
   it('shares project memory across threads only within the same owner and workspace', () => {
     const ranked = rankMemoryRecords({
-      query: 'project build', workspace: '/tmp/current', threadId: 'thread-2', ownerUserId: 'owner-a',
+      query: 'project build', workspace: '/tmp/current', ownerUserId: 'owner-a',
       records: [
         memory('mem_project_same_owner', 'project build convention', { ownerUserId: 'owner-a', scope: 'project', workspace: '/tmp/current', sourceThreadId: 'thread-1' }),
         memory('mem_project_other_owner', 'project build convention', { ownerUserId: 'owner-b', scope: 'project', workspace: '/tmp/current', sourceThreadId: 'thread-1' })

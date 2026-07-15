@@ -263,9 +263,6 @@ importers:
 
   packages/engine/services:
     dependencies:
-      '@qiongqi/adapter-tools':
-        specifier: workspace:*
-        version: link:../../adapters/adapter-tools
       '@qiongqi/cache':
         specifier: workspace:*
         version: link:../../infrastructure/cache
@@ -364,10 +361,16 @@ importers:
       '@qiongqi/skills':
         specifier: workspace:*
         version: link:../../capabilities/skills
+      better-sqlite3:
+        specifier: ^12.10.0
+        version: 12.11.1
       zod:
         specifier: ^4.4.3
         version: 4.4.3
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
       '@types/node':
         specifier: ^26.0.0
         version: 26.0.0

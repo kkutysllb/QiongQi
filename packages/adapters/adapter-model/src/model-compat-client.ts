@@ -3,8 +3,15 @@ import type { TurnItem } from '@qiongqi/contracts'
 import { emptyUsageSnapshot, type UsageSnapshot } from '@qiongqi/contracts'
 import { isToolResultBridgeItem, repairModelHistoryItems } from '@qiongqi/domain'
 import { repairToolArguments } from './tool-argument-repair.js'
+import { sanitizeModelText } from './special-tokens.js'
+import { InlineReasoningExtractor } from './inline-reasoning-extractor.js'
 import { isDeepSeekHost, probeDeepSeekReachable } from './model-error-probe.js'
-import { compatibilityProfileForModel } from './provider-compatibility.js'
+import {
+  compatibilityProfileForModel,
+  isBigModelProvider,
+  isGlmCodingPlanModel,
+  isThinkingProducerModel
+} from './provider-compatibility.js'
 import {
   DEFAULT_MODEL_ENDPOINT_FORMAT,
   modelEndpointPath,
@@ -66,6 +73,7 @@ type ChatMessage = {
   name?: string
   tool_call_id?: string
   reasoning_content?: string
+  reasoning_signature?: string
   tool_calls?: {
     id: string
     type: 'function'
@@ -76,9 +84,12 @@ type ChatMessage = {
 type ChatMessageContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'thinking'; thinking: string; signature?: string }
 
 type AnthropicContentBlock =
   | { type: 'text'; text: string }
+  | { type: 'thinking'; thinking: string; signature?: string }
+  | { type: 'redacted_thinking'; data: string }
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } | { type: 'url'; url: string } }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string }
@@ -153,8 +164,9 @@ type StreamReadResult =
   | { kind: 'aborted' }
   | { kind: 'error'; message: string }
 
-const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 45_000
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000
 const DEFAULT_MESSAGES_MAX_TOKENS = 4096
+const REDACTED_THINKING_SIGNATURE_PREFIX = 'redacted:'
 const STRICT_PROVIDER_EMPTY_CONTENT_PLACEHOLDER = '\u200b'
 const ACTIVE_TASK_CONTINUATION_MESSAGE = [
   'Continue the active task from the conversation summary and recent context above.',
@@ -203,41 +215,64 @@ export class ModelCompatClient implements ModelClient {
       return
     }
     const endpointFormat = this.endpointFormat()
-    const url = buildModelEndpointUrl(this.config.baseUrl, endpointFormat)
     const stream = request.stream ?? !this.config.nonStreaming
     const body = this.buildRequestBody(request, stream)
+    const requestModel = typeof body.model === 'string' ? body.model : request.model?.trim() || this.config.model
+    const url = buildModelEndpointUrl(this.config.baseUrl, endpointFormat, requestModel)
     const headers = this.buildHeaders(stream, endpointFormat)
-    const result = await this.postChatCompletion(url, headers, body, request.abortSignal)
+    const result = await this.postChatCompletion(url, headers, body, request.abortSignal, endpointFormat)
     if (result.kind === 'error') {
       yield { kind: 'error', message: result.message }
       return
     }
     let response = result.response
     if (!response.ok) {
-      const text = await response.text()
-      if (endpointFormat === 'chat_completions' && shouldRetryWithoutStreamUsage(response.status, text, body)) {
-        const retryBody = this.buildRequestBody(request, stream, { includeStreamUsage: false })
-        const retry = await this.postChatCompletion(url, headers, retryBody, request.abortSignal)
-        if (retry.kind === 'error') {
-          yield { kind: 'error', message: retry.message }
-          return
-        }
-        response = retry.response
-        if (response.ok) {
-          if (this.config.nonStreaming || response.headers.get('content-type')?.includes('application/json')) {
-            const json = (await response.json()) as ChatCompletionResponse
-            yield* this.materializeNonStreaming(json, endpointFormat)
+      let retryBody = body
+      let stripStreamUsage = false
+      let stripReasoning = false
+      let finalErrorText = ''
+      // Retry on 400/422 for both chat_completions and messages (Anthropic)
+      // formats. The messages path was previously excluded, so GLM/MiniMax
+      // on the Anthropic-compatible endpoint got zero retry on 400/1214.
+      while (endpointFormat === 'chat_completions' || endpointFormat === 'messages') {
+        let text: string
+        if (stripStreamUsage || stripReasoning) {
+          const retry = await this.postChatCompletion(url, headers, retryBody, request.abortSignal, endpointFormat)
+          if (retry.kind === 'error') {
+            yield { kind: 'error', message: retry.message }
             return
           }
-          if (!response.body) {
-            yield { kind: 'error', message: 'model response had no body' }
-            return
-          }
-          yield* this.streamSse(response.body, request.abortSignal, endpointFormat)
-          return
+          response = retry.response
+          if (response.ok) break
+          text = await response.text()
+        } else {
+          text = await response.text()
         }
-        const retryText = await response.text()
-        const retryClassified = await this.classifyHttpError(response.status, retryText)
+        finalErrorText = text
+        if (
+          !stripStreamUsage &&
+          shouldRetryWithoutStreamUsage(response.status, text, retryBody)
+        ) {
+          stripStreamUsage = true
+          retryBody = this.buildRequestBody(request, stream, {
+            includeStreamUsage: false,
+            ...(stripReasoning ? { includeReasoning: false } : {})
+          })
+          continue
+        }
+        if (
+          !stripReasoning &&
+          shouldRetryWithoutReasoningFields(response.status, text, retryBody)
+        ) {
+          stripReasoning = true
+          retryBody = this.buildRequestBody(request, stream, {
+            ...(stripStreamUsage ? { includeStreamUsage: false } : {}),
+            includeReasoning: false
+          })
+          continue
+        }
+        const retryClassified = await this.classifyHttpError(response.status, text)
+        diagnoseRejectedRequest(url, retryBody, response.status, text)
         yield {
           kind: 'error',
           message: retryClassified.message,
@@ -245,13 +280,19 @@ export class ModelCompatClient implements ModelClient {
         }
         return
       }
-      const classified = await this.classifyHttpError(response.status, text)
-      yield {
-        kind: 'error',
-        message: classified.message,
-        code: classified.code
+      if (!response.ok) {
+        if (!finalErrorText) {
+          finalErrorText = await response.text()
+        }
+        diagnoseRejectedRequest(url, retryBody, response.status, finalErrorText)
+        const classified = await this.classifyHttpError(response.status, finalErrorText)
+        yield {
+          kind: 'error',
+          message: classified.message,
+          code: classified.code
+        }
+        return
       }
-      return
     }
     if (this.config.nonStreaming || response.headers.get('content-type')?.includes('application/json')) {
       const json = (await response.json()) as ChatCompletionResponse
@@ -273,7 +314,8 @@ export class ModelCompatClient implements ModelClient {
     url: string,
     headers: Record<string, string>,
     body: Record<string, unknown>,
-    signal: AbortSignal
+    signal: AbortSignal,
+    endpointFormat: ModelEndpointFormat
   ): Promise<{ kind: 'response'; response: Response } | { kind: 'error'; message: string }> {
     try {
       const response = await this.fetchImpl(url, {
@@ -285,7 +327,10 @@ export class ModelCompatClient implements ModelClient {
       return { kind: 'response', response }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      return { kind: 'error', message: `model request failed: ${message}` }
+      return {
+        kind: 'error',
+        message: `model request failed for ${sanitizeEndpointUrl(url)} (endpointFormat=${endpointFormat}): ${message}`
+      }
     }
   }
 
@@ -333,12 +378,13 @@ export class ModelCompatClient implements ModelClient {
   private buildRequestBody(
     request: ModelRequest,
     stream: boolean,
-    options: { includeStreamUsage?: boolean } = {}
+    options: { includeStreamUsage?: boolean; includeReasoning?: boolean } = {}
   ): Record<string, unknown> {
     const requestModel = request.model?.trim()
     const model = requestModel || this.config.model
     const endpointFormat = this.endpointFormat()
-    const messages = this.collectMessages(request, model, endpointFormat)
+    const includeReasoning = options.includeReasoning !== false
+    const messages = this.collectMessages(request, model, endpointFormat, { includeReasoning })
     const compatibility = compatibilityProfileForModel({
       baseUrl: this.config.baseUrl,
       model,
@@ -355,8 +401,16 @@ export class ModelCompatClient implements ModelClient {
       stream,
       messages
     }
+    // Final defense: ensure no message reaches the wire with empty content.
+    // Strict providers (MiniMax error 2013 "chat content is empty") reject
+    // null/empty/whitespace/empty-array content. sanitizeEmptyMessageContent
+    // already ran in collectMessages, but we re-run here as a belt-and-braces
+    // guard against any transformation between collect and build.
     const finalMessages = sanitizeEmptyMessageContent(messages, this.config.baseUrl, model)
     body.messages = finalMessages
+    // Diagnostic: surface any message that STILL looks empty after sanitization
+    // (should never happen, but if it does we want to know the exact shape).
+    diagnoseEmptyContent(finalMessages, this.config.baseUrl)
     if (request.maxTokens !== undefined) {
       body.max_tokens = request.maxTokens
     }
@@ -372,15 +426,12 @@ export class ModelCompatClient implements ModelClient {
     if (stream && options.includeStreamUsage !== false) {
       body.stream_options = { include_usage: true }
     }
-    const thinkingDialect = requestThinkingDialect(
-      compatibility.thinkingDialect,
-      request.reasoningEffort,
-      model
-    )
-    if (compatibility.supportsReasoningEffort) {
+    const thinkingDialect = requestThinkingDialect(compatibility.thinkingDialect)
+    if (includeReasoning && compatibility.supportsReasoningEffort) {
       applyReasoningEffort(body, request.reasoningEffort, { thinkingDialect })
     }
     if (
+      includeReasoning &&
       compatibility.requestFlags.deepseekThinking &&
       !Object.prototype.hasOwnProperty.call(body, 'thinking') &&
       isThinkingProducerModel(model)
@@ -388,6 +439,10 @@ export class ModelCompatClient implements ModelClient {
       body.thinking = { type: 'enabled' }
     }
     if (compatibility.requestFlags.reasoningSplit) {
+      // MiniMax M3's official OpenAI-compatible API documents
+      // `reasoning_split: true` as the way to split reasoning from visible
+      // content. Without it, compatible gateways can leak model-native
+      // reasoning/tool-call protocol text into `delta.content`.
       body.reasoning_split = true
     }
     const tools = normalizeToolSpecs(request.tools)
@@ -450,7 +505,9 @@ export class ModelCompatClient implements ModelClient {
     messages: ChatMessage[],
     stream: boolean
   ): Record<string, unknown> {
-    const converted = messagesToAnthropic(messages)
+    const converted = messagesToAnthropic(messages, {
+      includeBlankThinkingPlaceholders: isDeepSeekHost(this.config.baseUrl)
+    })
     const body: Record<string, unknown> = {
       model,
       stream,
@@ -483,7 +540,8 @@ export class ModelCompatClient implements ModelClient {
   private collectMessages(
     request: ModelRequest,
     model: string,
-    endpointFormat: ModelEndpointFormat
+    endpointFormat: ModelEndpointFormat,
+    options: { includeReasoning?: boolean } = {}
   ): ChatMessage[] {
     const out: ChatMessage[] = []
     const compatibility = compatibilityProfileForModel({
@@ -504,11 +562,19 @@ export class ModelCompatClient implements ModelClient {
     const history = windowSize
       ? limitHistoryPreservingCompaction(request.history, windowSize)
       : request.history
-    const thinkingMode = !compatibility.foldToolHistory &&
-      requiresReasoningRoundTrip(request.reasoningEffort, model, this.config.baseUrl)
+    const repairedItems = repairModelHistoryItems([...request.prefix, ...history])
+    const includeReasoning = options.includeReasoning !== false
+    const thinkingMode = includeReasoning && (
+      endpointFormat === 'messages'
+        ? supportsMessagesThinkingBlocks(this.config.baseUrl) &&
+          (isThinkingMode(request.reasoningEffort) || hasAssistantReasoning(repairedItems))
+        : !compatibility.foldToolHistory &&
+          requiresReasoningRoundTrip(request.reasoningEffort, model, this.config.baseUrl)
+    )
     out.push(...this.itemsToMessages(
-      repairModelHistoryItems([...request.prefix, ...history]),
-      thinkingMode
+      repairedItems,
+      thinkingMode,
+      { foldToolHistory: compatibility.foldToolHistory }
     ))
     if (request.attachments?.length) {
       attachImagesToLatestUserMessage(out, request.attachments)
@@ -517,16 +583,34 @@ export class ModelCompatClient implements ModelClient {
       attachTextFallbacksToLatestUserMessage(out, request.attachmentTextFallbacks)
     }
     const healed = normalizeThinkingAssistantMessages(healToolMessagePairs(out), thinkingMode)
+    // All endpoint formats can hit providers that reject empty content
+    // (MiniMax error 2013 "chat content is empty"). Previously this only ran
+    // for chat_completions, leaving the messages/responses paths unprotected.
+    // messagesToAnthropic silently drops empty-block messages, which breaks
+    // user/assistant alternation (Zhipu 1214). Sanitizing here ensures every
+    // path gets a non-empty content shape before provider-specific conversion.
     const sanitized = sanitizeEmptyMessageContent(healed, this.config.baseUrl, model)
-    const withUser = endpointFormat === 'messages'
-      ? sanitized
-      : ensureUserMessagePresent(sanitized)
+    // MiniMax (chat_completions/responses) rejects a request that contains
+    // only system messages ("chat content is empty"). After aggressive
+    // compaction the conversation can be folded into a single system summary
+    // with no user/assistant turn. Inject a minimal user message so the model
+    // has content to respond to. The Anthropic messages path manages its own
+    // system/messages split and tolerates an empty messages array, so skip it
+    // there to avoid altering that shape.
+    const withUser =
+      endpointFormat === 'messages'
+        ? sanitized
+        : ensureUserMessagePresent(sanitized)
     return compatibility.foldToolHistory
       ? normalizeGlmMessages(withUser)
       : withUser
   }
 
-  private itemsToMessages(items: TurnItem[], thinkingMode: boolean): ChatMessage[] {
+  private itemsToMessages(
+    items: TurnItem[],
+    thinkingMode: boolean,
+    options: { foldToolHistory?: boolean } = {}
+  ): ChatMessage[] {
     const out: ChatMessage[] = []
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index]
@@ -539,14 +623,15 @@ export class ModelCompatClient implements ModelClient {
           out.push({
             role: 'assistant',
             content: next.text,
-            reasoning_content: reasoningContentOrSpace(item.text)
+            reasoning_content: reasoningContentOrSpace(item.text),
+            ...(item.signature ? { reasoning_signature: item.signature } : {})
           })
           index += 1
         }
         continue
       }
       if (item?.kind === 'tool_call') {
-        const block = this.toolCallBlockToMessages(items, index, thinkingMode)
+        const block = this.toolCallBlockToMessages(items, index, thinkingMode, options)
         if (block) {
           out.push(...block.messages)
           index = block.nextIndex - 1
@@ -554,7 +639,7 @@ export class ModelCompatClient implements ModelClient {
         continue
       }
       if (item?.kind === 'tool_result') continue
-      const message = this.itemToMessage(item, thinkingMode)
+      const message = this.itemToMessage(item, thinkingMode, options)
       if (message) out.push(message)
     }
     return out
@@ -563,7 +648,8 @@ export class ModelCompatClient implements ModelClient {
   private toolCallBlockToMessages(
     items: TurnItem[],
     startIndex: number,
-    thinkingMode: boolean
+    thinkingMode: boolean,
+    options: { foldToolHistory?: boolean } = {}
   ): { messages: ChatMessage[]; nextIndex: number } | null {
     const calls: Extract<TurnItem, { kind: 'tool_call' }>[] = []
     let index = startIndex
@@ -577,6 +663,7 @@ export class ModelCompatClient implements ModelClient {
     const expectedCallIds = new Set(calls.map((call) => call.callId))
     const seenResultIds = new Set<string>()
     const resultMessages: ChatMessage[] = []
+    const resultItems: Extract<TurnItem, { kind: 'tool_result' }>[] = []
     const assistantText: string[] = []
     const reasoningText: string[] = []
     let bridgeIndex = startIndex - 1
@@ -598,6 +685,7 @@ export class ModelCompatClient implements ModelClient {
         sawResult = true
         if (expectedCallIds.has(item.callId) && !seenResultIds.has(item.callId)) {
           seenResultIds.add(item.callId)
+          resultItems.push(item)
           resultMessages.push(this.toolResultToMessage(item))
         }
         index += 1
@@ -620,12 +708,24 @@ export class ModelCompatClient implements ModelClient {
     if (![...expectedCallIds].every((callId) => seenResultIds.has(callId))) {
       return null
     }
+    if (options.foldToolHistory) {
+      return {
+        messages: [
+          {
+            role: 'system',
+            content: formatFoldedToolHistoryMessage(calls, resultItems, assistantText)
+          }
+        ],
+        nextIndex: index
+      }
+    }
     return {
       messages: [
         {
           role: 'assistant',
           content: assistantText.length > 0 ? assistantText.join('\n') : '',
           ...(thinkingMode ? { reasoning_content: reasoningContentOrSpace(reasoningText.join('\n')) } : {}),
+          ...(thinkingMode ? reasoningSignatureFromItems(items, bridgeIndex + 1, startIndex, turnId) : {}),
           tool_calls: calls.map((call) => this.toolCallToWire(call))
         },
         ...resultMessages
@@ -650,14 +750,18 @@ export class ModelCompatClient implements ModelClient {
     }
   }
 
-  private itemToMessage(item: TurnItem, thinkingMode: boolean): ChatMessage | null {
+  private itemToMessage(
+    item: TurnItem,
+    thinkingMode: boolean,
+    options: { foldToolHistory?: boolean } = {}
+  ): ChatMessage | null {
     switch (item.kind) {
       case 'user_message':
         return { role: 'user', content: item.text }
       case 'assistant_text':
         return {
           role: 'assistant',
-          content: item.text,
+          content: options.foldToolHistory ? stripLegacyFoldedToolHistory(item.text) : item.text,
           ...(thinkingMode ? { reasoning_content: ' ' } : {})
         }
       case 'assistant_reasoning':
@@ -705,6 +809,7 @@ export class ModelCompatClient implements ModelClient {
     let finishReason: string | null = null
     let sawDone = false
     const idleTimeoutMs = normalizeStreamIdleTimeoutMs(this.config.streamIdleTimeoutMs)
+    const reasoningExtractor = new InlineReasoningExtractor()
     try {
       while (!signal.aborted) {
         const read = await readStreamChunk(reader, signal, idleTimeoutMs)
@@ -753,6 +858,7 @@ export class ModelCompatClient implements ModelClient {
             textAccumulator,
             reasoningAccumulator,
             endpointFormat,
+            reasoningExtractor,
             inlineToolCallState
           )
           textAccumulator = result.text
@@ -773,6 +879,20 @@ export class ModelCompatClient implements ModelClient {
     if (signal.aborted) {
       yield { kind: 'error', message: 'request was aborted' }
       return
+    }
+    // Flush any trailing state from the inline-reasoning extractor (e.g. an
+    // unclosed opener whose reasoning accumulated to stream end).
+    const flushed = reasoningExtractor.flush()
+    if (flushed.text) {
+      const cleaned = sanitizeModelText(flushed.text)
+      if (cleaned) {
+        textAccumulator += cleaned
+        yield { kind: 'assistant_text_delta', text: cleaned }
+      }
+    }
+    if (flushed.reasoning) {
+      reasoningAccumulator += flushed.reasoning
+      yield { kind: 'assistant_reasoning_delta', text: flushed.reasoning }
     }
     if (usage) yield { kind: 'usage', usage }
     stopReason = ((): ModelStopReason => {
@@ -798,6 +918,7 @@ export class ModelCompatClient implements ModelClient {
     textAccumulator: string,
     reasoningAccumulator: string,
     endpointFormat: ModelEndpointFormat,
+    reasoningExtractor: InlineReasoningExtractor,
     inlineToolCallState: InlineToolCallState
   ): {
     chunks: ModelStreamChunk[]
@@ -858,9 +979,26 @@ export class ModelCompatClient implements ModelClient {
             }
           }
           const visibleContent = inlineToolCall.consumed ? inlineToolCall.visibleText : content
-          if (visibleContent) {
-            text += visibleContent
-            chunks.push({ kind: 'assistant_text_delta', text: visibleContent })
+          if (!visibleContent) {
+            // The chunk was entirely model-native tool-call protocol.
+          } else {
+          // Extract inline reasoning tags (e.g. MiniMax <mm:think>) across
+          // chunk boundaries before sanitizing the visible text. This routes
+          // inlined thinking to the same `assistant_reasoning_delta` channel
+          // as dedicated `reasoning_content` fields, so all models converge on
+          // the same reasoning UI without per-model frontend adaptation.
+          const extracted = reasoningExtractor.push(visibleContent)
+          if (extracted.reasoning) {
+            reasoning += extracted.reasoning
+            chunks.push({ kind: 'assistant_reasoning_delta', text: extracted.reasoning })
+          }
+          if (extracted.text) {
+            const cleaned = sanitizeModelText(extracted.text)
+            if (cleaned) {
+              text += cleaned
+              chunks.push({ kind: 'assistant_text_delta', text: cleaned })
+            }
+          }
           }
         }
         const reasoningContent = delta.reasoning_content ?? delta.reasoning
@@ -965,8 +1103,11 @@ export class ModelCompatClient implements ModelClient {
     if (type === 'response.output_text.delta') {
       const delta = recordString(payload, 'delta')
       if (delta) {
-        text += delta
-        chunks.push({ kind: 'assistant_text_delta', text: delta })
+        const cleaned = sanitizeModelText(delta)
+        if (cleaned) {
+          text += cleaned
+          chunks.push({ kind: 'assistant_text_delta', text: cleaned })
+        }
       }
     } else if (
       type === 'response.reasoning_text.delta' ||
@@ -1052,7 +1193,17 @@ export class ModelCompatClient implements ModelClient {
       if (usagePayload) usage = this.mapUsage(usagePayload)
     } else if (type === 'content_block_start') {
       const block = recordValue(payload, 'content_block')
-      if (block && recordString(block, 'type') === 'tool_use') {
+      const blockType = block ? recordString(block, 'type') : ''
+      if (block && blockType === 'redacted_thinking') {
+        const data = recordString(block, 'data')
+        if (data) {
+          chunks.push({
+            kind: 'assistant_reasoning_delta',
+            text: '',
+            signature: `${REDACTED_THINKING_SIGNATURE_PREFIX}${data}`
+          })
+        }
+      } else if (block && blockType === 'tool_use') {
         const callId = recordString(block, 'id') || indexFallbackCallId(index, pendingArguments)
         const existing = pendingArguments.get(callId) ?? { index, name: undefined, arguments: '' }
         if (index !== undefined) {
@@ -1071,14 +1222,22 @@ export class ModelCompatClient implements ModelClient {
       if (deltaType === 'text_delta') {
         const value = recordString(delta, 'text')
         if (value) {
-          text += value
-          chunks.push({ kind: 'assistant_text_delta', text: value })
+          const cleaned = sanitizeModelText(value)
+          if (cleaned) {
+            text += cleaned
+            chunks.push({ kind: 'assistant_text_delta', text: cleaned })
+          }
         }
       } else if (deltaType === 'thinking_delta') {
         const value = recordString(delta, 'thinking')
         if (value) {
           reasoning += value
           chunks.push({ kind: 'assistant_reasoning_delta', text: value })
+        }
+      } else if (deltaType === 'signature_delta') {
+        const signature = recordString(delta, 'signature')
+        if (signature) {
+          chunks.push({ kind: 'assistant_reasoning_delta', text: '', signature })
         }
       } else if (deltaType === 'input_json_delta') {
         const callId = anthropicStreamCallId(index, pendingArguments, pendingByIndex)
@@ -1152,7 +1311,8 @@ export class ModelCompatClient implements ModelClient {
       yield { kind: 'assistant_reasoning_delta', text: reasoning }
     }
     if (text) {
-      yield { kind: 'assistant_text_delta', text }
+      const cleaned = sanitizeModelText(text)
+      if (cleaned) yield { kind: 'assistant_text_delta', text: cleaned }
     }
     if (Array.isArray(choice.message?.tool_calls)) {
       for (const call of choice.message.tool_calls) {
@@ -1209,7 +1369,8 @@ export class ModelCompatClient implements ModelClient {
         ? payload.output_text
         : responsesOutputText(payload.output)
       if (outputText) {
-        chunks.push({ kind: 'assistant_text_delta', text: outputText })
+        const cleaned = sanitizeModelText(outputText)
+        if (cleaned) chunks.push({ kind: 'assistant_text_delta', text: cleaned })
       }
     }
     for (const item of payload.output ?? []) {
@@ -1249,10 +1410,29 @@ export class ModelCompatClient implements ModelClient {
       const type = recordString(block, 'type')
       if (type === 'text') {
         const text = recordString(block, 'text')
-        if (text) yield { kind: 'assistant_text_delta', text }
+        if (text) {
+          const cleaned = sanitizeModelText(text)
+          if (cleaned) yield { kind: 'assistant_text_delta', text: cleaned }
+        }
       } else if (type === 'thinking') {
         const thinking = recordString(block, 'thinking')
-        if (thinking) yield { kind: 'assistant_reasoning_delta', text: thinking }
+        const signature = recordString(block, 'signature')
+        if (thinking || signature) {
+          yield {
+            kind: 'assistant_reasoning_delta',
+            text: thinking,
+            ...(signature ? { signature } : {})
+          }
+        }
+      } else if (type === 'redacted_thinking') {
+        const data = recordString(block, 'data')
+        if (data) {
+          yield {
+            kind: 'assistant_reasoning_delta',
+            text: '',
+            signature: `${REDACTED_THINKING_SIGNATURE_PREFIX}${data}`
+          }
+        }
       } else if (type === 'tool_use') {
         const callId = recordString(block, 'id')
         const toolName = recordString(block, 'name')
@@ -1370,7 +1550,10 @@ function messagesToResponsesInput(messages: ChatMessage[]): Array<Record<string,
   return input
 }
 
-function messagesToAnthropic(messages: ChatMessage[]): { system: string; messages: AnthropicMessage[] } {
+function messagesToAnthropic(
+  messages: ChatMessage[],
+  options: { includeBlankThinkingPlaceholders?: boolean } = {}
+): { system: string; messages: AnthropicMessage[] } {
   const system: string[] = []
   const out: AnthropicMessage[] = []
   for (const message of messages) {
@@ -1397,6 +1580,20 @@ function messagesToAnthropic(messages: ChatMessage[]): { system: string; message
       : content.trim()
         ? [{ type: 'text' as const, text: content }]
         : []
+    const redactedThinking = anthropicRedactedThinkingFromReasoningSignature(
+      message.reasoning_signature
+    )
+    const thinking = anthropicThinkingFromReasoningContent(
+      message.reasoning_content,
+      message.reasoning_signature,
+      { includeBlankThinkingPlaceholder: options.includeBlankThinkingPlaceholders }
+    )
+    if (message.role === 'assistant' && redactedThinking) {
+      blocks.unshift(redactedThinking)
+    }
+    if (message.role === 'assistant' && thinking) {
+      blocks.unshift(thinking)
+    }
     for (const call of message.tool_calls ?? []) {
       blocks.push({
         type: 'tool_use',
@@ -1409,8 +1606,74 @@ function messagesToAnthropic(messages: ChatMessage[]): { system: string; message
       out.push({ role: message.role, content: blocks })
       continue
     }
+    // Empty user/assistant message: previously silently dropped, which breaks
+    // the strict user/assistant alternation that Anthropic (and Zhipu's
+    // Anthropic-compatible endpoint, error 1214) requires. Insert a minimal
+    // placeholder text block so the message survives and alternation holds.
+    // This mirrors normalizeThinkingAssistantMessages' ' ' placeholder strategy.
+    if (message.role === 'user' || message.role === 'assistant') {
+      out.push({ role: message.role, content: [{ type: 'text', text: ' ' }] })
+    }
   }
-  return { system: system.join('\n\n'), messages: out }
+  // Merge consecutive same-role messages (e.g. multiple tool_result user
+  // messages) into one. Anthropic allows batched tool_result blocks in a
+  // single user message, and Zhipu's compatible endpoint is stricter about
+  // alternation — merging guarantees no two adjacent messages share a role.
+  const merged = mergeConsecutiveSameRoleMessages(out)
+  return { system: system.join('\n\n'), messages: merged }
+}
+
+function mergeConsecutiveSameRoleMessages(
+  messages: AnthropicMessage[]
+): AnthropicMessage[] {
+  // Only merge consecutive USER messages — this handles the common case of
+  // multiple tool_result blocks (one per tool call) that were emitted as
+  // separate user messages. Anthropic allows batched tool_result blocks in
+  // a single user message, and Zhipu's compatible endpoint is stricter about
+  // alternation. Assistant messages are NOT merged: each represents a distinct
+  // model turn and merging would corrupt thinking/text/tool_use block ordering.
+  const result: AnthropicMessage[] = []
+  for (const message of messages) {
+    const prev = result[result.length - 1]
+    if (
+      prev &&
+      prev.role === 'user' &&
+      message.role === 'user' &&
+      Array.isArray(prev.content) &&
+      Array.isArray(message.content)
+    ) {
+      prev.content = [...prev.content, ...message.content]
+    } else {
+      result.push({ ...message })
+    }
+  }
+  return result
+}
+
+function anthropicThinkingFromReasoningContent(
+  reasoningContent: string | undefined,
+  signature: string | undefined,
+  options: { includeBlankThinkingPlaceholder?: boolean } = {}
+): Extract<AnthropicContentBlock, { type: 'thinking' }> | null {
+  if (signature?.startsWith(REDACTED_THINKING_SIGNATURE_PREFIX)) return null
+  const hasSignature = typeof signature === 'string' && signature.length > 0
+  const hasReasoningContent = typeof reasoningContent === 'string'
+  if (!hasSignature && !reasoningContent?.trim() && !(options.includeBlankThinkingPlaceholder && hasReasoningContent)) {
+    return null
+  }
+  return {
+    type: 'thinking',
+    thinking: reasoningContent?.trim() ? reasoningContent : '',
+    ...(signature ? { signature } : {})
+  }
+}
+
+function anthropicRedactedThinkingFromReasoningSignature(
+  signature: string | undefined
+): Extract<AnthropicContentBlock, { type: 'redacted_thinking' }> | null {
+  if (!signature?.startsWith(REDACTED_THINKING_SIGNATURE_PREFIX)) return null
+  const data = signature.slice(REDACTED_THINKING_SIGNATURE_PREFIX.length)
+  return data ? { type: 'redacted_thinking', data } : null
 }
 
 function chatContentToResponsesContent(
@@ -1436,6 +1699,14 @@ function chatContentToAnthropicContent(content: ChatMessage['content']): string 
   for (const part of content) {
     if (part.type === 'text') {
       if (part.text) parts.push({ type: 'text', text: part.text })
+      continue
+    }
+    if (part.type === 'thinking') {
+      parts.push({
+        type: 'thinking',
+        thinking: part.thinking,
+        ...(part.signature ? { signature: part.signature } : {})
+      })
       continue
     }
     const image = anthropicImageSource(part.image_url.url)
@@ -1470,6 +1741,7 @@ function chatContentToPlainText(content: ChatMessage['content']): string {
   if (typeof content === 'string') return content
   return content.map((part) => {
     if (part.type === 'text') return part.text
+    if (part.type === 'thinking') return part.thinking
     return `[image: ${part.image_url.url}]`
   }).join('\n')
 }
@@ -1493,9 +1765,9 @@ function responsesReasoningForEffort(effort: string | undefined): Record<string,
   }
 }
 
-function buildModelEndpointUrl(baseUrl: string, endpointFormat: ModelEndpointFormat): string {
+function buildModelEndpointUrl(baseUrl: string, endpointFormat: ModelEndpointFormat, model?: string): string {
   const path = modelEndpointPath(endpointFormat)
-  const normalized = baseUrl.trim().replace(/\/+$/, '')
+  const normalized = normalizeProviderBaseUrl(baseUrl.trim().replace(/\/+$/, ''), endpointFormat, model)
   if (!normalized) return `/v1/${path}`
   if (normalized.toLowerCase().endsWith(`/${path}`)) return normalized
   const withoutEndpoint = stripKnownEndpointPath(normalized)
@@ -1509,9 +1781,71 @@ function buildModelEndpointUrl(baseUrl: string, endpointFormat: ModelEndpointFor
   return `${withoutEndpoint}/v1/${path}`
 }
 
+function normalizeProviderBaseUrl(baseUrl: string, endpointFormat: ModelEndpointFormat, model?: string): string {
+  if (!baseUrl || !isBigModelProvider(baseUrl) || !isGlmCodingPlanModel(model)) {
+    return baseUrl
+  }
+  if (endpointFormat === 'messages') {
+    return replaceBigModelApiPath(baseUrl, 'anthropic')
+  }
+  if (endpointFormat === 'chat_completions') {
+    return replaceBigModelApiPath(baseUrl, 'coding/paas/v4')
+  }
+  return baseUrl
+}
+
+function replaceBigModelApiPath(baseUrl: string, targetApiPath: string): string {
+  try {
+    const url = new URL(baseUrl)
+    const path = url.pathname.replace(/\/+$/, '')
+    const match = path.match(/^(.*\/api)(?:\/(?:coding\/paas\/v4|paas\/v4|anthropic))?(?:\/(?:v\d+\/)?(?:chat\/completions|messages|responses|text\/chatcompletion_v2|text\/chatcompletion_pro))?$/i)
+    if (!match) return baseUrl
+    url.pathname = `${match[1]}/${targetApiPath}`
+    return url.toString().replace(/\/+$/, '')
+  } catch {
+    return baseUrl
+      .replace(/\/+$/, '')
+      .replace(
+        /(\/api)(?:\/(?:coding\/paas\/v4|paas\/v4|anthropic))?(?:\/(?:v\d+\/)?(?:chat\/completions|messages|responses|text\/chatcompletion_v2|text\/chatcompletion_pro))?$/i,
+        `$1/${targetApiPath}`
+      )
+  }
+}
+
+function sanitizeEndpointUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    parsed.username = ''
+    parsed.password = ''
+    parsed.hash = ''
+    return parsed.toString()
+  } catch {
+    return url.replace(/\/\/[^/@\s]+@/, '//')
+  }
+}
+
+function supportsAnthropicThinkingBlocks(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase()
+    return host === 'api.anthropic.com' || host.endsWith('.anthropic.com')
+  } catch {
+    return /\banthropic\.com\b/i.test(baseUrl)
+  }
+}
+
+function supportsMessagesThinkingBlocks(baseUrl: string): boolean {
+  return supportsAnthropicThinkingBlocks(baseUrl) || isDeepSeekHost(baseUrl)
+}
+
 function stripKnownEndpointPath(baseUrl: string): string {
   const lower = baseUrl.toLowerCase()
-  for (const path of ['chat/completions', 'responses', 'messages']) {
+  for (const path of [
+    'chat/completions',
+    'text/chatcompletion_v2',
+    'text/chatcompletion_pro',
+    'responses',
+    'messages'
+  ]) {
     if (lower.endsWith(`/${path}`)) {
       return baseUrl.slice(0, -path.length).replace(/\/+$/, '')
     }
@@ -1672,19 +2006,10 @@ function applyReasoningEffort(
 
 type ThinkingDialect = 'deepseek' | 'minimax' | 'zai' | 'none'
 
-function requestThinkingDialect(
-  dialect: string,
-  effort: string | undefined,
-  model: string | undefined
-): ThinkingDialect {
-  if (dialect === 'deepseek' || dialect === 'minimax' || dialect === 'zai') {
-    return dialect
-  }
-  // Preserve upstream behavior for an explicit reasoning-effort override on
-  // DeepSeek-family models routed through a generic OpenAI-compatible proxy.
-  // Passive auto-injection is still disabled off the official DeepSeek host.
-  if (effort?.trim() && isThinkingProducerModel(model)) return 'deepseek'
-  return 'none'
+function requestThinkingDialect(dialect: string): ThinkingDialect {
+  return dialect === 'deepseek' || dialect === 'minimax' || dialect === 'zai'
+    ? dialect
+    : 'none'
 }
 
 function applyThinking(
@@ -1714,23 +2039,38 @@ function shouldRetryWithoutStreamUsage(
 ): boolean {
   if (status !== 400 && status !== 422) return false
   if (!Object.prototype.hasOwnProperty.call(body, 'stream_options')) return false
-  return /\b(stream_options|include_usage)\b/i.test(text)
+  if (/\b(stream_options|include_usage)\b/i.test(text)) return true
+  return !hasReasoningControlField(body) && isGenericZhipuMessages1214Error(text)
 }
 
-function isAzureOpenAiEndpoint(baseUrl: string): boolean {
-  try {
-    const url = new URL(baseUrl)
-    const host = url.hostname.toLowerCase()
-    return host.endsWith('.openai.azure.com') || host.endsWith('.cognitiveservices.azure.com')
-  } catch {
-    return /\.openai\.azure\.com\b|\.cognitiveservices\.azure\.com\b/i.test(baseUrl)
-  }
+function shouldRetryWithoutReasoningFields(
+  status: number,
+  text: string,
+  body: Record<string, unknown>
+): boolean {
+  if (status !== 400 && status !== 422) return false
+  if (!hasReasoningControlField(body)) return false
+  return /\b(reasoning_effort|reasoning_content|thinking|reasoning)\b/i.test(text) ||
+    isGenericZhipuMessages1214Error(text)
+}
+
+function hasReasoningControlField(body: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(body, 'reasoning_effort') ||
+    Object.prototype.hasOwnProperty.call(body, 'thinking')
+}
+
+function isGenericZhipuMessages1214Error(text: string): boolean {
+  return /\b1214\b/.test(text) && /messages/i.test(text) && /参数非法|invalid/i.test(text)
 }
 
 function isThinkingMode(effort: string | undefined): boolean {
   const normalized = effort?.trim().toLowerCase()
   if (!normalized) return false
   return !['off', 'disabled', 'none', 'false'].includes(normalized)
+}
+
+function hasAssistantReasoning(items: readonly TurnItem[]): boolean {
+  return items.some((item) => item.kind === 'assistant_reasoning')
 }
 
 function requiresReasoningRoundTrip(
@@ -1746,23 +2086,233 @@ function requiresReasoningRoundTrip(
   return isThinkingMode(effort) || (isDeepSeekHost(baseUrl) && isThinkingProducerModel(model))
 }
 
-function isThinkingProducerModel(model: string | undefined): boolean {
-  const normalized = normalizeModelId(model)
-  if (!normalized) return false
-  return normalized === 'deepseek-v4-pro' ||
-    normalized === 'deepseek-v4-flash' ||
-    normalized.includes('deepseek-reasoner') ||
-    normalized.endsWith('/deepseek-v4-pro') ||
-    normalized.endsWith('/deepseek-v4-flash')
-}
-
 function reasoningContentOrSpace(text: string): string {
   return text.trim() ? text : ' '
+}
+
+/**
+ * Some strict OpenAI-compatible providers (notably MiniMax, error 2013
+ * "chat content is empty") reject any message whose `content` is null,
+ * undefined, or an empty/whitespace-only string. The chat_completions path
+ * legitimately produces empty content in two cases:
+ *   - an assistant message that only carries tool_calls (no preamble text)
+ *   - a tool-result message whose output was empty
+ *
+ * Both are valid OpenAI chat-completions shapes, but to stay compatible with
+ * strict providers we coerce empty/null content to a short non-whitespace
+ * placeholder. We deliberately avoid a bare space because some providers trim
+ * content before the emptiness check. Messages with real content are left
+ * untouched.
+ */
+function sanitizeEmptyMessageContent(messages: ChatMessage[], baseUrl?: string, model?: string): ChatMessage[] {
+  // Some providers (notably MiniMax, error 2013 "chat content is empty") reject
+  // a missing/empty content field on assistant messages even when tool_calls
+  // are present. For those providers we must supply a placeholder. For others,
+  // the OpenAI-spec-compliant shape (omit content) is preferred because a
+  // visible placeholder can pollute the conversation the model sees.
+  const requireAssistantContent = compatibilityProfileForModel({
+    baseUrl: baseUrl ?? '',
+    model
+  }).requiresAssistantContentForToolCalls
+  return messages.map((message) => {
+    if (!isEmptyContent(message.content)) return message
+    if (message.role === 'assistant') {
+      if (requireAssistantContent) {
+        // Strict provider: supply a minimal non-whitespace placeholder that is
+        // not visible if the model echoes conversation history. MiniMax M3 can
+        // otherwise leak a visible placeholder like "(tool call)" into content.
+        return { ...message, content: STRICT_PROVIDER_EMPTY_CONTENT_PLACEHOLDER }
+      }
+      // Spec-compliant: omit the content key entirely. Most providers accept an
+      // assistant message carrying only tool_calls with content omitted.
+      const sanitized: Record<string, unknown> = {}
+      for (const [key, value] of Object.entries(message)) {
+        if (key !== 'content') sanitized[key] = value
+      }
+      return sanitized as unknown as ChatMessage
+    }
+    if (message.role === 'tool') {
+      // Tool messages require a non-empty content string; use a placeholder
+      // that is invisible if the model echoes conversation history.
+      return { ...message, content: STRICT_PROVIDER_EMPTY_CONTENT_PLACEHOLDER }
+    }
+    // user/system should never reach here with empty content; leave as-is so
+    // any upstream bug surfaces instead of being masked.
+    return message
+  })
+}
+
+function isEmptyContent(content: unknown): boolean {
+  if (content === null || content === undefined) return true
+  if (typeof content === 'string') return content.trim().length === 0
+  if (Array.isArray(content)) {
+    // An array is "empty" if it has no parts, or all parts are empty text.
+    if (content.length === 0) return true
+    return content.every((part) => {
+      if (part && typeof part === 'object' && 'type' in part && part.type === 'text') {
+        return typeof (part as { text?: unknown }).text === 'string'
+          && (part as { text: string }).text.trim().length === 0
+      }
+      return false
+    })
+  }
+  return false
+}
+
+/**
+ * Diagnostic helper: logs any message that still has empty content AFTER
+ * sanitization, plus a compact dump of the whole messages array. Runs on every
+ * chat_completions request so we can pinpoint which message shape triggers
+ * strict-provider 2013 errors. If this logs, sanitization missed a case.
+ */
+function diagnoseEmptyContent(messages: ChatMessage[], baseUrl: string): void {
+  const offenders = messages
+    .map((message, index) => ({ index, message }))
+    .filter((entry) => {
+      const msg = entry.message as ChatMessage & { content?: unknown }
+      // After sanitization, assistant tool-call messages carry a placeholder
+      // ('(tool call)') so they should never be empty. Any message that is
+      // STILL empty here means sanitization missed a case.
+      return isEmptyContent(msg.content)
+    })
+  if (offenders.length === 0) return
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[diagnoseEmptyContent] ${offenders.length} empty-content message(s) STILL PRESENT after sanitization for ${baseUrl}:`,
+    JSON.stringify(
+      messages.map((m, i) => ({
+        i,
+        role: m.role,
+        content: m.content,
+        contentType: Array.isArray(m.content) ? 'array' : typeof m.content,
+        hasContentKey: 'content' in m,
+        hasToolCalls: Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
+        reasoningContent: (m as ChatMessage & { reasoning_content?: unknown }).reasoning_content
+      })),
+      null,
+      0
+    )
+  )
+}
+
+/**
+ * Diagnostic helper: when a provider rejects a request with a content/shape
+ * error (e.g. MiniMax 2013 "chat content is empty"), dump the full request
+ * body so we can see exactly what was sent. Only fires for bad-request-style
+ * rejections to avoid noise on normal errors (auth, rate limit, etc.).
+ */
+function diagnoseRejectedRequest(
+  url: string,
+  body: Record<string, unknown>,
+  status: number,
+  errorText: string
+): void {
+  if (status !== 400 && !/content is empty|empty.*content|2013/i.test(errorText)) return
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[diagnoseRejectedRequest] ${status} from ${sanitizeEndpointUrl(url)} — provider rejected request body:`,
+    '\nerror:', errorText.slice(0, 500),
+    '\nmessage overview (i/role/empty/len/hasToolCalls):',
+    messages.map((m: Record<string, unknown>, i: number) => {
+      const c = m.content
+      const len = typeof c === 'string' ? c.length : Array.isArray(c) ? JSON.stringify(c).length : -1
+      const empty = c == null || (typeof c === 'string' && c.trim() === '') || (Array.isArray(c) && c.length === 0)
+      return { i, role: m.role, empty, len, hasToolCalls: Array.isArray(m.tool_calls) && m.tool_calls.length > 0 }
+    }),
+    '\nempty messages full detail:',
+    JSON.stringify(
+      messages
+        .map((m: Record<string, unknown>, i: number) => ({ i, m }))
+        .filter((e) => {
+          const c = e.m.content
+          return c == null || (typeof c === 'string' && c.trim() === '') || (Array.isArray(c) && c.length === 0)
+        }),
+      null,
+      0
+    ),
+    '\nbody keys:', Object.keys(body)
+  )
 }
 
 function toolResultContent(output: unknown): string {
   if (typeof output === 'string') return output
   return JSON.stringify(output) ?? ''
+}
+
+function formatFoldedToolHistoryMessage(
+  calls: Extract<TurnItem, { kind: 'tool_call' }>[],
+  results: Extract<TurnItem, { kind: 'tool_result' }>[],
+  assistantText: string[]
+): string {
+  const sections: string[] = []
+  const intro = assistantText.map((text) => text.trim()).filter(Boolean).join('\n')
+  sections.push('<qiongqi_internal_tool_context>')
+  sections.push('purpose: historical tool result for model context only')
+  sections.push('instruction: do not quote, summarize, or repeat this block in the user-facing answer')
+  if (intro) sections.push(['assistant_preface:', intro].join('\n'))
+  for (const call of calls) {
+    const result = results.find((item) => item.callId === call.callId)
+    const status = result?.isError ? 'failed' : 'returned'
+    const args = JSON.stringify(call.arguments) ?? '{}'
+    const output = result ? toolResultContent(result.output) : ''
+    sections.push([
+      'tool_result:',
+      `tool: ${call.toolName}`,
+      `call_id: ${call.callId}`,
+      `status: ${status}`,
+      `arguments_json: ${args}`,
+      output ? `result:\n${output}` : 'result:'
+    ].join('\n'))
+  }
+  sections.push('</qiongqi_internal_tool_context>')
+  return sections.join('\n\n')
+}
+
+function stripLegacyFoldedToolHistory(text: string): string {
+  if (!text.includes('Tool ') || !text.includes('Arguments:') || !text.includes('Result:')) return text
+  const lines = text.split('\n')
+  const out: string[] = []
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index] ?? ''
+    const next = lines[index + 1] ?? ''
+    if (isLegacyFoldedToolHeader(line) && next.trimStart().startsWith('Arguments:')) {
+      index += 2
+      if ((lines[index] ?? '').trim() === 'Result:') {
+        index += 1
+        if ((lines[index] ?? '').trim() === '```') {
+          index += 1
+          while (index < lines.length && (lines[index] ?? '').trim() !== '```') {
+            index += 1
+          }
+          if (index < lines.length) index += 1
+        } else {
+          while (index < lines.length) {
+            const current = lines[index] ?? ''
+            const following = lines[index + 1] ?? ''
+            if (!current.trim()) break
+            if (isLegacyFoldedToolHeader(current) && following.trimStart().startsWith('Arguments:')) break
+            index += 1
+          }
+        }
+      }
+      while (index < lines.length && !(lines[index] ?? '').trim()) {
+        index += 1
+      }
+      if (out.length > 0 && out[out.length - 1]?.trim() && index < lines.length) {
+        out.push('')
+      }
+      continue
+    }
+    out.push(line)
+    index += 1
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function isLegacyFoldedToolHeader(line: string): boolean {
+  return /^Tool [A-Za-z0-9_.-]+ (returned|failed)\.$/.test(line.trim())
 }
 
 function reasoningFromMessage(message: ChatCompletionResponse['choices'][number]['message'] | undefined): string {
@@ -1772,9 +2322,28 @@ function reasoningFromMessage(message: ChatCompletionResponse['choices'][number]
   return typeof value === 'string' ? value : ''
 }
 
+function reasoningSignatureFromItems(
+  items: TurnItem[],
+  fromInclusive: number,
+  toExclusive: number,
+  turnId: string
+): Pick<ChatMessage, 'reasoning_signature'> {
+  for (let index = fromInclusive; index < toExclusive; index += 1) {
+    const item = items[index]
+    if (item?.kind === 'assistant_reasoning' && item.turnId === turnId && item.signature) {
+      return { reasoning_signature: item.signature }
+    }
+  }
+  return {}
+}
+
 function isPreToolCallBridgeItem(item: TurnItem, turnId: string): boolean {
   if (item.turnId !== turnId) return false
-  return item.kind === 'assistant_reasoning' || item.kind === 'assistant_text'
+  return item.kind === 'assistant_reasoning' ||
+    item.kind === 'assistant_text' ||
+    item.kind === 'approval' ||
+    item.kind === 'user_input' ||
+    item.kind === 'error'
 }
 
 function isBridgeItemBeforeToolCall(items: TurnItem[], index: number): boolean {
@@ -1786,8 +2355,7 @@ function isBridgeItemBeforeToolCall(items: TurnItem[], index: number): boolean {
   while (cursor < items.length) {
     const next = items[cursor]
     if (!next) return false
-    if (next.kind === 'assistant_reasoning' || next.kind === 'assistant_text') {
-      if (next.turnId !== item.turnId) return false
+    if (isPreToolCallBridgeItem(next, item.turnId)) {
       cursor += 1
       continue
     }
@@ -1967,48 +2535,19 @@ function cleanInlineToolCommand(value: string): string {
     .trim()
 }
 
-function sanitizeEmptyMessageContent(messages: ChatMessage[], baseUrl?: string, model?: string): ChatMessage[] {
-  const requireAssistantContent = compatibilityProfileForModel({
-    baseUrl: baseUrl ?? '',
-    model
-  }).requiresAssistantContentForToolCalls
-  return messages.map((message) => {
-    if (!isEmptyContent(message.content)) return message
-    if (message.role === 'assistant') {
-      if (requireAssistantContent) {
-        return { ...message, content: STRICT_PROVIDER_EMPTY_CONTENT_PLACEHOLDER }
-      }
-      return message
-    }
-    if (message.role === 'tool') {
-      return requireAssistantContent
-        ? { ...message, content: STRICT_PROVIDER_EMPTY_CONTENT_PLACEHOLDER }
-        : message
-    }
-    return message
-  })
-}
-
-function isEmptyContent(content: unknown): boolean {
-  if (content === null || content === undefined) return true
-  if (typeof content === 'string') return content.trim().length === 0
-  if (Array.isArray(content)) {
-    if (content.length === 0) return true
-    return content.every((part) => {
-      if (part && typeof part === 'object' && 'type' in part && part.type === 'text') {
-        return typeof (part as { text?: unknown }).text === 'string' &&
-          (part as { text: string }).text.trim().length === 0
-      }
-      return false
-    })
-  }
-  return false
-}
-
+/**
+ * Ensure the request has at least one non-system message. Some providers
+ * (notably MiniMax, error 2013 "chat content is empty") reject a request that
+ * contains ONLY system messages with no user/assistant turn to respond to.
+ * This happens after aggressive compaction folds the conversation into a
+ * single system summary and the recent tail is absent (e.g. a tool-call loop
+ * resumed with only the summary). Inject a minimal user message so the model
+ * has content to respond to.
+ */
 function ensureUserMessagePresent(messages: ChatMessage[]): ChatMessage[] {
-  const hasNonSystem = messages.some((message) => message.role !== 'system')
+  const hasNonSystem = messages.some((m) => m.role !== 'system')
   if (hasNonSystem) return messages
-  return [...messages, { role: 'user', content: ACTIVE_TASK_CONTINUATION_MESSAGE }]
+  return [...messages, { role: 'user', content: ACTIVE_TASK_CONTINUATION_MESSAGE } as ChatMessage]
 }
 
 function normalizeGlmMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -2030,8 +2569,15 @@ function normalizeGlmMessages(messages: ChatMessage[]): ChatMessage[] {
     content: systemContent.join('\n\n')
   }
   if (nonSystemMessages.length === 0) {
-    return [systemMessage, { role: 'user', content: ACTIVE_TASK_CONTINUATION_MESSAGE }]
+    return [
+      systemMessage,
+      { role: 'user', content: ACTIVE_TASK_CONTINUATION_MESSAGE }
+    ]
   }
+  // Zhipu GLM rejects (error 1214 "messages 参数非法") when the first
+  // conversational message is not a user message — e.g. after compaction
+  // folds history into a system summary whose following tail starts with an
+  // assistant turn. Insert a minimal user message to lead the conversation.
   if (nonSystemMessages[0]?.role !== 'user') {
     return [systemMessage, { role: 'user', content: ACTIVE_TASK_CONTINUATION_MESSAGE }, ...nonSystemMessages]
   }
@@ -2052,10 +2598,6 @@ function canonicalizeSchema(value: unknown): Record<string, unknown> {
   return canonical && typeof canonical === 'object' && !Array.isArray(canonical)
     ? canonical as Record<string, unknown>
     : {}
-}
-
-function normalizeModelId(model: string | undefined): string {
-  return model?.trim().toLowerCase() ?? ''
 }
 
 function normalizeStreamIdleTimeoutMs(value: number | undefined): number {
@@ -2231,6 +2773,18 @@ function attachTextFallbacksToLatestUserMessage(
 function formatAttachmentTextFallback(
   attachment: NonNullable<ModelRequest['attachmentTextFallbacks']>[number]
 ): string {
+  const isImage = attachment.mimeType.toLowerCase().startsWith('image/')
+  // Non-image files and image fallbacks with no inlined bytes surface as a
+  // metadata-only block; the model reads the file content via tools/artifacts.
+  if (!isImage || !attachment.dataBase64) {
+    return [
+      '[Attached file]',
+      `Name: ${attachment.name}`,
+      `MIME: ${attachment.mimeType}`,
+      `Bytes: ${attachment.byteSize}`,
+      '[/Attached file]'
+    ].join('\n')
+  }
   return [
     '[Attached image as base64 text]',
     `Name: ${attachment.name}`,

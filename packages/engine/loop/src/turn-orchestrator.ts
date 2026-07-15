@@ -49,6 +49,7 @@ import { ModelStepRunner, type StepResult } from './model-step-runner.js'
 import { PromptBuilder, type BuildContext } from './prompt-builder.js'
 import { decideContinuation } from './continuation-policy.js'
 import { DEFAULT_EVALUATOR_MAX_RETRIES, defaultLoopEvaluator } from './loop-evaluator.js'
+import type { ToolRuntimeV3 } from './tool-runtime-v3.js'
 
 export type TurnOrchestratorOptions = {
   threadStore: ThreadStore
@@ -71,6 +72,7 @@ export type TurnOrchestratorOptions = {
   skillRuntime?: SkillRuntime
   skillPluginHost?: SkillPluginHost
   attachmentStore?: AttachmentStore
+  runtimeDataDir?: string
   memoryStore?: MemoryStore
   tokenEconomy?: TokenEconomyConfig
   contextCompaction?: ContextCompactionConfig
@@ -100,6 +102,7 @@ export type TurnOrchestratorOptions = {
     relativePath: string
     markdown: string
   }) => Promise<void>
+  toolRuntime?: ToolRuntimeV3
 }
 
 type AwaitUserInputFn = (
@@ -148,8 +151,10 @@ export class TurnOrchestrator {
       ids: opts.ids,
       nowIso: opts.nowIso,
       memoryStoreEnabled: Boolean(opts.memoryStore),
+      ...(opts.runtimeDataDir ? { runtimeDataDir: opts.runtimeDataDir } : {}),
       ...(opts.toolStorm ? { toolStorm: opts.toolStorm } : {}),
-      ...(opts.onPlanWritten ? { onPlanWritten: opts.onPlanWritten } : {})
+      ...(opts.onPlanWritten ? { onPlanWritten: opts.onPlanWritten } : {}),
+      ...(opts.toolRuntime ? { toolRuntime: opts.toolRuntime } : {})
     })
     this.modelStepRunner = new ModelStepRunner({
       model: opts.model,
@@ -175,6 +180,7 @@ export class TurnOrchestrator {
       ...(opts.skillRuntime ? { skillRuntime: opts.skillRuntime } : {}),
       ...(opts.skillPluginHost ? { skillPluginHost: opts.skillPluginHost } : {}),
       ...(opts.attachmentStore ? { attachmentStore: opts.attachmentStore } : {}),
+      ...(opts.runtimeDataDir ? { runtimeDataDir: opts.runtimeDataDir } : {}),
       ...(opts.memoryStore ? { memoryStore: opts.memoryStore } : {}),
       ...(opts.tokenEconomy ? { tokenEconomy: opts.tokenEconomy } : {}),
       ...(opts.contextCompaction ? { contextCompaction: opts.contextCompaction } : {}),
@@ -508,6 +514,7 @@ export async function runOrchestratorStep(input: {
         threadId,
         turnId,
         workspace: ctx.thread?.workspace ?? '',
+        ...(ctx.thread?.ownerUserId ? { ownerUserId: ctx.thread.ownerUserId } : {}),
         threadMode: ctx.effectiveMode,
         ...(ctx.activePlanContext ? { activePlanContext: ctx.activePlanContext } : {}),
         modelCapabilities: ctx.modelCapabilities,
@@ -526,6 +533,7 @@ export async function runOrchestratorStep(input: {
         threadId,
         turnId,
         workspace: ctx.thread?.workspace ?? '',
+        ...(ctx.thread?.ownerUserId ? { ownerUserId: ctx.thread.ownerUserId } : {}),
         threadMode: ctx.effectiveMode,
         ...(ctx.activePlanContext ? { activePlanContext: ctx.activePlanContext } : {}),
         modelCapabilities: ctx.modelCapabilities,

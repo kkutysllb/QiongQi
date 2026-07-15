@@ -59,7 +59,8 @@ export type AssistantTextTurnItem = z.infer<typeof AssistantTextTurnItem>
 
 export const AssistantReasoningTurnItem = TurnItemBase.extend({
   kind: z.literal('assistant_reasoning'),
-  text: z.string()
+  text: z.string(),
+  signature: z.string().optional()
 })
 export type AssistantReasoningTurnItem = z.infer<typeof AssistantReasoningTurnItem>
 

@@ -42,6 +42,10 @@ export type ModelContextProfileConfig = {
   outputModalities?: readonly ModelInputModality[]
   supportsToolCalling?: boolean
   messageParts?: readonly ModelMessagePartSupport[]
+  providerModel?: string
+  baseUrl?: string
+  apiKey?: string
+  endpointFormat?: string
 }
 
 export type ModelConfig = {
@@ -67,6 +71,11 @@ export type ModelProfileConfigSource = {
   contextCompaction?: ContextCompactionConfig
 }
 
+type InferredModelDefaults = Pick<
+  ModelContextProfile,
+  'contextWindowTokens' | 'inputModalities' | 'outputModalities' | 'messageParts'
+> & Partial<ModelContextThresholds>
+
 export const DEFAULT_CONTEXT_THRESHOLDS: ModelContextThresholds = {
   softThreshold: 16_000,
   hardThreshold: 24_000
@@ -75,9 +84,49 @@ export const DEFAULT_CONTEXT_THRESHOLDS: ModelContextThresholds = {
 const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS = 1_000_000
 const DEEPSEEK_V4_SOFT_THRESHOLD_RATIO = 0.98
 const DEEPSEEK_V4_HARD_THRESHOLD_RATIO = 0.99
+const DEFAULT_CONTEXT_WINDOW_SOFT_THRESHOLD_RATIO = 0.8
+const DEFAULT_CONTEXT_WINDOW_HARD_THRESHOLD_RATIO = 0.9
 const DEFAULT_MODEL_INPUT_MODALITIES: readonly ModelInputModality[] = ['text']
 const DEFAULT_MODEL_OUTPUT_MODALITIES: readonly ModelInputModality[] = ['text']
 const DEFAULT_MODEL_MESSAGE_PARTS: readonly ModelMessagePartSupport[] = ['text']
+const DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS = DEFAULT_CONTEXT_THRESHOLDS.hardThreshold
+const KNOWN_MODEL_CONTEXT_WINDOWS: ReadonlyArray<{
+  pattern: RegExp
+  contextWindowTokens: number
+}> = [
+  { pattern: /\bgpt-4o\b/, contextWindowTokens: 128_000 },
+  { pattern: /\bgpt-4\.1\b/, contextWindowTokens: 1_000_000 },
+  { pattern: /\bo3\b/, contextWindowTokens: 200_000 },
+  { pattern: /\bo4\b/, contextWindowTokens: 200_000 },
+  { pattern: /\bclaude-3\b/, contextWindowTokens: 200_000 },
+  { pattern: /\bgemini-1\.5\b/, contextWindowTokens: 1_000_000 },
+  { pattern: /\bgemini-2\b/, contextWindowTokens: 1_000_000 },
+  { pattern: /\bglm-4\b/, contextWindowTokens: 128_000 },
+  { pattern: /\bglm-5\b/, contextWindowTokens: 128_000 },
+  { pattern: /\bqwen\b/, contextWindowTokens: 128_000 }
+]
+const VISION_MODEL_ID_PATTERNS: readonly RegExp[] = [
+  /\bgpt-4o\b/,
+  /\bgpt-4\.1\b/,
+  /\bo[34]\b/,
+  /\bclaude-3\b/,
+  /\bclaude-3[-.]5\b/,
+  /\bclaude-3[-.]7\b/,
+  /\bgemini\b/,
+  /\bglm-4v\b/,
+  /\bglm-4\.5v\b/,
+  /\bvision\b/,
+  /\bvl\b/
+]
+
+export const VISION_MODEL_CAPABILITY_DEFAULTS: Pick<
+  ModelContextProfile,
+  'inputModalities' | 'outputModalities' | 'messageParts'
+> = {
+  inputModalities: ['text', 'image'],
+  outputModalities: DEFAULT_MODEL_OUTPUT_MODALITIES,
+  messageParts: ['text', 'image_url']
+}
 
 export const MODEL_CONTEXT_PROFILES: readonly ModelContextProfile[] = [
   deepseekV4Profile('deepseek-v4-pro', ['deepseek-v4-pro']),
@@ -172,23 +221,45 @@ function mergeModelContextProfile(
   input: ModelContextProfileConfig
 ): ModelContextProfile {
   const compaction = input.contextCompaction ?? {}
-  const configuredContextWindowTokens = input.contextWindowTokens ?? current?.contextWindowTokens
-  const softThreshold = compaction.softThreshold ?? input.softThreshold ?? thresholdFromWindow({
-    contextWindowTokens: configuredContextWindowTokens,
-    ratio: compaction.softRatio ?? input.softRatio,
-    fallbackRatio: current
-      ? current.softThreshold / current.contextWindowTokens
-      : DEEPSEEK_V4_SOFT_THRESHOLD_RATIO,
-    fallbackThreshold: current?.softThreshold
-  })
-  const hardThreshold = compaction.hardThreshold ?? input.hardThreshold ?? thresholdFromWindow({
-    contextWindowTokens: configuredContextWindowTokens,
-    ratio: compaction.hardRatio ?? input.hardRatio,
-    fallbackRatio: current
-      ? current.hardThreshold / current.contextWindowTokens
-      : DEEPSEEK_V4_HARD_THRESHOLD_RATIO,
-    fallbackThreshold: current?.hardThreshold
-  })
+  const inferred = inferModelCapabilityDefaults(canonicalModel, [
+    canonicalModel,
+    ...(current?.modelIds ?? []),
+    ...(input.aliases ?? []),
+    ...(input.providerModel ? [input.providerModel] : [])
+  ])
+  const configuredContextWindowTokens =
+    input.contextWindowTokens ??
+    current?.contextWindowTokens ??
+    inferred.contextWindowTokens
+  const shouldUseInferredThresholds =
+    input.contextWindowTokens === undefined &&
+    current?.contextWindowTokens === undefined &&
+    inferred.softThreshold !== undefined &&
+    inferred.hardThreshold !== undefined
+  const softThreshold =
+    compaction.softThreshold ??
+    input.softThreshold ??
+    (shouldUseInferredThresholds ? inferred.softThreshold : undefined) ??
+    thresholdFromWindow({
+      contextWindowTokens: configuredContextWindowTokens,
+      ratio: compaction.softRatio ?? input.softRatio,
+      fallbackRatio: current
+        ? current.softThreshold / current.contextWindowTokens
+        : DEFAULT_CONTEXT_WINDOW_SOFT_THRESHOLD_RATIO,
+      fallbackThreshold: current?.softThreshold
+    })
+  const hardThreshold =
+    compaction.hardThreshold ??
+    input.hardThreshold ??
+    (shouldUseInferredThresholds ? inferred.hardThreshold : undefined) ??
+    thresholdFromWindow({
+      contextWindowTokens: configuredContextWindowTokens,
+      ratio: compaction.hardRatio ?? input.hardRatio,
+      fallbackRatio: current
+        ? current.hardThreshold / current.contextWindowTokens
+        : DEFAULT_CONTEXT_WINDOW_HARD_THRESHOLD_RATIO,
+      fallbackThreshold: current?.hardThreshold
+    })
   const contextWindowTokens =
     configuredContextWindowTokens ?? Math.max(softThreshold ?? 0, hardThreshold ?? 0)
   if (!contextWindowTokens || !softThreshold || !hardThreshold) {
@@ -208,10 +279,42 @@ function mergeModelContextProfile(
     contextWindowTokens,
     softThreshold,
     hardThreshold,
-    inputModalities: uniqueModelCapabilityValues(input.inputModalities ?? current?.inputModalities ?? DEFAULT_MODEL_INPUT_MODALITIES),
-    outputModalities: uniqueModelCapabilityValues(input.outputModalities ?? current?.outputModalities ?? DEFAULT_MODEL_OUTPUT_MODALITIES),
+    inputModalities: uniqueModelCapabilityValues(input.inputModalities ?? current?.inputModalities ?? inferred.inputModalities),
+    outputModalities: uniqueModelCapabilityValues(input.outputModalities ?? current?.outputModalities ?? inferred.outputModalities),
     supportsToolCalling: input.supportsToolCalling ?? current?.supportsToolCalling ?? true,
-    messageParts: uniqueModelCapabilityValues(input.messageParts ?? current?.messageParts ?? DEFAULT_MODEL_MESSAGE_PARTS)
+    messageParts: uniqueModelCapabilityValues(input.messageParts ?? current?.messageParts ?? inferred.messageParts)
+  }
+}
+
+export function inferModelCapabilityDefaults(
+  canonicalModel: string,
+  candidates: readonly string[] = [canonicalModel]
+): InferredModelDefaults {
+  const ids = [canonicalModel, ...candidates].map(normalizeModelId).filter(Boolean)
+  const supportsVision = ids.some((id) => VISION_MODEL_ID_PATTERNS.some((pattern) => pattern.test(id)))
+  const knownContextWindowTokens = KNOWN_MODEL_CONTEXT_WINDOWS.find((entry) =>
+    ids.some((id) => entry.pattern.test(id))
+  )?.contextWindowTokens
+  const thresholds = knownContextWindowTokens
+    ? {}
+    : {
+        softThreshold: DEFAULT_CONTEXT_THRESHOLDS.softThreshold,
+        hardThreshold: DEFAULT_CONTEXT_THRESHOLDS.hardThreshold
+      }
+  const contextWindowTokens = knownContextWindowTokens ?? DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS
+  if (!supportsVision) {
+    return {
+      ...thresholds,
+      contextWindowTokens,
+      inputModalities: DEFAULT_MODEL_INPUT_MODALITIES,
+      outputModalities: DEFAULT_MODEL_OUTPUT_MODALITIES,
+      messageParts: DEFAULT_MODEL_MESSAGE_PARTS
+    }
+  }
+  return {
+    ...thresholds,
+    contextWindowTokens,
+    ...VISION_MODEL_CAPABILITY_DEFAULTS
   }
 }
 

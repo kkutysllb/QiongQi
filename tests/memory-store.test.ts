@@ -41,7 +41,7 @@ describe('Memory store and recall', () => {
     })
 
     expect((await store.retrieve({ query: 'frontend pnpm preference', workspace: '/tmp/ws', limit: 3 })).map((item) => item.id)).toEqual([memory.id])
-    expect(await createStore({ enabled: false }).retrieve({ query: 'pnpm', workspace: '/tmp/ws', limit: 3 })).toEqual([])
+    expect(await createStore({ enabled: false }).retrieve({ query: 'pnpm', workspace: '/tmp/ws', limit: 3 })).toHaveLength(1)
 
     await store.update(memory.id, { disabled: true })
     expect(await store.retrieve({ query: 'pnpm', workspace: '/tmp/ws', limit: 3 })).toEqual([])
@@ -52,21 +52,117 @@ describe('Memory store and recall', () => {
     expect((await store.list({ workspace: '/tmp/ws', includeDeleted: true })).find((item) => item.id === memory.id)?.deletedAt).toBeTruthy()
   })
 
+  it('keeps memories isolated by owner user and workspace during retrieval', async () => {
+    const store = createStore()
+    const userMemory = await store.create({
+      ownerUserId: 'user_a',
+      content: 'Use pnpm for frontend projects',
+      scope: 'user',
+      workspace: '/tmp/shared'
+    })
+    const workspaceMemory = await store.create({
+      ownerUserId: 'user_a',
+      content: 'Frontend deployment uses vercel',
+      scope: 'workspace',
+      workspace: '/tmp/ws-a'
+    })
+    await store.create({
+      ownerUserId: 'user_b',
+      content: 'Use pnpm for backend services',
+      scope: 'user',
+      workspace: '/tmp/shared'
+    })
+    await store.create({
+      ownerUserId: 'user_a',
+      content: 'Frontend deployment uses netlify',
+      scope: 'workspace',
+      workspace: '/tmp/ws-b'
+    })
+
+    expect((await store.retrieve({
+      query: 'frontend pnpm deployment',
+      workspace: '/tmp/ws-a',
+      ownerUserId: 'user_a',
+      limit: 5
+    })).map((item) => item.id)).toEqual([userMemory.id, workspaceMemory.id])
+    expect(await store.retrieve({
+      query: 'pnpm',
+      workspace: '/tmp/ws-a',
+      ownerUserId: 'user_b',
+      limit: 5
+    })).not.toContainEqual(expect.objectContaining({ ownerUserId: 'user_a' }))
+    expect(await store.retrieve({
+      query: 'netlify',
+      workspace: '/tmp/ws-a',
+      ownerUserId: 'user_a',
+      limit: 5
+    })).toEqual([])
+  })
+
+  it('keeps memories isolated by source thread when thread scope is provided', async () => {
+    const store = createStore()
+    const threadMemory = await store.create({
+      ownerUserId: 'user_a',
+      content: 'Frontend project uses pnpm',
+      scope: 'project',
+      workspace: '/tmp/ws',
+      sourceThreadId: 'thread_a'
+    })
+    await store.create({
+      ownerUserId: 'user_a',
+      content: 'Frontend project uses yarn',
+      scope: 'project',
+      workspace: '/tmp/ws',
+      sourceThreadId: 'thread_b'
+    })
+    const userMemory = await store.create({
+      ownerUserId: 'user_a',
+      content: 'General user preference says frontend uses npm',
+      scope: 'user',
+      workspace: '/tmp/ws'
+    })
+
+    expect((await store.retrieve({
+      query: 'frontend project package manager',
+      workspace: '/tmp/ws',
+      ownerUserId: 'user_a',
+      threadId: 'thread_a',
+      limit: 5
+    })).map((item) => item.id)).toEqual([threadMemory.id, userMemory.id])
+
+    expect(await store.retrieve({
+      query: 'yarn',
+      workspace: '/tmp/ws',
+      ownerUserId: 'user_a',
+      threadId: 'thread_a',
+      limit: 5
+    })).toEqual([])
+    expect(await store.retrieve({
+      query: 'npm',
+      workspace: '/tmp/ws',
+      ownerUserId: 'user_a',
+      limit: 5
+    })).toEqual([userMemory])
+  })
+
   it('retrieves user and workspace memories across threads while keeping project memories thread-scoped', async () => {
     const store = createStore()
     const userMemory = await store.create({
+      ownerUserId: 'user_a',
       content: 'User prefers pnpm for frontend analysis dashboards',
       scope: 'user',
       workspace: '/tmp/ws',
       sourceThreadId: 'old_thread'
     })
     const workspaceMemory = await store.create({
+      ownerUserId: 'user_a',
       content: 'Workspace financial reports should include MD and HTML outputs',
       scope: 'workspace',
       workspace: '/tmp/ws',
       sourceThreadId: 'old_thread'
     })
     await store.create({
+      ownerUserId: 'user_a',
       content: 'Project-specific draft uses yarn',
       scope: 'project',
       workspace: '/tmp/ws',
@@ -76,6 +172,7 @@ describe('Memory store and recall', () => {
     expect((await store.retrieve({
       query: 'frontend financial analysis reports pnpm MD HTML',
       workspace: '/tmp/ws',
+      ownerUserId: 'user_a',
       threadId: 'new_thread',
       limit: 5
     })).map((item) => item.id)).toEqual([workspaceMemory.id, userMemory.id])
@@ -84,12 +181,14 @@ describe('Memory store and recall', () => {
   it('carries current-thread project memories across continue prompts without leaking other tasks', async () => {
     const store = createStore()
     const currentTask = await store.create({
+      ownerUserId: 'user_a',
       content: '真实任务是宁德时代 300750 全面深度分析，需要输出 MD 报告和 HTML 看板',
       scope: 'project',
       workspace: '/tmp/ws',
       sourceThreadId: 'catl_thread'
     })
     await store.create({
+      ownerUserId: 'user_a',
       content: '旧任务是股指期货联动分析',
       scope: 'project',
       workspace: '/tmp/ws',
@@ -99,6 +198,7 @@ describe('Memory store and recall', () => {
     expect((await store.retrieve({
       query: '继续',
       workspace: '/tmp/ws',
+      ownerUserId: 'user_a',
       threadId: 'catl_thread',
       limit: 5
     })).map((item) => item.id)).toEqual([currentTask.id])
@@ -156,6 +256,60 @@ describe('Memory store and recall', () => {
     expect(await readJson(diagnostics)).toMatchObject({ tombstoneCount: 1 })
   })
 
+  it('scopes memory API records to the authenticated user', async () => {
+    const h = buildHarness()
+    h.runtime.memoryStore = createStore()
+    const sessionA = await h.runtime.authService?.initialize({
+      email: 'memory-a@example.com',
+      password: 'password123'
+    })
+    const sessionB = await h.runtime.authService?.register({
+      email: 'memory-b@example.com',
+      password: 'password123'
+    })
+
+    const created = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/memory', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${sessionA?.accessToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          content: 'User A remembers pnpm',
+          scope: 'user',
+          workspace: '/tmp/ws'
+        })
+      })
+    )
+    expect(created.status).toBe(201)
+    const createdBody = await readJson(created) as { memory: { id: string; ownerUserId?: string } }
+    expect(createdBody.memory.ownerUserId).toBe(sessionA?.user.id)
+
+    const listA = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/memory?workspace=/tmp/ws', {
+        headers: { authorization: `Bearer ${sessionA?.accessToken}` }
+      })
+    )
+    expect(await readJson(listA)).toMatchObject({ memories: [expect.objectContaining({ id: createdBody.memory.id })] })
+
+    const listB = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/memory?workspace=/tmp/ws', {
+        headers: { authorization: `Bearer ${sessionB?.accessToken}` }
+      })
+    )
+    expect(await readJson(listB)).toEqual({ memories: [] })
+
+    const deleteAsB = await dispatchRequest(
+      h.router,
+      new Request(`http://localhost/v1/memory/${createdBody.memory.id}`, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${sessionB?.accessToken}` }
+      })
+    )
+    expect(deleteAsB.status).toBe(404)
+  })
+
   it('gates memory mutation tools through approval', async () => {
     const store = createStore()
     const host = new LocalToolHost({
@@ -170,6 +324,7 @@ describe('Memory store and recall', () => {
       threadId: 'thr_1',
       turnId: 'turn_1',
       workspace: '/tmp/ws',
+      ownerUserId: 'user_a',
       approvalPolicy: 'on-request',
       abortSignal: new AbortController().signal,
       awaitApproval: async () => {
@@ -180,12 +335,56 @@ describe('Memory store and recall', () => {
 
     expect(approvals).toBe(1)
     expect(result.item).toMatchObject({ kind: 'tool_result', isError: false })
-    const memories = await store.list({ workspace: '/tmp/ws' })
+    const memories = await store.list({ workspace: '/tmp/ws', ownerUserId: 'user_a' })
     expect(memories).toHaveLength(1)
     expect(memories[0]).toMatchObject({
       scope: 'project',
       sourceThreadId: 'thr_1'
     })
+    expect(await store.list({ workspace: '/tmp/ws', ownerUserId: 'user_b' })).toHaveLength(0)
+  })
+
+  it('prevents memory tools from mutating another thread memory', async () => {
+    const store = createStore()
+    const memory = await store.create({
+      ownerUserId: 'user_a',
+      content: 'Other thread memory',
+      scope: 'project',
+      workspace: '/tmp/ws',
+      sourceThreadId: 'thr_other'
+    })
+    const host = new LocalToolHost({
+      registry: new CapabilityRegistry(buildMemoryToolProviders(store))
+    })
+    const context = {
+      threadId: 'thr_1',
+      turnId: 'turn_1',
+      workspace: '/tmp/ws',
+      ownerUserId: 'user_a',
+      approvalPolicy: 'on-request' as const,
+      abortSignal: new AbortController().signal,
+      awaitApproval: async () => 'allow' as const
+    }
+
+    const update = await host.execute({
+      callId: 'call_update_other',
+      toolName: 'memory_update',
+      arguments: { id: memory.id, content: 'changed' }
+    }, context)
+    const deletion = await host.execute({
+      callId: 'call_delete_other',
+      toolName: 'memory_delete',
+      arguments: { id: memory.id }
+    }, context)
+
+    expect(update.item).toMatchObject({ kind: 'tool_result', isError: true })
+    expect(deletion.item).toMatchObject({ kind: 'tool_result', isError: true })
+    const record = (await store.list({ workspace: '/tmp/ws', ownerUserId: 'user_a' }))[0]
+    expect(record).toMatchObject({
+      id: memory.id,
+      content: 'Other thread memory'
+    })
+    expect(record?.deletedAt).toBeUndefined()
   })
 
   it('injects relevant memories into TurnOrchestrator metadata and stops after deletion', async () => {
@@ -193,7 +392,8 @@ describe('Memory store and recall', () => {
     const memory = await store.create({
       content: 'Use pnpm when touching frontend code',
       scope: 'workspace',
-      workspace: '/tmp/ws'
+      workspace: '/tmp/ws',
+      sourceThreadId: 'thr_1'
     })
     const seenRequests: ModelRequest[] = []
     const model: ModelClient = {
@@ -222,8 +422,22 @@ describe('Memory store and recall', () => {
     expect(finalInstructions).toContain('Shell runtime:')
   })
 
-  it('injects current task project memory on continue prompts without pulling another task', async () => {
+  it('injects only memories owned by the thread owner', async () => {
     const store = createStore()
+    const owned = await store.create({
+      ownerUserId: 'user_a',
+      content: 'Frontend projects use pnpm',
+      scope: 'user',
+      workspace: '/tmp/ws',
+      sourceThreadId: 'thr_1'
+    })
+    const other = await store.create({
+      ownerUserId: 'user_b',
+      content: 'Frontend projects use yarn',
+      scope: 'user',
+      workspace: '/tmp/ws',
+      sourceThreadId: 'thr_1'
+    })
     const seenRequests: ModelRequest[] = []
     const model: ModelClient = {
       provider: 'fake',
@@ -234,20 +448,91 @@ describe('Memory store and recall', () => {
       }
     }
     const h = makeHarness(model, { memoryStore: store })
+    await bootstrapThread(h, {
+      workspace: '/tmp/ws',
+      thread: { ownerUserId: 'user_a' },
+      request: { prompt: 'frontend project package manager?' }
+    })
+
+    await h.loop.runTurn(h.threadId, h.turnId)
+
+    const instructions = seenRequests.at(-1)?.contextInstructions?.join('\n') ?? ''
+    expect(instructions).toContain(owned.id)
+    expect(instructions).not.toContain(other.id)
+    expect((await h.turns.getTurn(h.threadId, h.turnId))?.injectedMemoryIds).toEqual([owned.id])
+  })
+
+  it('injects only project memories created for the current thread', async () => {
+    const store = createStore()
     const current = await store.create({
+      ownerUserId: 'user_a',
+      content: 'Frontend task uses pnpm',
+      scope: 'project',
+      workspace: '/tmp/ws',
+      sourceThreadId: 'thread_current'
+    })
+    const other = await store.create({
+      ownerUserId: 'user_a',
+      content: 'Frontend task uses yarn',
+      scope: 'project',
+      workspace: '/tmp/ws',
+      sourceThreadId: 'thread_other'
+    })
+    const seenRequests: ModelRequest[] = []
+    const model: ModelClient = {
+      provider: 'fake',
+      model: 'fake',
+      async *stream(request) {
+        seenRequests.push(request)
+        yield { kind: 'completed', stopReason: 'stop' }
+      }
+    }
+    const h = makeHarness(model, { memoryStore: store })
+    await bootstrapThread(h, {
+      threadId: 'thread_current',
+      workspace: '/tmp/ws',
+      thread: { ownerUserId: 'user_a' },
+      request: { prompt: 'frontend task package manager?' }
+    })
+
+    await h.loop.runTurn(h.threadId, h.turnId)
+
+    const instructions = seenRequests.at(-1)?.contextInstructions?.join('\n') ?? ''
+    expect(instructions).toContain(current.id)
+    expect(instructions).not.toContain(other.id)
+    expect((await h.turns.getTurn(h.threadId, h.turnId))?.injectedMemoryIds).toEqual([current.id])
+  })
+
+  it('injects current task project memory on continue prompts without pulling another task', async () => {
+    const store = createStore()
+    const current = await store.create({
+      ownerUserId: 'user_a',
       content: '真实任务是宁德时代 300750 全面深度分析，需要输出 MD 报告和 HTML 看板',
       scope: 'project',
       workspace: '/tmp/ws',
-      sourceThreadId: h.threadId
+      sourceThreadId: 'catl_thread'
     })
     const other = await store.create({
+      ownerUserId: 'user_a',
       content: '旧任务是股指期货联动分析',
       scope: 'project',
       workspace: '/tmp/ws',
       sourceThreadId: 'futures_thread'
     })
+    const seenRequests: ModelRequest[] = []
+    const model: ModelClient = {
+      provider: 'fake',
+      model: 'fake',
+      async *stream(request) {
+        seenRequests.push(request)
+        yield { kind: 'completed', stopReason: 'stop' }
+      }
+    }
+    const h = makeHarness(model, { memoryStore: store })
     await bootstrapThread(h, {
+      threadId: 'catl_thread',
       workspace: '/tmp/ws',
+      thread: { ownerUserId: 'user_a' },
       request: { prompt: '继续' }
     })
 

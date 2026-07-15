@@ -89,6 +89,9 @@ export class ThreadService {
   async list(options: ListThreadsOptions = {}): Promise<ThreadSummary[]> {
     const query = options.search?.trim().toLowerCase()
     let threads = await this.threadStore.list(options)
+    if (options.ownerUserId) {
+      threads = threads.filter((thread) => thread.ownerUserId === options.ownerUserId)
+    }
     if (options.archivedOnly) {
       threads = threads.filter((thread) => thread.status === 'archived')
     } else if (!options.includeArchived) {
@@ -107,20 +110,32 @@ export class ThreadService {
     return this.threadStore.get(threadId)
   }
 
+  async getForOwner(threadId: string, ownerUserId: string): Promise<ThreadRecord | null> {
+    const thread = await this.threadStore.get(threadId)
+    if (!thread || thread.ownerUserId !== ownerUserId) return null
+    return thread
+  }
+
   async create(
     request: CreateThreadRequest,
-    options: { id?: string; title?: string; status?: ThreadStatus } = {}
+    options: { id?: string; title?: string; status?: ThreadStatus; ownerUserId?: string } = {}
   ): Promise<ThreadRecord> {
     // Always advance the id generator so externally-supplied ids
     // don't collide with later allocations from `fork`/etc.
     const generated = this.ids.next('thr')
     const id = options.id ?? generated
+    const model = request.model?.trim()
+    if (!model) throw new Error('model is required to create a thread')
+    const workspace = request.workspace?.trim()
+    if (!workspace) throw new Error('workspace is required to create a thread')
     const thread = createThreadRecord({
       id,
+      ownerUserId: options.ownerUserId,
       title: options.title ?? (request.title?.trim() || 'New chat'),
-      workspace: request.workspace,
-      model: request.model,
+      workspace,
+      model,
       mode: request.mode,
+      workModeId: request.workModeId,
       approvalPolicy: request.approvalPolicy,
       sandboxMode: request.sandboxMode,
       ...(request.costBudgetUsd !== undefined ? { costBudgetUsd: request.costBudgetUsd } : {}),
@@ -138,6 +153,8 @@ export class ThreadService {
   async update(threadId: string, patch: {
     title?: string
     workspace?: string
+    model?: string
+    mode?: ThreadMode
     status?: ThreadStatus
     approvalPolicy?: ApprovalPolicy
     sandboxMode?: SandboxMode

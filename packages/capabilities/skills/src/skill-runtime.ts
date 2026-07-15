@@ -90,7 +90,7 @@ export class SkillRuntime {
   private lastInjection: SkillRuntimeDiagnostics['lastInjection']
 
   private constructor(
-    private readonly config: SkillsCapabilityConfigType,
+    private config: SkillsCapabilityConfigType,
     private readonly options: Required<SkillRuntimeOptions>,
     loaded: { skills: LoadedSkill[]; validationErrors: Array<{ root: string; message: string }> }
   ) {
@@ -119,6 +119,13 @@ export class SkillRuntime {
       : { skills: [], validationErrors: [] }
     this.skills = loaded.skills
     this.validationErrors = loaded.validationErrors
+  }
+
+  async reload(config: SkillsCapabilityConfigType | undefined): Promise<void> {
+    this.config = config ?? SkillsCapabilityConfig.parse({ enabled: false })
+    this.lastActivations = []
+    this.lastInjection = undefined
+    await this.refresh()
   }
 
   resolveTurn(input: {

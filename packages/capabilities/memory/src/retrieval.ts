@@ -102,7 +102,8 @@ function inActiveScope(record: MemoryRecord, workspace: string | undefined, thre
   if (record.scope === 'project') {
     return Boolean(
       workspace &&
-      record.workspace === workspace
+      record.workspace === workspace &&
+      (!threadId || record.sourceThreadId === threadId)
     )
   }
   return false

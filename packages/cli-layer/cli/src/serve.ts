@@ -1,7 +1,10 @@
 import { z } from 'zod'
+import { basename, join } from 'node:path'
+import { existsSync, readdirSync } from 'node:fs'
 import {
   DEFAULT_SERVE_PORT,
   DEFAULT_SERVE_OPTIONS,
+  defaultKWorksRuntimeDataDir,
   ServeOptionsSchema,
   type ServeOptions
 } from './cli-options.js'
@@ -69,7 +72,7 @@ export function parseServeOptions(
           ? raw.dataDir
           : env.QIONGQI_DATA_DIR ??
             configServe.dataDir ??
-            DEFAULT_SERVE_OPTIONS.dataDir,
+            defaultKWorksRuntimeDataDir(env),
     runtimeToken:
       typeof raw['runtime-token'] === 'string'
         ? raw['runtime-token']
@@ -78,7 +81,7 @@ export function parseServeOptions(
           : env.QIONGQI_RUNTIME_TOKEN ??
             configServe.runtimeToken ??
             DEFAULT_SERVE_OPTIONS.runtimeToken,
-    apiKey: resolveApiKey(raw, env, configServe),
+    apiKey: resolveApiKey(raw, env, configServe) ?? '',
     baseUrl: resolveBaseUrl(raw, env, configServe),
     endpointFormat:
       typeof raw['endpoint-format'] === 'string'
@@ -122,9 +125,12 @@ export function parseServeOptions(
     },
     models: loadedConfig?.config.models,
     contextCompaction: loadedConfig?.config.contextCompaction,
-    runtime: loadedConfig?.config.runtime,
+    runtime: {
+      ...(DEFAULT_SERVE_OPTIONS.runtime ?? {}),
+      ...(loadedConfig?.config.runtime ?? {})
+    },
     observability: observabilityFromConfigOrEnv(configServe, env),
-    capabilities: loadedConfig?.config.capabilities ?? DEFAULT_SERVE_OPTIONS.capabilities,
+    capabilities: capabilitiesFromConfigOrEnv(loadedConfig?.config.capabilities, env),
     preset:
       typeof raw.preset === 'string'
         ? (raw.preset as ServeOptions['preset'])
@@ -144,6 +150,40 @@ export function validateServeOptions(input: unknown): ServeOptions {
 
 export function qiongqiRuntimeListeningMessage(host: string, port: number): string {
   return `qiongqi runtime listening on http://${host}:${port}`
+}
+
+export function qiongqiRuntimeStartupInfo({
+  host,
+  port,
+  info
+}: {
+  host: string
+  port: number
+  info: {
+    configPath?: string
+    dataDir: string
+    model?: string
+    approvalPolicy?: string
+    insecure?: boolean
+    startedAt: string
+    pid?: number
+    [key: string]: unknown
+  }
+}): Record<string, unknown> {
+  return {
+    service: 'qiongqi',
+    mode: 'serve',
+    host,
+    port,
+    configPath: info.configPath,
+    dataDir: info.dataDir,
+    defaultModel: info.model,
+    approvalPolicy: info.approvalPolicy,
+    insecure: info.insecure,
+    startedAt: info.startedAt,
+    pid: info.pid,
+    message: qiongqiRuntimeListeningMessage(host, port)
+  }
 }
 
 /** Human-readable usage string, used by the CLI when no args are given. */
@@ -191,25 +231,16 @@ export function parseServeOptionsSafe(
 ): ParseServeResult {
   try {
     const parsed = parseServeOptions(argv, env)
-    if (!parsed.dataDir) {
-      return {
-        ok: false,
-        exitCode: ServeExitCode.config,
-        message: 'serve requires --data-dir <path>'
-      }
-    }
     return { ok: true, options: parsed }
   } catch (error) {
     if (error instanceof z.ZodError) {
       const requiredFields = error.issues.filter(
         (issue) =>
           issue.code === 'invalid_type' &&
-          (issue.path[0] === 'apiKey' || issue.path[0] === 'baseUrl')
+          issue.path[0] === 'baseUrl'
       )
       if (requiredFields.length > 0) {
-        const labels = requiredFields.map((issue) =>
-          issue.path[0] === 'apiKey' ? '--api-key' : '--base-url'
-        )
+        const labels = requiredFields.map(() => '--base-url')
         return {
           ok: false,
           exitCode: ServeExitCode.config,
@@ -226,6 +257,84 @@ export function parseServeOptionsSafe(
     const message = error instanceof Error ? error.message : String(error)
     return { ok: false, exitCode: ServeExitCode.config, message }
   }
+}
+
+function capabilitiesFromConfigOrEnv(
+  config: ServeOptions['capabilities'] | undefined,
+  env: Record<string, string | undefined>
+): ServeOptions['capabilities'] {
+  const base = config ?? DEFAULT_SERVE_OPTIONS.capabilities
+  const skillRoots = kworksSkillRootsFromEnv(env)
+  if (skillRoots.length === 0) return base
+  return {
+    ...base,
+    skills: {
+      ...(base.skills ?? DEFAULT_SERVE_OPTIONS.capabilities.skills),
+      enabled: true,
+      legacySkillMd: true,
+      roots: uniqueStrings([
+        ...skillRoots,
+        ...(base.skills?.roots ?? [])
+      ])
+    }
+  }
+}
+
+function kworksSkillRootsFromEnv(env: Record<string, string | undefined>): string[] {
+  const raw = env.KWorks_SKILLS_PATH ?? env.KWORKS_SKILLS_PATH ?? env.QIONGQI_SKILLS_PATH
+  if (!raw?.trim()) return []
+  const roots = raw
+    .split(process.platform === 'win32' ? ';' : ':')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return roots.flatMap(skillRootsFromKWorksRoot)
+}
+
+function skillRootsFromKWorksRoot(root: string): string[] {
+  const unified = [
+    join(root, 'builtin', 'core'),
+    join(root, 'builtin', 'task'),
+    join(root, 'builtin', 'coding'),
+    join(root, 'builtin', 'finance'),
+    join(root, 'custom', 'shared')
+  ]
+  const legacy = [join(root, 'public'), join(root, 'custom')]
+  const existingLegacy = legacy.filter((candidate) => existsSync(candidate))
+  const hasUnifiedRoots = unified.some((candidate) => existsSync(candidate))
+  if (existingLegacy.length > 0 && !hasUnifiedRoots) return existingLegacy
+  const unifiedSkillIds = skillPackageIds(unified)
+  const missingLegacyPackages = existingLegacy.flatMap((legacyRoot) =>
+    skillPackageRoots(legacyRoot).filter((candidate) => !unifiedSkillIds.has(basename(candidate)))
+  )
+  return uniqueStrings([...unified, ...missingLegacyPackages])
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)]
+}
+
+function skillPackageIds(roots: readonly string[]): Set<string> {
+  return new Set(roots.flatMap(skillPackageRoots).map((candidate) => basename(candidate)))
+}
+
+function skillPackageRoots(root: string): string[] {
+  if (!existsSync(root)) return []
+  const packages: string[] = []
+  if (isSkillPackage(root)) packages.push(root)
+  try {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const candidate = join(root, entry.name)
+      if (isSkillPackage(candidate)) packages.push(candidate)
+    }
+  } catch {
+    return packages
+  }
+  return packages
+}
+
+function isSkillPackage(root: string): boolean {
+  return existsSync(join(root, 'skill.json')) || existsSync(join(root, 'SKILL.md'))
 }
 
 /**
@@ -291,7 +400,8 @@ function dataDirFromRawOrEnv(
 ): string | undefined {
   return stringFlag(raw, 'data-dir') ??
     stringFlag(raw, 'dataDir') ??
-    env.QIONGQI_DATA_DIR
+    env.QIONGQI_DATA_DIR ??
+    defaultKWorksRuntimeDataDir(env)
 }
 
 function storageBackendFromRawOrEnv(

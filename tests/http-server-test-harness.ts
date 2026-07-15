@@ -1,5 +1,8 @@
 import { buildRouter } from '@qiongqi/http'
 import { dispatchRequest } from '@qiongqi/http'
+import { AuthService, InMemoryAuthStore } from '@qiongqi/http'
+import type { KWorksUserDataStore } from '@qiongqi/http'
+import { InMemoryQiongqiConfigStore } from '@qiongqi/http'
 import { InMemoryEventBus } from '@qiongqi/adapter-storage'
 import { InMemoryApprovalGate } from '@qiongqi/adapter-storage'
 import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
@@ -22,6 +25,7 @@ import type { ModelClient, ModelRequest, ModelStreamChunk } from '@qiongqi/ports
 import { createApprovalRequest } from '@qiongqi/domain'
 import { encodeSseEvent } from '@qiongqi/http'
 import type { UsageSnapshot } from '@qiongqi/contracts'
+import type { KWorksUsageEventRecord } from '@qiongqi/http'
 import { buildRuntimeCapabilityManifest } from '@qiongqi/contracts'
 import { modelCapabilitiesForModel } from '@qiongqi/loop'
 
@@ -31,6 +35,68 @@ function makeModel(chunks: ModelStreamChunk[]): ModelClient {
     model: 'fake',
     async *stream(): AsyncIterable<ModelStreamChunk> {
       for (const chunk of chunks) yield chunk
+    }
+  }
+}
+
+function makeInMemoryUserDataStore(authStore: InMemoryAuthStore): KWorksUserDataStore {
+  const users = new Map<string, {
+    activeModel?: string
+    profiles: Record<string, Record<string, unknown>>
+    secrets: Record<string, { apiKey?: string }>
+    settings: Record<string, unknown>
+  }>()
+  const usageEvents: KWorksUsageEventRecord[] = []
+  return {
+    loadAuth: () => authStore.load(),
+    saveAuth: (snapshot) => authStore.save(snapshot),
+    async getUserSetting(userId, key) {
+      return users.get(userId)?.settings[key]
+    },
+    async setUserSetting(userId, key, value) {
+      const user = users.get(userId) ?? { profiles: {}, secrets: {}, settings: {} }
+      user.settings[key] = value
+      users.set(userId, user)
+    },
+    async listModelProfiles(userId) {
+      const user = users.get(userId)
+      const profiles: Record<string, Record<string, unknown>> = {}
+      for (const [name, profile] of Object.entries(user?.profiles ?? {})) {
+        profiles[name] = { ...profile, ...(user?.secrets[name]?.apiKey ? { apiKey: user.secrets[name]!.apiKey } : {}) }
+      }
+      return { activeModel: user?.activeModel, profiles }
+    },
+    async saveModelProfile(userId, name, profile, secret) {
+      const user = users.get(userId) ?? { profiles: {}, secrets: {}, settings: {} }
+      user.profiles[name] = { ...profile }
+      if (secret?.apiKey !== undefined) user.secrets[name] = { apiKey: secret.apiKey }
+      users.set(userId, user)
+    },
+    async deleteModelProfile(userId, name) {
+      const user = users.get(userId)
+      if (!user) return
+      delete user.profiles[name]
+      delete user.secrets[name]
+      if (user.activeModel === name) user.activeModel = Object.keys(user.profiles)[0]
+    },
+    async activateModelProfile(userId, name) {
+      const user = users.get(userId)
+      if (!user?.profiles[name]) throw new Error(`model profile ${name} not found`)
+      user.activeModel = name
+    },
+    async resolveModelSecret(userId, name) {
+      return users.get(userId)?.secrets[name] ?? {}
+    },
+    async appendUsageEvent(record) {
+      if (usageEvents.some((event) => event.threadId === record.threadId && event.seq === record.seq)) {
+        return
+      }
+      usageEvents.push(record)
+    },
+    async listUsageEvents(userId) {
+      return usageEvents
+        .filter((event) => userId === undefined || event.userId === userId)
+        .sort((a, b) => a.threadId.localeCompare(b.threadId) || a.seq - b.seq)
     }
   }
 }
@@ -78,6 +144,7 @@ type Harness = {
   threadStore: InMemoryThreadStore
   inflight: InflightTracker
   steering: SteeringQueue
+  events: RuntimeEventRecorder
   nowIso: () => string
 }
 
@@ -92,10 +159,30 @@ export function buildHarness(): Harness {
   const compactor = new ContextCompactor()
   const toolHost = new LocalToolHost({ tools: getDefaultLocalTools() })
   const usage = new UsageService()
+  const authStore = new InMemoryAuthStore()
+  const authService = new AuthService({ store: authStore, now: () => new Date() })
+  const kworksUserDataStore = makeInMemoryUserDataStore(authStore)
   const prefix = createImmutablePrefix({ systemPrompt: 'be brief' })
   const nowIso = () => new Date().toISOString()
   const allocateSeq = (threadId: string) => bus.allocateSeq(threadId)
-  const events = new RuntimeEventRecorder({ eventBus: bus, sessionStore, allocateSeq, nowIso })
+  const events = new RuntimeEventRecorder({
+    eventBus: bus,
+    sessionStore,
+    allocateSeq,
+    nowIso,
+    usageSink: async (event) => {
+      const thread = await threadStore.get(event.threadId)
+      await kworksUserDataStore.appendUsageEvent?.({
+        ...(thread?.ownerUserId ? { userId: thread.ownerUserId } : {}),
+        threadId: event.threadId,
+        seq: event.seq,
+        turnId: event.turnId,
+        ...(event.model ? { model: event.model } : {}),
+        timestamp: event.timestamp,
+        usage: event.usage
+      })
+    }
+  })
   const ids = new SequentialIdGenerator()
   const turnService = new TurnService({
     threadStore,
@@ -131,10 +218,48 @@ export function buildHarness(): Harness {
   const capabilities = buildRuntimeCapabilityManifest({
     model: modelCapabilitiesForModel(modelId)
   })
+  const configStore = new InMemoryQiongqiConfigStore({
+    serve: {
+      host: '127.0.0.1',
+      port: 0,
+      dataDir: '/tmp/kun',
+      runtimeToken: 'tok-1',
+      apiKey: '',
+      baseUrl: 'https://api.example.test/v1',
+      endpointFormat: 'openai-chat-completions',
+      model: modelId,
+      approvalPolicy: 'on-request',
+      sandboxMode: 'workspace-write',
+      tokenEconomyMode: false,
+      insecure: false,
+      storage: { backend: 'hybrid' }
+    },
+    models: {
+      profiles: {
+        [modelId]: {
+          contextWindowTokens: 1_000_000,
+          inputModalities: ['text'],
+          outputModalities: ['text'],
+          supportsToolCalling: true,
+          messageParts: ['text']
+        }
+      }
+    },
+    capabilities: {
+      mcp: { enabled: false, servers: {} },
+      web: { enabled: false, fetchEnabled: false, searchEnabled: false },
+      skills: { enabled: false },
+      subagents: { enabled: false, maxParallel: 0, maxChildRuns: 0 },
+      attachments: { enabled: true },
+      memory: { enabled: false }
+    }
+  })
   const runtime: ServerRuntime = {
     threadService,
     turnService,
     usageService: usage,
+    authService,
+    kworksUserDataStore,
     eventBus: bus,
     sessionStore,
     events,
@@ -144,6 +269,7 @@ export function buildHarness(): Harness {
     runTurn: (threadId, turnId) => {
       void loop.runTurn(threadId, turnId)
     },
+    configStore,
     runtimeToken: 'tok-1',
     insecure: false,
     allocateSeq,
@@ -173,6 +299,7 @@ export function buildHarness(): Harness {
     threadStore,
     inflight,
     steering,
+    events,
     nowIso
   }
 }

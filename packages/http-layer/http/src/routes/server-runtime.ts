@@ -22,6 +22,9 @@ import type { AttachmentStore } from '@qiongqi/attachments'
 import type { MemoryDiagnostics } from '@qiongqi/contracts'
 import type { MemoryStore } from '@qiongqi/memory'
 import type { ReviewTarget } from '@qiongqi/contracts'
+import type { AuthService } from '../auth-service.js'
+import type { QiongqiConfig } from '@qiongqi/contracts'
+import type { KWorksUserDataStore } from '../kworks-user-data-store.js'
 
 export type RuntimeToolDiagnostics = {
   providers: ToolProviderPolicy[]
@@ -45,6 +48,12 @@ export type StorageDiagnostics = {
   }
 }
 
+export type QiongqiConfigStore = {
+  read(): Promise<QiongqiConfig> | QiongqiConfig
+  write(config: QiongqiConfig): Promise<QiongqiConfig> | QiongqiConfig
+  snapshot?(): QiongqiConfig
+}
+
 /**
  * Dependencies that the HTTP router needs. Bundled into a single
  * type so callers can compose the runtime from the in-memory or
@@ -64,6 +73,8 @@ export type ServerRuntime = {
   toolHost?: ToolHost
   attachmentStore?: AttachmentStore
   memoryStore?: MemoryStore
+  authService?: AuthService
+  kworksUserDataStore?: KWorksUserDataStore
   runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> | void
   cancelA2ATaskTurn?(input: { threadId: string; turnId: string }): Promise<void> | void
   runReview?(input: {
@@ -86,7 +97,11 @@ export type ServerRuntime = {
   /** Stage 4: A2A task store for persistence. */
   a2aTaskStore?: FileA2ATaskStore
   toolDiagnostics?(): RuntimeToolDiagnostics | Promise<RuntimeToolDiagnostics>
+  refreshRuntimeTools?(): Promise<void>
+  refreshMcpTools?(): Promise<void>
   storageDiagnostics?(): StorageDiagnostics | Promise<StorageDiagnostics>
+  configStore?: QiongqiConfigStore
+  models?(): Array<Record<string, unknown>>
   skills?(): SkillRuntimeDiagnostics | Promise<SkillRuntimeDiagnostics>
   /**
    * v1 plugin diagnostics: same surface as `skills()` plus per-skill

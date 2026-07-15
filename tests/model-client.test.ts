@@ -6,6 +6,7 @@ import {
   makeCompactionItem,
   makeToolCallItem,
   makeToolResultItem,
+  makeUserInputItem,
   makeUserItem
 } from '@qiongqi/domain'
 import type { ModelRequest, ModelStreamChunk } from '@qiongqi/ports'
@@ -50,6 +51,31 @@ function sseStream(payloads: Array<Record<string, unknown> | '[DONE]'>): Readabl
 }
 
 describe('DeepseekCompatModelClient', () => {
+  it('reports sanitized endpoint details when fetch fails', async () => {
+    const fetchImpl: typeof fetch = async () => {
+      throw new Error('fetch failed')
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'sk-secret-zhipu',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl
+    })
+
+    const chunks: ModelStreamChunk[] = []
+    for await (const chunk of client.stream(buildRequest(new AbortController().signal))) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks[0]).toMatchObject({
+      kind: 'error',
+      message: expect.stringContaining('https://open.bigmodel.cn/api/paas/v4/chat/completions')
+    })
+    expect((chunks[0] as { message?: string }).message).toContain('endpointFormat=chat_completions')
+    expect((chunks[0] as { message?: string }).message).not.toContain('sk-secret-zhipu')
+  })
+
   it('uses request.model over client default model', async () => {
     const response = {
       id: 'r2',
@@ -131,6 +157,757 @@ describe('DeepseekCompatModelClient', () => {
 
       expect(sentUrls[0]).toBe(expectedUrl)
     }
+  })
+
+  it('normalizes user-facing OpenAI-compatible protocol aliases to chat completions URLs', async () => {
+    const cases = [
+      ['openai_compatible', 'https://api.deepseek.com', 'https://api.deepseek.com/v1/chat/completions'],
+      ['openai-compatible', 'https://open.bigmodel.cn/api/paas/v4', 'https://open.bigmodel.cn/api/paas/v4/chat/completions'],
+      ['openai_chat_completions', 'https://api.minimax.io/v1/text/chatcompletion_v2', 'https://api.minimax.io/v1/chat/completions']
+    ]
+
+    for (const [endpointFormat, baseUrl, expectedUrl] of cases) {
+      const sentUrls: string[] = []
+      const fetchImpl: typeof fetch = async (url) => {
+        sentUrls.push(String(url))
+        return new Response(JSON.stringify({
+          id: 'url',
+          model: 'compat-model',
+          choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }]
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+      }
+      const client = new DeepseekCompatModelClient({
+        baseUrl,
+        apiKey: 'k',
+        model: 'compat-model',
+        endpointFormat: endpointFormat as never,
+        fetchImpl,
+        nonStreaming: true
+      })
+
+      for await (const _chunk of client.stream(buildRequest(new AbortController().signal))) {
+        // drain
+      }
+
+      expect(sentUrls[0]).toBe(expectedUrl)
+    }
+  })
+
+  it('normalizes user-facing Anthropic-compatible protocol aliases to messages URLs', async () => {
+    const cases = [
+      ['anthropic_compatible', 'https://api.deepseek.com', 'https://api.deepseek.com/v1/messages'],
+      ['anthropic-compatible', 'https://open.bigmodel.cn/api/anthropic', 'https://open.bigmodel.cn/api/anthropic/v1/messages'],
+      ['anthropic_messages', 'https://api.minimax.io/v1/messages', 'https://api.minimax.io/v1/messages']
+    ]
+
+    for (const [endpointFormat, baseUrl, expectedUrl] of cases) {
+      const sentUrls: string[] = []
+      const fetchImpl: typeof fetch = async (url) => {
+        sentUrls.push(String(url))
+        return new Response(JSON.stringify({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 }
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+      }
+      const client = new DeepseekCompatModelClient({
+        baseUrl,
+        apiKey: 'k',
+        model: 'compat-model',
+        endpointFormat: endpointFormat as never,
+        fetchImpl,
+        nonStreaming: true
+      })
+
+      for await (const _chunk of client.stream(buildRequest(new AbortController().signal))) {
+        // drain
+      }
+
+      expect(sentUrls[0]).toBe(expectedUrl)
+    }
+  })
+
+  it('routes GLM 5.2 coding-plan models to BigModel/Z.ai coding endpoints', async () => {
+    const cases = [
+      [
+        'chat_completions',
+        'https://open.bigmodel.cn/api/paas/v4',
+        'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions'
+      ],
+      [
+        'openai_compatible',
+        'https://api.z.ai/api/paas/v4',
+        'https://api.z.ai/api/coding/paas/v4/chat/completions'
+      ],
+      [
+        'anthropic_compatible',
+        'https://open.bigmodel.cn/api/paas/v4',
+        'https://open.bigmodel.cn/api/anthropic/v1/messages'
+      ],
+      [
+        'anthropic_compatible',
+        'https://api.z.ai/api/coding/paas/v4',
+        'https://api.z.ai/api/anthropic/v1/messages'
+      ]
+    ]
+
+    for (const [endpointFormat, baseUrl, expectedUrl] of cases) {
+      const sentUrls: string[] = []
+      const fetchImpl: typeof fetch = async (url) => {
+        sentUrls.push(String(url))
+        if (String(expectedUrl).endsWith('/messages')) {
+          return new Response(JSON.stringify({
+            id: 'msg_1',
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'done' }],
+            stop_reason: 'end_turn',
+            usage: { input_tokens: 1, output_tokens: 1 }
+          }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' }
+          })
+        }
+        return new Response(JSON.stringify({
+          id: 'url',
+          model: 'glm-5.2',
+          choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }]
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' }
+        })
+      }
+      const client = new DeepseekCompatModelClient({
+        baseUrl,
+        apiKey: 'k',
+        model: 'glm-5.2',
+        endpointFormat: endpointFormat as never,
+        fetchImpl,
+        nonStreaming: true
+      })
+
+      const request = buildRequest(new AbortController().signal)
+      request.model = 'glm-5.2'
+      for await (const _chunk of client.stream(request)) {
+        // drain
+      }
+
+      expect(sentUrls[0]).toBe(expectedUrl)
+    }
+  })
+
+  it('uses Z.ai thinking controls without synthetic reasoning history for GLM OpenAI-compatible requests', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>>; reasoning_effort?: unknown; thinking?: unknown; tools?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'glm-no-reasoning-fields',
+      model: 'glm-5.2',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.reasoningEffort = 'high'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'assistant_text',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I inspected the project.',
+        status: 'completed'
+      }),
+      makeToolCallItem({
+        id: 'call_ls',
+        turnId: 'turn_2',
+        threadId: 'thr_1',
+        callId: 'call_ls',
+        toolName: 'echo',
+        arguments: { text: 'list files' }
+      }),
+      makeToolResultItem({
+        id: 'result_ls',
+        turnId: 'turn_2',
+        threadId: 'thr_1',
+        callId: 'call_ls',
+        toolName: 'echo',
+        output: 'package.json'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const body = sentBodies[0]
+    expect(body?.reasoning_effort).toBe('high')
+    expect(body?.thinking).toEqual({ type: 'enabled', clear_thinking: true })
+    expect(JSON.stringify(body?.messages ?? [])).not.toContain('reasoning_content')
+    expect(body?.tools?.[0]).toMatchObject({ type: 'function' })
+  })
+
+  it('enables Z.ai streaming tool calls for GLM tool requests', async () => {
+    const sentBodies: Array<Record<string, unknown>> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response(sseStream([
+        { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] },
+        '[DONE]'
+      ]), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    expect(sentBodies[0]).toMatchObject({
+      stream: true,
+      tool_stream: true
+    })
+    expect(sentBodies[0]?.tools).toEqual([
+      expect.objectContaining({ type: 'function' })
+    ])
+  })
+
+  it('folds GLM tool-call history into internal system context to avoid Zhipu messages 1214 errors', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'glm-tool-history',
+      model: 'glm-5.2',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.history = [
+      makeToolCallItem({
+        id: 'call_failed_bash',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_failed_bash',
+        toolName: 'bash',
+        arguments: { command: 'ls missing-file' }
+      }),
+      makeToolResultItem({
+        id: 'result_failed_bash',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_failed_bash',
+        toolName: 'bash',
+        output: {
+          command: 'ls missing-file',
+          exit_code: 1,
+          output: 'ls: missing-file: No such file or directory'
+        },
+        isError: true
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const messages = sentBodies[0]?.messages ?? []
+    expect(messages.some((message) => message.role === 'tool')).toBe(false)
+    expect(JSON.stringify(messages)).not.toContain('"tool_calls"')
+    expect(JSON.stringify(messages)).not.toContain('Tool bash failed')
+    expect(JSON.stringify(messages)).not.toContain('Arguments:')
+    expect(messages.some((message) =>
+      message.role === 'system' &&
+      String(message.content).includes('<qiongqi_internal_tool_context>') &&
+      String(message.content).includes('status: failed')
+    )).toBe(true)
+  })
+
+  it('folds GLM tool history that is kept after compaction into internal system context', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'glm-compacted-tool-history',
+      model: 'glm-5.2',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.history = [
+      makeCompactionItem({
+        id: 'compaction_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        summary: 'Older tool work was summarized.',
+        replacedTokens: 123,
+        pinnedConstraints: []
+      }),
+      makeToolResultItem({
+        id: 'orphan_result',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_read',
+        toolName: 'read',
+        output: { path: 'README.md', content: 'earlier output' }
+      }),
+      makeToolCallItem({
+        id: 'call_bash',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_bash',
+        toolName: 'bash',
+        arguments: { command: 'sed -n 1,20p README.md' }
+      }),
+      makeAssistantTextItem({
+        id: 'bridge_text',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Checking the final file shape.',
+        status: 'completed'
+      }),
+      makeToolResultItem({
+        id: 'result_bash',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_bash',
+        toolName: 'bash',
+        output: {
+          command: 'sed -n 1,20p README.md',
+          exit_code: 0,
+          output: '# README'
+        }
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const messages = sentBodies[0]?.messages ?? []
+    expect(messages.some((message) => message.role === 'tool')).toBe(false)
+    expect(JSON.stringify(messages)).not.toContain('"tool_calls"')
+    expect(String(messages[0]?.content)).toContain('Older tool work was summarized')
+    expect(JSON.stringify(messages)).not.toContain('Tool bash returned')
+    expect(JSON.stringify(messages)).not.toContain('Arguments:')
+    expect(JSON.stringify(messages)).toContain('<qiongqi_internal_tool_context>')
+    expect(JSON.stringify(messages)).toContain('assistant_preface:')
+    expect(JSON.stringify(messages)).toContain('Checking the final file shape.')
+    expect(messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: expect.stringContaining('Continue the active task')
+    })
+    expect(String(messages.at(-1)?.content)).toContain('Do not ask the user what to do')
+  })
+
+  it('folds replay-shifted GLM user-input tool history without orphan assistant messages', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'glm-replayed-user-input-tool-history',
+      model: 'glm-5.2',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.history = [
+      makeCompactionItem({
+        id: 'compaction_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        summary: 'Earlier user request and tool work were summarized.',
+        replacedTokens: 123,
+        pinnedConstraints: []
+      }),
+      makeAssistantTextItem({
+        id: 'assistant_preface',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I need one decision before continuing.',
+        status: 'completed'
+      }),
+      {
+        ...makeUserInputItem({
+          id: 'input_1',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          inputId: 'in_1',
+          prompt: 'Input requested',
+          questions: [
+            {
+              header: 'Choice',
+              id: 'choice',
+              question: 'Pick one',
+              options: [{ label: 'A', description: 'Use A' }]
+            }
+          ]
+        }),
+        status: 'submitted' as const
+      },
+      makeToolCallItem({
+        id: 'call_user_input',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_user_input',
+        toolName: 'request_user_input',
+        arguments: { questions: [{ id: 'choice', question: 'Pick one' }] }
+      }),
+      makeToolResultItem({
+        id: 'result_user_input',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_user_input',
+        toolName: 'request_user_input',
+        output: {
+          status: 'submitted',
+          answers: [{ id: 'choice', label: 'A', value: 'A' }]
+        }
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const messages = sentBodies[0]?.messages ?? []
+    expect(messages.some((message) => message.role === 'assistant')).toBe(false)
+    expect(JSON.stringify(messages)).not.toContain('"tool_calls"')
+    expect(messages.some((message) => message.role === 'tool')).toBe(false)
+    expect(String(messages[0]?.content)).toContain('<qiongqi_internal_tool_context>')
+    expect(String(messages[0]?.content)).toContain('assistant_preface:')
+    expect(String(messages[0]?.content)).toContain('I need one decision before continuing.')
+    expect(messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: expect.stringContaining('Continue the active task')
+    })
+    expect(String(messages.at(-1)?.content)).toContain('Do not ask the user what to do')
+  })
+
+  it('strips persisted legacy folded GLM tool history from assistant text before sending context', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'glm-persisted-tool-leak',
+      model: 'glm-5.2',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'leaked_assistant_text',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: [
+          'I checked the repository.',
+          '',
+          'Tool bash returned.',
+          'Arguments: {"command":"ls"}',
+          'Result:',
+          '```',
+          '{"output":"README.md"}',
+          '```',
+          '',
+          'The project has a README.'
+        ].join('\n'),
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const body = JSON.stringify(sentBodies[0]?.messages ?? [])
+    expect(body).toContain('I checked the repository.')
+    expect(body).toContain('The project has a README.')
+    expect(body).not.toContain('Tool bash returned')
+    expect(body).not.toContain('Arguments:')
+    expect(body).not.toContain('"command":"ls"')
+    expect(body).not.toContain('"output":"README.md"')
+  })
+
+  it('folds mutable system history into the initial system message for GLM OpenAI-compatible requests', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'glm-system-normalized',
+      model: 'glm-5.2',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.modeInstruction = 'Use coding mode.'
+    request.contextInstructions = ['Workspace: /tmp/project']
+    request.history = [
+      makeCompactionItem({
+        id: 'compact_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        summary: 'User wants the project analyzed. Keep inspected files in scope.',
+        replacedTokens: 123,
+        pinnedConstraints: []
+      }),
+      makeUserItem({ id: 'user_after_compact', turnId: 'turn_2', threadId: 'thr_1', text: 'continue' })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const messages = sentBodies[0]?.messages ?? []
+    const systemMessages = messages.filter((message) => message.role === 'system')
+    expect(systemMessages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({ role: 'system' })
+    expect(String(messages[0]?.content)).toContain('You are a helpful assistant.')
+    expect(String(messages[0]?.content)).toContain('Use coding mode.')
+    expect(String(messages[0]?.content)).toContain('Workspace: /tmp/project')
+    expect(String(messages[0]?.content)).toContain('User wants the project analyzed')
+    expect(messages[1]).toMatchObject({ role: 'user', content: 'continue' })
+  })
+
+  it('folds GLM messages by model id even when routed through an OpenAI-compatible proxy', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>>; reasoning_effort?: unknown; thinking?: unknown }> = []
+    const response = {
+      id: 'glm-proxy-system-normalized',
+      model: 'glm-5.2',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://gateway.example/openai',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.reasoningEffort = 'high'
+    request.modeInstruction = 'Use office mode.'
+    request.contextInstructions = ['Workspace: /tmp/project']
+    request.history = [
+      makeCompactionItem({
+        id: 'compact_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        summary: 'Earlier context should stay in scope.',
+        replacedTokens: 123,
+        pinnedConstraints: []
+      }),
+      makeUserItem({ id: 'user_after_compact', turnId: 'turn_2', threadId: 'thr_1', text: 'continue' })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const body = sentBodies[0]
+    const messages = body?.messages ?? []
+    const systemMessages = messages.filter((message) => message.role === 'system')
+    expect(systemMessages).toHaveLength(1)
+    expect(String(messages[0]?.content)).toContain('Use office mode.')
+    expect(String(messages[0]?.content)).toContain('Earlier context should stay in scope.')
+    expect(JSON.stringify(messages)).not.toContain('reasoning_content')
+    expect(JSON.stringify(messages)).not.toContain('"type":"thinking"')
+  })
+
+  it('omits reasoning controls for GLM models that do not support them', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>>; reasoning_effort?: unknown; thinking?: unknown }> = []
+    const response = {
+      id: 'glm-legacy-no-reasoning-controls',
+      model: 'glm-4-plus',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ]
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-4-plus',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-4-plus'
+    request.reasoningEffort = 'high'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'assistant_text',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I inspected the project.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const body = sentBodies[0]
+    expect(body).not.toHaveProperty('reasoning_effort')
+    expect(body).not.toHaveProperty('thinking')
+    expect(JSON.stringify(body?.messages ?? [])).not.toContain('reasoning_content')
   })
 
   it('uses the Responses API format when selected', async () => {
@@ -245,6 +1022,435 @@ describe('DeepseekCompatModelClient', () => {
     ])
   })
 
+  it('round-trips completed reasoning as Anthropic thinking blocks', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-sonnet-4-5'
+    request.reasoningEffort = 'high'
+    request.history = [
+      makeAssistantReasoningItem({
+        id: 'assistant_reasoning_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I need to preserve this thought for the next request.',
+        status: 'completed'
+      }),
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      { type: 'thinking', thinking: 'I need to preserve this thought for the next request.' },
+      { type: 'text', text: 'Here is the answer.' }
+    ])
+  })
+
+  it('round-trips Anthropic thinking signatures when present', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-sonnet-4-5'
+    request.reasoningEffort = 'high'
+    request.history = [
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_1',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: 'I need to preserve this thought for the next request.',
+          status: 'completed'
+        }),
+        signature: 'sig_opaque'
+      },
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      {
+        type: 'thinking',
+        thinking: 'I need to preserve this thought for the next request.',
+        signature: 'sig_opaque'
+      },
+      { type: 'text', text: 'Here is the answer.' }
+    ])
+  })
+
+  it('preserves prior Anthropic thinking even when the next request omits reasoning effort', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-sonnet-4-5'
+    request.history = [
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_1',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: 'I need to preserve this thought for the next request.',
+          status: 'completed'
+        }),
+        signature: 'sig_opaque'
+      },
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      {
+        type: 'thinking',
+        thinking: 'I need to preserve this thought for the next request.',
+        signature: 'sig_opaque'
+      },
+      { type: 'text', text: 'Here is the answer.' }
+    ])
+  })
+
+  it('does not auto-send Anthropic thinking blocks to compatible messages providers', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimax.io/v1/messages',
+      apiKey: 'anthropic-compatible-key',
+      model: 'MiniMax-M1',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M1'
+    request.history = [
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_1',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: 'Provider-compatible history reasoning must not become a thinking content block.',
+          status: 'completed'
+        }),
+        signature: 'sig_opaque'
+      },
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      { type: 'text', text: 'Here is the answer.' }
+    ])
+    expect(JSON.stringify(sentBodies[0]?.messages ?? [])).not.toContain('"type":"thinking"')
+  })
+
+  it('does not infer Anthropic thinking support from Claude-named models on compatible messages providers', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://gateway.example/v1/messages',
+      apiKey: 'anthropic-compatible-key',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-sonnet-4-5'
+    request.reasoningEffort = 'high'
+    request.history = [
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_1',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: 'Compatible gateways may use Claude model names without accepting thinking blocks.',
+          status: 'completed'
+        }),
+        signature: 'sig_opaque'
+      },
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      }),
+      makeToolCallItem({
+        id: 'call_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        arguments: { text: 'a' }
+      }),
+      makeToolResultItem({
+        id: 'result_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        output: 'a'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    expect(JSON.stringify(sentBodies[0]?.messages ?? [])).not.toContain('"type":"thinking"')
+  })
+
+  it('does not synthesize Anthropic thinking for unrelated assistant text when preserving prior thinking', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-sonnet-4-5'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'assistant_text_0',
+        turnId: 'turn_0',
+        threadId: 'thr_1',
+        text: 'Earlier answer without thinking.',
+        status: 'completed'
+      }),
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_1',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: 'I need to preserve this thought for the next request.',
+          status: 'completed'
+        }),
+        signature: 'sig_opaque'
+      },
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessages = sentBodies[0]?.messages?.filter((message) => message.role === 'assistant') ?? []
+
+    expect(assistantMessages[0]?.content).toEqual([
+      { type: 'text', text: 'Earlier answer without thinking.' }
+    ])
+    expect(assistantMessages[1]?.content).toEqual([
+      {
+        type: 'thinking',
+        thinking: 'I need to preserve this thought for the next request.',
+        signature: 'sig_opaque'
+      },
+      { type: 'text', text: 'Here is the answer.' }
+    ])
+  })
+
+  it('does not send synthetic Anthropic thinking blocks for blank reasoning placeholders', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-sonnet-4-5'
+    request.reasoningEffort = 'high'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      { type: 'text', text: 'Here is the answer.' }
+    ])
+  })
+
   it('streams Responses API text and function calls', async () => {
     const fetchImpl: typeof fetch = async () => new Response(sseStream([
       { type: 'response.output_text.delta', delta: 'hi' },
@@ -326,7 +1532,7 @@ describe('DeepseekCompatModelClient', () => {
       headers: { 'content-type': 'text/event-stream' }
     })
     const client = new DeepseekCompatModelClient({
-      baseUrl: 'https://claude.example',
+      baseUrl: 'https://api.anthropic.com',
       apiKey: 'k',
       model: 'claude-sonnet-4-5',
       endpointFormat: 'messages',
@@ -352,6 +1558,80 @@ describe('DeepseekCompatModelClient', () => {
     expect(chunks.find((chunk) => chunk.kind === 'usage')).toMatchObject({
       usage: expect.objectContaining({ promptTokens: 5, completionTokens: 8, totalTokens: 13 })
     })
+  })
+
+  it('captures Anthropic streaming thinking signatures', async () => {
+    const fetchImpl: typeof fetch = async () => new Response(sseStream([
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: 'step one' }
+      },
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'signature_delta', signature: 'sig_stream' }
+      },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'message_stop' }
+    ]), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'k',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl
+    })
+    const chunks: ModelStreamChunk[] = []
+    for await (const chunk of client.stream(buildRequest(new AbortController().signal))) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks.filter((chunk) => chunk.kind === 'assistant_reasoning_delta')).toEqual([
+      { kind: 'assistant_reasoning_delta', text: 'step one' },
+      { kind: 'assistant_reasoning_delta', text: '', signature: 'sig_stream' }
+    ])
+  })
+
+  it('captures Anthropic redacted thinking blocks for round trip', async () => {
+    const response = {
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      content: [
+        { type: 'redacted_thinking', data: 'encrypted_blob' },
+        { type: 'text', text: 'answer' }
+      ],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 4, output_tokens: 2 }
+    }
+    const fetchImpl: typeof fetch = async () => new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const chunks: ModelStreamChunk[] = []
+
+    for await (const chunk of client.stream(buildRequest(new AbortController().signal))) {
+      chunks.push(chunk)
+    }
+
+    expect(chunks).toEqual([
+      { kind: 'assistant_reasoning_delta', text: '', signature: 'redacted:encrypted_blob' },
+      { kind: 'assistant_text_delta', text: 'answer' },
+      expect.objectContaining({ kind: 'usage' }),
+      { kind: 'completed', stopReason: 'stop' }
+    ])
   })
 
   it('does not inject body.thinking on non-DeepSeek host (issue #26)', async () => {
@@ -416,6 +1696,90 @@ describe('DeepseekCompatModelClient', () => {
     // On the official host, the `thinking` field must still be set for v4 models.
     expect(sentBodies[0]).toHaveProperty('thinking')
     expect((sentBodies[0] as { thinking: { type: string } }).thinking).toMatchObject({ type: 'enabled' })
+  })
+
+  it('sends per-request router controls when requested', async () => {
+    const response = {
+      id: 'router',
+      model: 'deepseek-v4-flash',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: {
+            role: 'assistant',
+            content: '{"model":"deepseek-v4-pro","thinking":"max"}'
+          }
+        }
+      ]
+    }
+    const sentBodies: Array<Record<string, unknown>> = []
+    const sentAccept: string[] = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      sentAccept.push(String((init?.headers as Record<string, string>).Accept ?? ''))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://example.com/beta',
+      apiKey: 'k',
+      model: 'deepseek-chat',
+      fetchImpl
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'deepseek-v4-flash'
+    request.tools = []
+    request.stream = false
+    request.maxTokens = 96
+    request.temperature = 0
+    request.responseFormat = 'json_object'
+    request.reasoningEffort = 'off'
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+    expect(sentAccept[0]).toBe('application/json')
+    expect(sentBodies[0]).toMatchObject({
+      model: 'deepseek-v4-flash',
+      stream: false,
+      max_tokens: 96,
+      temperature: 0,
+      response_format: { type: 'json_object' }
+    })
+    expect(sentBodies[0]).not.toHaveProperty('thinking')
+  })
+
+  it('uses MiniMax thinking schema when reasoning is enabled', async () => {
+    const response = {
+      id: 'minimax',
+      model: 'MiniMax-M1',
+      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }]
+    }
+    const sentBodies: Array<Record<string, unknown>> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimax.io/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M1',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'MiniMax-M1'
+    request.reasoningEffort = 'high'
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+    expect(sentBodies[0]?.reasoning_effort).toBe('high')
+    expect(sentBodies[0]?.thinking).toEqual({ type: 'adaptive' })
   })
 
   it('enables MiniMax M3 official reasoning/tool-call split mode', async () => {
@@ -499,133 +1863,35 @@ describe('DeepseekCompatModelClient', () => {
     expect(assistantMessage?.content).toBe('\u200b')
   })
 
-  it('MiniMax injects an executable resume instruction when the request has only system messages', async () => {
+  it('uses MiniMax disabled thinking schema when reasoning is disabled', async () => {
     const response = {
-      id: 'minimax-system-only',
-      model: 'MiniMax-M3',
+      id: 'minimax-off',
+      model: 'MiniMax-M1',
       choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }]
-    }
-    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
-    const fetchImpl: typeof fetch = async (_url, init) => {
-      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
-      return new Response(JSON.stringify(response), {
-        status: 200,
-        headers: { 'content-type': 'application/json' }
-      })
-    }
-    const client = new DeepseekCompatModelClient({
-      baseUrl: 'https://api.minimaxi.com/v1',
-      apiKey: 'k',
-      model: 'MiniMax-M3',
-      fetchImpl,
-      nonStreaming: true
-    })
-    const request = buildRequest(new AbortController().signal)
-    request.history = []
-
-    for await (const _chunk of client.stream(request)) {
-      // drain
-    }
-
-    const user = sentBodies[0]?.messages?.find((message) => message.role === 'user')
-    expect(user?.content).toContain('Continue the active task')
-    expect(user?.content).toContain('Do not ask the user what to do')
-  })
-
-  it('GLM injects an executable resume instruction before an assistant-leading conversation', async () => {
-    const response = {
-      id: 'glm-assistant-leading',
-      model: 'glm-5.2',
-      choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'ok' } }]
-    }
-    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
-    const fetchImpl: typeof fetch = async (_url, init) => {
-      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
-      return new Response(JSON.stringify(response), {
-        status: 200,
-        headers: { 'content-type': 'application/json' }
-      })
-    }
-    const client = new DeepseekCompatModelClient({
-      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-      apiKey: 'k',
-      model: 'glm-5.2',
-      fetchImpl,
-      nonStreaming: true
-    })
-    const request = buildRequest(new AbortController().signal)
-    request.model = 'glm-5.2'
-    request.history = [
-      makeAssistantTextItem({
-        id: 'assistant_first',
-        turnId: 'turn_1',
-        threadId: 'thr_1',
-        text: 'I will continue the implementation.',
-        status: 'completed'
-      })
-    ]
-
-    for await (const _chunk of client.stream(request)) {
-      // drain
-    }
-
-    const firstNonSystem = sentBodies[0]?.messages?.find((message) => message.role !== 'system')
-    expect(firstNonSystem?.role).toBe('user')
-    expect(firstNonSystem?.content).toContain('Continue the active task')
-    expect(firstNonSystem?.content).toContain('Do not ask the user what to do')
-  })
-
-  it('sends per-request router controls when requested', async () => {
-    const response = {
-      id: 'router',
-      model: 'deepseek-v4-flash',
-      choices: [
-        {
-          index: 0,
-          finish_reason: 'stop',
-          message: {
-            role: 'assistant',
-            content: '{"model":"deepseek-v4-pro","thinking":"max"}'
-          }
-        }
-      ]
     }
     const sentBodies: Array<Record<string, unknown>> = []
-    const sentAccept: string[] = []
     const fetchImpl: typeof fetch = async (_url, init) => {
       sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
-      sentAccept.push(String((init?.headers as Record<string, string>).Accept ?? ''))
       return new Response(JSON.stringify(response), {
         status: 200,
         headers: { 'content-type': 'application/json' }
       })
     }
     const client = new DeepseekCompatModelClient({
-      baseUrl: 'https://example.com/beta',
+      baseUrl: 'https://api.minimax.io/v1',
       apiKey: 'k',
-      model: 'deepseek-chat',
-      fetchImpl
+      model: 'MiniMax-M1',
+      fetchImpl,
+      nonStreaming: true
     })
     const request = buildRequest(new AbortController().signal)
-    request.model = 'deepseek-v4-flash'
-    request.tools = []
-    request.stream = false
-    request.maxTokens = 96
-    request.temperature = 0
-    request.responseFormat = 'json_object'
+    request.model = 'MiniMax-M1'
     request.reasoningEffort = 'off'
     for await (const _chunk of client.stream(request)) {
       // drain
     }
-    expect(sentAccept[0]).toBe('application/json')
-    expect(sentBodies[0]).toMatchObject({
-      model: 'deepseek-v4-flash',
-      stream: false,
-      max_tokens: 96,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      thinking: { type: 'disabled' }
-    })
+    expect(sentBodies[0]).not.toHaveProperty('reasoning_effort')
+    expect(sentBodies[0]?.thinking).toEqual({ type: 'disabled' })
   })
 
   it('requests usage in streaming responses', async () => {
@@ -1213,7 +2479,10 @@ describe('DeepseekCompatModelClient', () => {
     expect(assistantToolMessage?.reasoning_content).toBe(
       'I need to inspect the current changes before writing the commit message.'
     )
-    expect(assistantToolMessage?.content).toBe('')
+    // Tool-call-only assistant messages omit the content key entirely for
+    // chat_completions (strict providers reject empty content, and a visible
+    // placeholder would pollute the conversation the model sees).
+    expect(!('content' in (assistantToolMessage ?? {}))).toBe(true)
     expect((assistantToolMessage?.tool_calls as Array<{ id?: string }> | undefined)?.map((call) => call.id))
       .toEqual(['call_a', 'call_b'])
     expect(messages.filter((message) => message.role === 'tool').map((message) => message.tool_call_id))
@@ -1286,10 +2555,11 @@ describe('DeepseekCompatModelClient', () => {
 
     expect(assistantTextMessage?.reasoning_content).toBe(' ')
     expect(assistantToolMessage?.reasoning_content).toBe(' ')
-    expect(assistantToolMessage?.content).toBe('')
+    // Tool-call-only assistant: content key omitted entirely.
+    expect(!('content' in (assistantToolMessage ?? {}))).toBe(true)
   })
 
-  it('treats fixed DeepSeek v4 models as thinking producers', async () => {
+  it('treats fixed DeepSeek v4 models as thinking producers without content-block thinking in chat completions', async () => {
     const sentBodies: Array<{ messages?: Array<Record<string, unknown>>; thinking?: unknown; reasoning_effort?: unknown }> = []
     const response = {
       id: 'r1',
@@ -1338,7 +2608,248 @@ describe('DeepseekCompatModelClient', () => {
 
     expect(body?.thinking).toEqual({ type: 'enabled' })
     expect(body?.reasoning_effort).toBeUndefined()
+    expect(assistantMessage?.content).toBe('Done.')
     expect(assistantMessage?.reasoning_content).toBe(' ')
+    expect(JSON.stringify(body?.messages ?? [])).not.toContain('"type":"thinking"')
+  })
+
+  it('round-trips blank DeepSeek v4 thinking placeholders as chat-completions reasoning_content', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>>; thinking?: unknown }> = []
+    const response = {
+      id: 'r1',
+      model: 'deepseek-v4-pro',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'k',
+      model: 'deepseek-v4-pro',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'deepseek-v4-pro'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'assistant_text',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Done.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(sentBodies[0]?.thinking).toEqual({ type: 'enabled' })
+    expect(assistantMessage?.content).toBe('Done.')
+    expect(assistantMessage?.reasoning_content).toBe(' ')
+    expect(JSON.stringify(sentBodies[0]?.messages ?? [])).not.toContain('"type":"thinking"')
+  })
+
+  it('round-trips signed DeepSeek v4 thinking in chat-completions reasoning_content', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>>; thinking?: unknown }> = []
+    const response = {
+      id: 'r1',
+      model: 'deepseek-v4-flash',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'k',
+      model: 'deepseek-chat',
+      endpointFormat: 'chat_completions',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'deepseek-v4-flash'
+    request.reasoningEffort = 'high'
+    request.history = [
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_before_call',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: 'Need to inspect the uploaded archive first.',
+          status: 'completed'
+        }),
+        signature: 'sig_deepseek_v4'
+      },
+      makeAssistantTextItem({
+        id: 'assistant_text_before_call',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I will inspect the archive.',
+        status: 'completed'
+      }),
+      makeToolCallItem({
+        id: 'call_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        arguments: { text: 'inspect archive' }
+      }),
+      makeToolResultItem({
+        id: 'result_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        output: 'archive contents'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(sentBodies[0]?.thinking).toEqual({ type: 'enabled' })
+    expect(assistantMessage?.content).toBe('I will inspect the archive.')
+    expect(assistantMessage?.reasoning_content).toBe('Need to inspect the uploaded archive first.')
+    expect(assistantMessage?.reasoning_signature).toBe('sig_deepseek_v4')
+    expect((assistantMessage?.tool_calls as Array<{ id?: string }> | undefined)?.map((call) => call.id))
+      .toEqual(['call_a'])
+  })
+
+  it('round-trips official DeepSeek thinking on Anthropic-compatible endpoints', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'deepseek-key',
+      model: 'deepseek-v4-pro',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'deepseek-v4-pro'
+    request.history = [
+      makeAssistantReasoningItem({
+        id: 'assistant_reasoning_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I need to preserve this thought for the next request.',
+        status: 'completed'
+      }),
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      { type: 'thinking', thinking: 'I need to preserve this thought for the next request.' },
+      { type: 'text', text: 'Here is the answer.' }
+    ])
+  })
+
+  it('round-trips blank official DeepSeek thinking placeholders on Anthropic-compatible endpoints', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'deepseek-key',
+      model: 'deepseek-v4-pro',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'deepseek-v4-pro'
+    request.reasoningEffort = 'high'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'assistant_text_1',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Here is the answer.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      { type: 'thinking', thinking: '' },
+      { type: 'text', text: 'Here is the answer.' }
+    ])
   })
 
   it('preserves thinking reasoning_content that appears before tool calls', async () => {
@@ -1416,7 +2927,251 @@ describe('DeepseekCompatModelClient', () => {
     expect(assistantToolMessage?.reasoning_content).toBe('I should inspect git status before answering.')
   })
 
-  it('serializes undefined tool outputs as empty string content', async () => {
+  it('serializes signed Anthropic thinking before tool-use blocks', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-sonnet-4-5',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-sonnet-4-5'
+    request.history = [
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_before_call',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: 'I should inspect git status before answering.',
+          status: 'completed'
+        }),
+        signature: 'sig_tool'
+      },
+      makeAssistantTextItem({
+        id: 'assistant_text_before_call',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I will inspect the changes.',
+        status: 'completed'
+      }),
+      makeToolCallItem({
+        id: 'call_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        arguments: { text: 'a' }
+      }),
+      makeToolResultItem({
+        id: 'result_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        output: 'a'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      {
+        type: 'thinking',
+        thinking: 'I should inspect git status before answering.',
+        signature: 'sig_tool'
+      },
+      { type: 'text', text: 'I will inspect the changes.' },
+      {
+        type: 'tool_use',
+        id: 'call_a',
+        name: 'echo',
+        input: { text: 'a' }
+      }
+    ])
+  })
+
+  it('round-trips signed Anthropic thinking even when thinking text is omitted', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-opus-4-7',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-opus-4-7'
+    request.history = [
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_before_call',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: '',
+          status: 'completed'
+        }),
+        signature: 'sig_omitted'
+      },
+      makeAssistantTextItem({
+        id: 'assistant_text_before_call',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I will inspect the changes.',
+        status: 'completed'
+      }),
+      makeToolCallItem({
+        id: 'call_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        arguments: { text: 'a' }
+      }),
+      makeToolResultItem({
+        id: 'result_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        output: 'a'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      {
+        type: 'thinking',
+        thinking: '',
+        signature: 'sig_omitted'
+      },
+      { type: 'text', text: 'I will inspect the changes.' },
+      {
+        type: 'tool_use',
+        id: 'call_a',
+        name: 'echo',
+        input: { text: 'a' }
+      }
+    ])
+  })
+
+  it('serializes signed Anthropic thinking before tool-use blocks when no assistant text was emitted', async () => {
+    const sentBodies: Array<{ messages?: Array<{ role?: string; content?: unknown }> }> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify({
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'next' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 4, output_tokens: 2 }
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      model: 'claude-opus-4-7',
+      endpointFormat: 'messages',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'claude-opus-4-7'
+    request.history = [
+      {
+        ...makeAssistantReasoningItem({
+          id: 'assistant_reasoning_before_call',
+          turnId: 'turn_1',
+          threadId: 'thr_1',
+          text: 'Need to inspect the uploaded archive first.',
+          status: 'completed'
+        }),
+        signature: 'sig_tool_only'
+      },
+      makeToolCallItem({
+        id: 'call_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        arguments: { text: 'inspect archive' }
+      }),
+      makeToolResultItem({
+        id: 'result_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        output: 'archive contents'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const assistantMessage = sentBodies[0]?.messages?.find((message) => message.role === 'assistant')
+
+    expect(assistantMessage?.content).toEqual([
+      {
+        type: 'thinking',
+        thinking: 'Need to inspect the uploaded archive first.',
+        signature: 'sig_tool_only'
+      },
+      {
+        type: 'tool_use',
+        id: 'call_a',
+        name: 'echo',
+        input: { text: 'inspect archive' }
+      }
+    ])
+  })
+
+  it('coerces empty tool outputs to a single space on chat_completions endpoints', async () => {
     const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
     const response = {
       id: 'r1',
@@ -1468,9 +3223,178 @@ describe('DeepseekCompatModelClient', () => {
       // drain
     }
 
-    const toolMessage = sentBodies[0]?.messages?.find((message) => message.role === 'tool')
+    const messages = sentBodies[0]?.messages ?? []
+    const assistantMessage = messages.find((message) => message.role === 'assistant' && Array.isArray(message.tool_calls))
+    const toolMessage = messages.find((message) => message.role === 'tool')
 
-    expect(toolMessage?.content).toBe('')
+    // Strict providers (e.g. MiniMax error 2013 "chat content is empty") reject
+    // empty content. The tool-call-only assistant message omits the content key
+    // entirely (a visible placeholder would pollute the conversation), and the
+    // empty tool result gets an unambiguous placeholder string.
+    expect(!('content' in (assistantMessage ?? {}))).toBe(true)
+    expect(toolMessage?.content).toBe('\u200b')
+  })
+
+  it('MiniMax coerces empty tool-call assistant content to a placeholder', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'r1',
+      model: 'MiniMax-M3',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimax.chat/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.history = [
+      makeToolCallItem({
+        id: 'call_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        arguments: { text: 'a' }
+      }),
+      makeToolResultItem({
+        id: 'result_a',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        callId: 'call_a',
+        toolName: 'echo',
+        output: 'a'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const messages = sentBodies[0]?.messages ?? []
+    const assistantMessage = messages.find((message) => message.role === 'assistant' && Array.isArray(message.tool_calls))
+    // MiniMax rejects a missing/empty content field (error 2013); we supply a
+    // non-empty invisible placeholder instead of a visible token the model can
+    // echo back into the transcript.
+    expect(assistantMessage?.content).toBe('\u200b')
+  })
+
+  it('MiniMax injects a user message when the request has only system messages', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'r1',
+      model: 'MiniMax-M3',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://api.minimaxi.com/v1',
+      apiKey: 'k',
+      model: 'MiniMax-M3',
+      fetchImpl,
+      nonStreaming: true
+    })
+    // A request with no history — only the system prompt — simulates the
+    // post-compaction state where everything folded into system messages.
+    const request = buildRequest(new AbortController().signal)
+    request.history = []
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const messages = sentBodies[0]?.messages ?? []
+    // MiniMax rejects a request with only system messages ("chat content is
+    // empty"); the synthetic user message must also carry a clear resumption
+    // instruction so post-compaction turns do not ask the user what to do.
+    const user = messages.find((message) => message.role === 'user')
+    expect(user?.content).toContain('Continue the active task')
+    expect(user?.content).toContain('Do not ask the user what to do')
+  })
+
+  it('GLM injects a leading user message when the first conversational message is assistant (1214)', async () => {
+    const sentBodies: Array<{ messages?: Array<Record<string, unknown>> }> = []
+    const response = {
+      id: 'r1',
+      model: 'glm-4.6',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'done' }
+        }
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')))
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      apiKey: 'k',
+      model: 'glm-4.6',
+      fetchImpl,
+      nonStreaming: true
+    })
+    // Post-compaction: a system summary followed by an assistant turn with no
+    // preceding user message — Zhipu GLM rejects this (error 1214).
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.history = [
+      makeAssistantTextItem({
+        id: 'assistant_first',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'I will help with that.',
+        status: 'completed'
+      })
+    ]
+
+    for await (const _chunk of client.stream(request)) {
+      // drain
+    }
+
+    const messages = sentBodies[0]?.messages ?? []
+    // After normalization there must be a user message before the first
+    // assistant message so GLM accepts the conversation.
+    const firstNonSystem = messages.find((message) => message.role !== 'system')
+    expect(firstNonSystem?.role).toBe('user')
+    expect(String(firstNonSystem?.content)).toContain('Continue the active task')
+    expect(String(firstNonSystem?.content)).toContain('Do not ask the user what to do')
+    expect(messages.some((message) => message.role === 'assistant')).toBe(true)
   })
 
   it('sends compaction summaries as mutable system messages', async () => {
@@ -1916,6 +3840,168 @@ describe('DeepseekCompatModelClient', () => {
     expect(sentBodies[1]).not.toHaveProperty('stream_options')
     expect(text).toBe('retried')
     expect(usage && usage.kind === 'usage' ? usage.usage.totalTokens : 0).toBe(7)
+  })
+
+  it('retries without reasoning controls when Zhipu reports generic 1214 messages errors', async () => {
+    const sentBodies: Array<Record<string, unknown>> = []
+    const encoder = new TextEncoder()
+    const retryBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'))
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n\n'
+          )
+        )
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+        controller.close()
+      }
+    })
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      if (sentBodies.length === 1) {
+        return new Response(
+          JSON.stringify({ error: { code: '1214', message: 'messages 参数非法。请检查文档。' } }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        )
+      }
+      return new Response(retryBody, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      fetchImpl
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    request.reasoningEffort = 'high'
+    const chunks: ModelStreamChunk[] = []
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+
+    const text = chunks
+      .filter((c) => c.kind === 'assistant_text_delta')
+      .map((c) => (c as { text: string }).text)
+      .join('')
+    expect(sentBodies).toHaveLength(2)
+    expect(sentBodies[0]).toHaveProperty('reasoning_effort')
+    expect(sentBodies[0]).toHaveProperty('thinking')
+    expect(sentBodies[1]).not.toHaveProperty('reasoning_effort')
+    expect(sentBodies[1]).not.toHaveProperty('thinking')
+    expect(text).toBe('ok')
+  })
+
+  it('retries generic Zhipu 1214 messages errors without stream usage metadata', async () => {
+    const sentBodies: Array<Record<string, unknown>> = []
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      if (sentBodies.length === 1) {
+        return new Response(
+          JSON.stringify({ error: { code: '1214', message: 'messages 参数非法。请检查文档。' } }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        )
+      }
+      return new Response(sseStream([
+        { choices: [{ delta: { content: 'retried' } }] },
+        { choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 } },
+        '[DONE]'
+      ]), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKey: 'k',
+      model: 'glm-5.2',
+      fetchImpl
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'glm-5.2'
+    const chunks: ModelStreamChunk[] = []
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+
+    const text = chunks
+      .filter((c) => c.kind === 'assistant_text_delta')
+      .map((c) => (c as { text: string }).text)
+      .join('')
+    expect(sentBodies).toHaveLength(2)
+    expect(sentBodies[0]).toHaveProperty('stream_options')
+    expect(sentBodies[1]).not.toHaveProperty('stream_options')
+    expect(text).toBe('retried')
+  })
+
+  it('retries without message reasoning_content when an OpenAI-compatible provider rejects it', async () => {
+    const sentBodies: Array<Record<string, unknown>> = []
+    const response = {
+      id: 'compat-retry-no-reasoning-content',
+      model: 'deepseek-v4-pro',
+      choices: [
+        {
+          index: 0,
+          finish_reason: 'stop',
+          message: { role: 'assistant', content: 'ok' }
+        }
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+    }
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      sentBodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      if (sentBodies.length === 1) {
+        return new Response('reasoning_content is not allowed', { status: 400 })
+      }
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      })
+    }
+    const client = new DeepseekCompatModelClient({
+      baseUrl: 'https://gateway.example/v1',
+      apiKey: 'k',
+      model: 'deepseek-v4-pro',
+      fetchImpl,
+      nonStreaming: true
+    })
+    const request = buildRequest(new AbortController().signal)
+    request.model = 'deepseek-v4-pro'
+    request.reasoningEffort = 'high'
+    request.history = [
+      makeAssistantReasoningItem({
+        id: 'assistant_reasoning',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Think before answering.',
+        status: 'completed'
+      }),
+      makeAssistantTextItem({
+        id: 'assistant_text',
+        turnId: 'turn_1',
+        threadId: 'thr_1',
+        text: 'Done.',
+        status: 'completed'
+      })
+    ]
+
+    const chunks: ModelStreamChunk[] = []
+    for await (const chunk of client.stream(request)) {
+      chunks.push(chunk)
+    }
+
+    expect(sentBodies).toHaveLength(2)
+    expect(sentBodies[0]).toHaveProperty('reasoning_effort')
+    expect(JSON.stringify(sentBodies[0]?.messages ?? [])).toContain('reasoning_content')
+    expect(sentBodies[1]).not.toHaveProperty('reasoning_effort')
+    expect(sentBodies[1]).not.toHaveProperty('thinking')
+    expect(JSON.stringify(sentBodies[1]?.messages ?? [])).not.toContain('reasoning_content')
+    expect(chunks).toEqual([
+      { kind: 'assistant_text_delta', text: 'ok' },
+      expect.objectContaining({ kind: 'usage' }),
+      { kind: 'completed', stopReason: 'stop' }
+    ])
   })
 
   it('merges streamed tool-call deltas by index when the provider id arrives later', async () => {

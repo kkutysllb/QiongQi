@@ -6,6 +6,7 @@ export type ThreadStoreListOptions = {
   includeArchived?: boolean
   archivedOnly?: boolean
   includeSide?: boolean
+  ownerUserId?: string
 }
 
 /**

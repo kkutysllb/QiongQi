@@ -6,6 +6,7 @@
  * abstraction.
  */
 export * from './model-compat-client.js'
+export * from './routed-model-compat-client.js'
 export * from './pricing/index.js'
 export * from './model-error-probe.js'
 export * from './provider-compatibility.js'

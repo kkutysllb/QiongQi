@@ -22,10 +22,12 @@ export type ThreadEntity = ThreadRecord
 
 export function createThreadRecord(input: {
   id: string
+  ownerUserId?: string
   title: string
   workspace: string
   model: string
   mode?: ThreadMode
+  workModeId?: string
   status?: ThreadStatus
   approvalPolicy?: ApprovalPolicy
   sandboxMode?: SandboxMode
@@ -45,10 +47,12 @@ export function createThreadRecord(input: {
   const now = input.createdAt ?? new Date().toISOString()
   return {
     id: input.id,
+    ...(input.ownerUserId ? { ownerUserId: input.ownerUserId } : {}),
     title: input.title,
     workspace: input.workspace,
     model: input.model,
     mode: input.mode ?? 'agent',
+    workModeId: input.workModeId ?? 'office',
     status: input.status ?? 'idle',
     approvalPolicy: input.approvalPolicy ?? DEFAULT_APPROVAL_POLICY,
     sandboxMode: input.sandboxMode ?? DEFAULT_SANDBOX_MODE,
@@ -78,6 +82,8 @@ export function toThreadSummary(
 ): Pick<
   ThreadEntity,
   'id' | 'title' | 'workspace' | 'model' | 'mode' | 'status' | 'createdAt' | 'updatedAt'
+  | 'ownerUserId'
+  | 'workModeId'
   | 'costBudgetUsd' | 'costBudgetWarningSent'
   | 'relation' | 'parentThreadId'
   | 'forkedFromThreadId' | 'forkedFromTitle' | 'forkedAt' | 'forkedFromMessageCount' | 'forkedFromTurnCount'
@@ -85,10 +91,12 @@ export function toThreadSummary(
 > {
   return {
     id: thread.id,
+    ...(thread.ownerUserId ? { ownerUserId: thread.ownerUserId } : {}),
     title: thread.title,
     workspace: thread.workspace,
     model: thread.model,
     mode: thread.mode,
+    workModeId: thread.workModeId ?? 'office',
     status: thread.status,
     ...(thread.costBudgetUsd !== undefined ? { costBudgetUsd: thread.costBudgetUsd } : {}),
     ...(thread.costBudgetWarningSent !== undefined ? { costBudgetWarningSent: thread.costBudgetWarningSent } : {}),
