@@ -36,7 +36,7 @@ import {
   type QiongqiCapabilitiesConfig
 } from '@qiongqi/contracts'
 import type { ApprovalPolicy, SandboxMode } from '@qiongqi/contracts'
-import { EffectCommitCoordinator, KernelTurnRunner, normalizeOrchestrationMode, ToolRuntimeV3, type OrchestrationMode } from '@qiongqi/loop'
+import { EffectCommitCoordinator, KernelTurnRunner, resolveRuntimeRolloutMode, ToolRuntimeV3, type OrchestrationMode } from '@qiongqi/loop'
 import type {
   ToolHost,
   ToolHostContext,
@@ -201,6 +201,16 @@ export type QiongqiServeRuntimeOptions = {
 
 export type QiongqiServeHandle = NodeHttpServerHandle & {
   runtime: ServerRuntime
+}
+
+export function orchestrationModeForRuntimeOptions(
+  options: Pick<QiongqiServeRuntimeOptions, 'orchestrationMode' | 'runtime'>
+): OrchestrationMode {
+  const rollout = options.runtime?.kernelRollout
+  return resolveRuntimeRolloutMode({
+    configured: options.orchestrationMode ?? options.runtime?.orchestrationMode ?? rollout?.defaultMode,
+    enabled: options.orchestrationMode === 'kernel_v3' || rollout?.enabled === true
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,7 +1121,7 @@ async function assembleRuntime(input: {
     ...(tokenEconomy ? { tokenEconomy } : {}),
     ...(options.runtime ? { runtime: options.runtime } : {})
   })
-  const orchestrationMode = normalizeOrchestrationMode(options.orchestrationMode)
+  const orchestrationMode = orchestrationModeForRuntimeOptions(options)
   const runtimeV3Root = join(options.dataDir, 'runtime-v3')
   const runtimeV3Events = orchestrationMode === 'kernel_v3' ? new FileRunEventStore(runtimeV3Root) : undefined
   const toolRuntime = runtimeV3Events
