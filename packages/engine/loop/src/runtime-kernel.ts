@@ -311,6 +311,16 @@ export class RuntimeKernel {
         }
         next = { ...next, taskRevision: command.revision }
       }
+      if (command.type === 'set-recovery') {
+        next = { ...next, recovery: command.recovery }
+      }
+      if (command.type === 'set-effects') {
+        next = {
+          ...next,
+          pendingEffects: command.pendingEffects,
+          committedEffects: command.committedEffects
+        }
+      }
     }
     return next
   }

@@ -1,4 +1,4 @@
-import type { RunIdentity, RunOutcome, RunStateV3 } from '@qiongqi/contracts'
+import type { EffectIntent, CommittedEffectRef, RecoveryState, RunIdentity, RunOutcome, RunStateV3 } from '@qiongqi/contracts'
 import type { RuntimeNode } from './execution-graph.js'
 
 export type RuntimeHook = 'beforeRun' | 'beforeNode' | 'afterNode' | 'afterRun' | 'onError' | (string & {})
@@ -8,6 +8,8 @@ export type MiddlewareCommand =
   | { type: 'set-budget'; key: 'stepsUsed' | 'toolCallsUsed' | 'inputTokens' | 'outputTokens' | 'costUsd'; value: number }
   | { type: 'set-node-data'; nodeId: string; value: unknown }
   | { type: 'set-task-revision'; revision: number }
+  | { type: 'set-recovery'; recovery: RecoveryState }
+  | { type: 'set-effects'; pendingEffects: EffectIntent[]; committedEffects: CommittedEffectRef[] }
   | { type: 'jump'; nodeId: string; condition: string; reason: string }
   | { type: 'terminate'; outcome: RunOutcome }
   | { type: 'suspend'; outcome: RunOutcome }
