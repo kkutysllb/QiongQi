@@ -5,6 +5,7 @@ export type MemoryScope = z.infer<typeof MemoryScope>
 
 export const MemoryRecord = z.object({
   id: z.string().min(1),
+  ownerUserId: z.string().min(1).optional(),
   content: z.string().min(1),
   scope: MemoryScope,
   workspace: z.string().optional(),
@@ -21,6 +22,7 @@ export const MemoryRecord = z.object({
 export type MemoryRecord = z.infer<typeof MemoryRecord>
 
 export const MemoryCreateRequest = z.object({
+  ownerUserId: z.string().min(1).optional(),
   content: z.string().min(1),
   scope: MemoryScope.default('workspace'),
   workspace: z.string().optional(),

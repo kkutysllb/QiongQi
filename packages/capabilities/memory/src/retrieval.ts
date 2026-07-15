@@ -5,6 +5,7 @@ export type RankMemoryRecordsInput = {
   records: MemoryRecord[]
   workspace?: string
   threadId?: string
+  ownerUserId?: string
   limit: number
 }
 
@@ -38,7 +39,7 @@ export function rankMemoryRecords(input: RankMemoryRecordsInput): MemoryRecord[]
   const allowCurrentTaskCarryover = isContinuationQuery(input.query)
   return input.records
     .filter((record) => !record.deletedAt && !record.disabledAt)
-    .filter((record) => inActiveScope(record, input.workspace, input.threadId))
+    .filter((record) => inActiveScope(record, input.workspace, input.threadId, input.ownerUserId))
     .map((record) => {
       const lexicalScore = scoreRecord(record, queryTokens)
       const currentTaskCarryover =
@@ -94,14 +95,14 @@ function scoreRecord(record: MemoryRecord, queryTokens: Set<string>): number {
   return (overlap + technicalExact * 2) * Math.max(record.confidence, 0)
 }
 
-function inActiveScope(record: MemoryRecord, workspace: string | undefined, threadId: string | undefined): boolean {
+function inActiveScope(record: MemoryRecord, workspace: string | undefined, threadId: string | undefined, ownerUserId?: string): boolean {
+  if (ownerUserId && record.ownerUserId !== ownerUserId) return false
   if (record.scope === 'user') return true
   if (record.scope === 'workspace') return Boolean(workspace && record.workspace === workspace)
   if (record.scope === 'project') {
     return Boolean(
       workspace &&
-      record.workspace === workspace &&
-      (!threadId || record.sourceThreadId === threadId)
+      record.workspace === workspace
     )
   }
   return false

@@ -14,8 +14,8 @@ export interface MemoryStore {
   create(input: MemoryCreateRequest): Promise<MemoryRecord>
   update(id: string, patch: MemoryUpdateRequest): Promise<MemoryRecord>
   delete(id: string): Promise<MemoryRecord>
-  list(filter?: { workspace?: string; includeDeleted?: boolean }): Promise<MemoryRecord[]>
-  retrieve(input: { query: string; workspace?: string; threadId?: string; limit: number }): Promise<MemoryRecord[]>
+  list(filter?: { workspace?: string; includeDeleted?: boolean; ownerUserId?: string }): Promise<MemoryRecord[]>
+  retrieve(input: { query: string; workspace?: string; threadId?: string; limit: number; ownerUserId?: string }): Promise<MemoryRecord[]>
   diagnostics(): Promise<MemoryDiagnostics>
   setLastInjected(ids: string[]): void
 }
@@ -37,6 +37,7 @@ export class FileMemoryStore implements MemoryStore {
     const now = this.now()
     const parsed = MemoryRecord.parse({
       id: this.options.idGenerator?.() ?? `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      ownerUserId: input.ownerUserId,
       content: input.content,
       scope: input.scope ?? 'workspace',
       workspace: input.workspace,
@@ -80,21 +81,23 @@ export class FileMemoryStore implements MemoryStore {
     return next
   }
 
-  async list(filter: { workspace?: string; includeDeleted?: boolean } = {}): Promise<MemoryRecord[]> {
+  async list(filter: { workspace?: string; includeDeleted?: boolean; ownerUserId?: string } = {}): Promise<MemoryRecord[]> {
     const records = await this.readAll()
     return records
+      .filter((record) => !filter.ownerUserId || record.ownerUserId === filter.ownerUserId)
       .filter((record) => filter.includeDeleted || !record.deletedAt)
       .filter((record) => inScope(record, filter.workspace))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   }
 
-  async retrieve(input: { query: string; workspace?: string; threadId?: string; limit: number }): Promise<MemoryRecord[]> {
+  async retrieve(input: { query: string; workspace?: string; threadId?: string; limit: number; ownerUserId?: string }): Promise<MemoryRecord[]> {
     if (!this.options.config.enabled) return []
     return rankMemoryRecords({
       query: input.query,
-      records: await this.readAll(),
+      records: (await this.readAll()).filter((record) => !input.ownerUserId || record.ownerUserId === input.ownerUserId),
       workspace: input.workspace,
       threadId: input.threadId,
+      ownerUserId: input.ownerUserId,
       limit: input.limit
     })
   }
@@ -146,5 +149,6 @@ export class FileMemoryStore implements MemoryStore {
 function inScope(record: MemoryRecord, workspace: string | undefined): boolean {
   if (record.scope === 'user') return true
   if (record.scope === 'workspace') return Boolean(workspace && record.workspace === workspace)
-  return true
+  if (record.scope === 'project') return Boolean(workspace && record.workspace === workspace)
+  return false
 }

@@ -16,6 +16,7 @@ import {
   type ModelContextProfile,
   type ModelContextThresholds
 } from './model-context-profile.js'
+import { renderDurableTaskCapsule, type DurableTaskCapsule } from './durable-task-capsule.js'
 
 export type CompactionMode = 'normal' | 'aggressive' | 'force'
 
@@ -109,6 +110,7 @@ export class ContextCompactor {
     reason?: string
     summaryOverride?: string
     frozenMessageCount?: number
+    capsule?: DurableTaskCapsule
   }): {
     next: TurnItem[]
     summaryItem: TurnItem
@@ -151,8 +153,9 @@ export class ContextCompactor {
       mode: input.mode,
       budgetTokens: input.budgetTokens
     })
+    const resumableSummary = ensureTaskResumptionState(summaryBase, { history, prefix: input.prefix })
     const summary = appendDigestMarker(
-      ensureTaskResumptionState(summaryBase, { history, prefix: input.prefix }),
+      input.capsule ? `${resumableSummary}\n\n${renderDurableTaskCapsule(input.capsule)}` : resumableSummary,
       digestMarker
     )
     const summaryItem = makeCompactionItem({

@@ -59,6 +59,17 @@ describe('memory retrieval ranking', () => {
     expect(ranked.map((record) => record.id)).toEqual(['mem_current', 'mem_user'])
   })
 
+  it('shares project memory across threads only within the same owner and workspace', () => {
+    const ranked = rankMemoryRecords({
+      query: 'project build', workspace: '/tmp/current', threadId: 'thread-2', ownerUserId: 'owner-a',
+      records: [
+        memory('mem_project_same_owner', 'project build convention', { ownerUserId: 'owner-a', scope: 'project', workspace: '/tmp/current', sourceThreadId: 'thread-1' }),
+        memory('mem_project_other_owner', 'project build convention', { ownerUserId: 'owner-b', scope: 'project', workspace: '/tmp/current', sourceThreadId: 'thread-1' })
+      ], limit: 5
+    })
+    expect(ranked.map((record) => record.id)).toEqual(['mem_project_same_owner'])
+  })
+
   it('uses confidence and recency as deterministic tie breakers', () => {
     const ranked = rankMemoryRecords({
       query: 'pnpm',
