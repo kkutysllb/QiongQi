@@ -26,6 +26,7 @@ import type {
 } from '@qiongqi/ports'
 import type { ThreadStore } from '@qiongqi/ports'
 import type { SessionStore } from '@qiongqi/ports'
+import type { TaskStateStore } from '@qiongqi/ports'
 import type { UsageService } from '@qiongqi/services'
 import type { TurnService } from '@qiongqi/services'
 import type { RuntimeEventRecorder } from '@qiongqi/services'
@@ -34,11 +35,13 @@ import type { ApprovalPolicy } from '@qiongqi/contracts'
 import type { ModelCapabilityMetadata } from '@qiongqi/contracts'
 import type { TurnItem } from '@qiongqi/contracts'
 import type { ImmutablePrefix } from '@qiongqi/cache'
+import { readFile, stat } from 'node:fs/promises'
+import { basename, extname, join } from 'node:path'
 import { ContextCompactor } from './context-compactor.js'
 import type { ContextCompactionConfig } from './model-context-profile.js'
 import { modelCapabilitiesForModel } from './model-context-profile.js'
 import type { SkillRuntime } from '@qiongqi/skills'
-import type { SkillPluginHost } from '@qiongqi/skills'
+import type { SkillPluginHost, WorkModeInfo } from '@qiongqi/skills'
 import type { AttachmentStore, AttachmentContent } from '@qiongqi/attachments'
 import type { MemoryStore } from '@qiongqi/memory'
 import type { UserInputResolution } from '@qiongqi/ports'
@@ -58,6 +61,7 @@ import {
   type TokenEconomyConfig
 } from './token-economy.js'
 import { applyRequestHistoryHygiene } from './request-history-hygiene.js'
+import { applyModelRequestInputBudget } from './model-request-budget.js'
 import { estimateModelRequestInputTokens } from './model-request-estimator.js'
 import {
   recentAutoRouterContext,
@@ -95,9 +99,18 @@ import {
   recordTokenEconomySavings,
   recordToolCatalogDrift
 } from './loop-events.js'
+import { CompactionTransaction } from './compaction-transaction.js'
 
 type ThreadRecord = Awaited<ReturnType<ThreadStore['get']>>
 type TurnRecord = Awaited<ReturnType<TurnService['getTurn']>>
+
+function isImageMimeType(mimeType: string | undefined): boolean {
+  return Boolean(mimeType && mimeType.toLowerCase().startsWith('image/'))
+}
+
+const TOOL_OUTPUT_MAX_INLINE_BYTES = 64 * 1024
+const TOOL_OUTPUT_PREVIEW_HEAD_BYTES = 4 * 1024
+const TOOL_OUTPUT_PREVIEW_TAIL_BYTES = 4 * 1024
 
 export type BuildContext = {
   request: ModelRequest
@@ -130,6 +143,7 @@ export type BuildResult =
 export type PromptBuilderDeps = {
   threadStore: ThreadStore
   sessionStore: SessionStore
+  taskStates?: TaskStateStore
   events: RuntimeEventRecorder
   turns: TurnService
   usage: UsageService
@@ -149,6 +163,7 @@ export type PromptBuilderDeps = {
    */
   skillPluginHost?: SkillPluginHost
   attachmentStore?: AttachmentStore
+  runtimeDataDir?: string
   memoryStore?: MemoryStore
   tokenEconomy?: TokenEconomyConfig
   contextCompaction?: ContextCompactionConfig
@@ -266,9 +281,18 @@ export class PromptBuilder {
       workspace: thread?.workspace ?? '',
       modelCapabilities
     })
+    const workModeId = turn?.workModeId ?? thread?.workModeId
+    const workModeInstruction = currentWorkModeInstruction(
+      this.deps.skillPluginHost?.workModeInfo(workModeId) ?? fallbackWorkModeInfo(workModeId)
+    )
+    const effectiveSkillIds = this.deps.skillPluginHost?.effectiveSkillIds(workModeId)
     const skillResolution = this.deps.skillPluginHost?.resolveTurn({
       prompt: turn?.prompt ?? '',
-      workspace: thread?.workspace ?? ''
+      workspace: thread?.workspace ?? '',
+      threadId,
+      ownerUserId: thread?.ownerUserId,
+      workModeId,
+      effectiveSkillIds
     }) ?? this.deps.skillRuntime?.resolveTurn({
       prompt: turn?.prompt ?? '',
       workspace: thread?.workspace ?? ''
@@ -297,12 +321,23 @@ export class PromptBuilder {
       threadId,
       turnId,
       workspace: thread?.workspace ?? '',
+      ...(thread?.ownerUserId ? { ownerUserId: thread.ownerUserId } : {}),
       threadMode: effectiveMode,
       ...(activePlanContext ? { guiPlan: activePlanContext } : {}),
       model: modelCapabilities,
       activeSkillIds: skillResolution.activeSkillIds,
       memoryPolicy: { enabled: Boolean(this.deps.memoryStore) },
       delegationPolicy: { enabled: false },
+      ...(this.deps.runtimeDataDir
+        ? {
+            outputBudget: {
+              outputDir: join(this.deps.runtimeDataDir, 'threads', threadId, 'tool-output'),
+              maxInlineBytes: TOOL_OUTPUT_MAX_INLINE_BYTES,
+              previewHeadBytes: TOOL_OUTPUT_PREVIEW_HEAD_BYTES,
+              previewTailBytes: TOOL_OUTPUT_PREVIEW_TAIL_BYTES
+            }
+          }
+        : {}),
       ...(allowedToolNames ? { allowedToolNames } : {}),
       approvalPolicy,
       abortSignal: signal,
@@ -352,11 +387,13 @@ export class PromptBuilder {
     }
     if (toolCatalogDrift.kind === 'breaking') return { kind: 'stop' }
     const toolKinds = new Map(toolSpecs.map((tool) => [tool.name, tool.toolKind]))
-    const createPlanSatisfied = planTurnActive
+    const runtimeCatalogQuestion = isRuntimeCatalogQuestion(turn?.prompt ?? '')
+    const planArtifactRequired = planTurnActive && !runtimeCatalogQuestion
+    const createPlanSatisfied = planArtifactRequired
       ? hasSuccessfulCreatePlanResult(healed.items, turnId)
       : false
     const requiredToolName =
-      planTurnActive &&
+      planArtifactRequired &&
       !createPlanSatisfied &&
       toolSpecs.some((tool) => tool.name === CREATE_PLAN_TOOL_NAME)
         ? CREATE_PLAN_TOOL_NAME
@@ -374,6 +411,7 @@ export class PromptBuilder {
       ...(activeTodoInstruction ? [activeTodoInstruction] : []),
       ...memoryInstructions(memories),
       ...skillResolution.instructions,
+      ...(workModeInstruction ? [workModeInstruction] : []),
       ...(toolSpecs.some((tool) => tool.name === 'bash') ? [shellRuntimeInstruction()] : []),
       ...(toolCatalogDriftMessage ? [toolCatalogDriftMessage] : [])
     ]
@@ -407,10 +445,13 @@ export class PromptBuilder {
       ? estimateModelRequestInputTokens(baseRequest)
       : 0
     const economyRequest = applyTokenEconomyToRequest(baseRequest, tokenEconomy)
-    const request: ModelRequest = {
+    const hygienicRequest: ModelRequest = {
       ...economyRequest,
       history: applyRequestHistoryHygiene(economyRequest.history, tokenEconomy.historyHygiene)
     }
+    const request = applyModelRequestInputBudget(hygienicRequest, {
+      maxInputTokens: this.deps.compactor.hardCap(model)
+    })
     if (tokenEconomy.enabled) {
       await recordTokenEconomySavings(this.deps.usage, this.deps.events, {
         threadId,
@@ -517,19 +558,24 @@ export class PromptBuilder {
     modelCapabilities: ModelCapabilityMetadata
   }): Promise<{ imageAttachments: ModelInputAttachment[]; textFallbacks: ModelTextAttachmentFallback[] }> {
     if (input.attachmentIds.length === 0) return { imageAttachments: [], textFallbacks: [] }
-    if (!this.deps.attachmentStore) {
-      throw new Error('attachment store is unavailable')
-    }
     const supportsImageInput = input.modelCapabilities.inputModalities.includes('image')
-    const textFallbackPolicy = this.deps.attachmentStore.textFallbackPolicy()
+    const textFallbackPolicy = this.deps.attachmentStore?.textFallbackPolicy() ?? {
+      textFallbackMaxBase64Bytes: 524_288,
+      textFallbackMaxImageDimension: 1280,
+      textFallbackPreferredMimeType: 'image/webp'
+    }
     const imageAttachments: ModelInputAttachment[] = []
     const textFallbacks: ModelTextAttachmentFallback[] = []
     for (const id of input.attachmentIds) {
-      const attachment = await this.deps.attachmentStore.resolveContent(id, {
+      const attachment = await this.resolveAttachmentContent(id, {
         threadId: input.threadId,
         workspace: input.workspace
       })
-      if (supportsImageInput) {
+      // Only genuine images can be sent as image_url parts. Non-image files
+      // (PDF/ZIP/text/Office/...) are always routed to the text-fallback path,
+      // even when the model supports image input — providers reject non-image
+      // bytes in image_url slots.
+      if (supportsImageInput && isImageMimeType(attachment.mimeType)) {
         imageAttachments.push({
           id: attachment.id,
           name: attachment.name,
@@ -546,6 +592,49 @@ export class PromptBuilder {
       ))
     }
     return { imageAttachments, textFallbacks }
+  }
+
+  private async resolveAttachmentContent(
+    id: string,
+    scope: { threadId: string; workspace: string }
+  ): Promise<AttachmentContent> {
+    const legacyUpload = await this.resolveLegacyThreadUpload(id, scope.threadId)
+    if (legacyUpload) return legacyUpload
+    if (this.deps.attachmentStore) {
+      return this.deps.attachmentStore.resolveContent(id, {
+        threadId: scope.threadId,
+        workspace: scope.workspace
+      })
+    }
+    throw new Error('attachment store is unavailable')
+  }
+
+  private async resolveLegacyThreadUpload(
+    id: string,
+    threadId: string
+  ): Promise<AttachmentContent | null> {
+    if (!this.deps.runtimeDataDir) return null
+    if (!id.startsWith('/mnt/qiongqi/uploads/')) return null
+    const requestedName = id.slice('/mnt/qiongqi/uploads/'.length)
+    const filename = basename(requestedName)
+    if (!filename || filename !== requestedName) return null
+    const absolutePath = join(this.deps.runtimeDataDir, 'threads', threadId, 'uploads', filename)
+    const fileStat = await stat(absolutePath).catch(() => null)
+    if (!fileStat?.isFile()) return null
+    const data = await readFile(absolutePath)
+    const now = this.deps.nowIso()
+    return {
+      id,
+      name: filename,
+      mimeType: mimeTypeForUpload(filename),
+      byteSize: fileStat.size,
+      hash: id,
+      threadIds: [threadId],
+      workspaces: [],
+      createdAt: now,
+      updatedAt: now,
+      data
+    }
   }
 
   private async retrieveMemories(input: {
@@ -678,6 +767,54 @@ export class PromptBuilder {
     if (!plan) return items
     const threadId = context.threadId
     const turnId = context.turnId
+    if (this.deps.taskStates) {
+      const thread = await this.deps.threadStore.get(threadId)
+      const identity = thread ? {
+        ownerUserId: thread.ownerUserId ?? 'local-default-owner',
+        workspaceKey: thread.workspace,
+        threadId,
+        turnId,
+        runId: `run_${threadId}_${turnId}`
+      } : undefined
+      const taskState = identity
+        ? await this.deps.taskStates.load(identity)
+        : undefined
+      if (identity && taskState) {
+        const transaction = new CompactionTransaction({
+          taskStates: this.deps.taskStates,
+          sessionStore: this.deps.sessionStore,
+          compactor: this.deps.compactor,
+          nowIso: this.deps.nowIso
+        })
+        const result = await transaction.compact({
+          identity,
+          taskState,
+          history: items,
+          prefix: this.deps.prefix,
+          reason: plan.reason,
+          mode: plan.mode,
+          keepRecent: plan.keepRecent,
+          ...(this.deps.contextCompaction?.summaryMode === 'model'
+            ? {
+                summarize: (heuristicSummary: string) => this.summarizeCompactionWithModel({
+                  threadId,
+                  turnId,
+                  model,
+                  items,
+                  heuristicSummary,
+                  signal
+                })
+              }
+            : {})
+        })
+        if (signal.aborted) return items
+        if (result.replacedTokens > 0) {
+          this.deps.toolHost.clearReadTracker?.(threadId)
+          await this.recordCompactionCompleted(threadId, turnId, result)
+        }
+        return result.next
+      }
+    }
     let result = this.deps.compactor.compact({
       threadId,
       turnId,
@@ -713,26 +850,37 @@ export class PromptBuilder {
     if (result.replacedTokens > 0) {
       this.deps.toolHost.clearReadTracker?.(threadId)
       await this.deps.sessionStore.appendItem(threadId, result.summaryItem)
-      await this.deps.events.record({
-        kind: 'compaction_completed',
-        threadId,
-        turnId,
-        itemId: result.summaryItem.id,
-        summary: result.summaryItem.kind === 'compaction' ? result.summaryItem.summary : '',
-        replacedTokens: result.replacedTokens,
-        pinnedConstraints: this.deps.prefix.pinnedConstraints,
-        ...(result.summaryItem.kind === 'compaction' && result.summaryItem.sourceDigest
-          ? { sourceDigest: result.summaryItem.sourceDigest }
-          : {}),
-        ...(result.summaryItem.kind === 'compaction' && result.summaryItem.digestMarker
-          ? { digestMarker: result.summaryItem.digestMarker }
-          : {}),
-        ...(result.summaryItem.kind === 'compaction' && result.summaryItem.sourceItemIds
-          ? { sourceItemIds: result.summaryItem.sourceItemIds }
-          : {})
-      })
+      await this.recordCompactionCompleted(threadId, turnId, result)
     }
     return result.next
+  }
+
+  private async recordCompactionCompleted(
+    threadId: string,
+    turnId: string,
+    result: {
+      summaryItem: TurnItem
+      replacedTokens: number
+    }
+  ): Promise<void> {
+    await this.deps.events.record({
+      kind: 'compaction_completed',
+      threadId,
+      turnId,
+      itemId: result.summaryItem.id,
+      summary: result.summaryItem.kind === 'compaction' ? result.summaryItem.summary : '',
+      replacedTokens: result.replacedTokens,
+      pinnedConstraints: this.deps.prefix.pinnedConstraints,
+      ...(result.summaryItem.kind === 'compaction' && result.summaryItem.sourceDigest
+        ? { sourceDigest: result.summaryItem.sourceDigest }
+        : {}),
+      ...(result.summaryItem.kind === 'compaction' && result.summaryItem.digestMarker
+        ? { digestMarker: result.summaryItem.digestMarker }
+        : {}),
+      ...(result.summaryItem.kind === 'compaction' && result.summaryItem.sourceItemIds
+        ? { sourceItemIds: result.summaryItem.sourceItemIds }
+        : {})
+    })
   }
 
   private async summarizeCompactionWithModel(input: {
@@ -840,4 +988,82 @@ export class PromptBuilder {
       input.signal.removeEventListener('abort', onAbort)
     }
   }
+}
+
+function fallbackWorkModeInfo(workModeId: string | undefined): WorkModeInfo | undefined {
+  if (!workModeId) return undefined
+  return { id: workModeId, name: workModeId }
+}
+
+function mimeTypeForUpload(filename: string): string {
+  switch (extname(filename).toLowerCase()) {
+    case '.txt':
+      return 'text/plain'
+    case '.md':
+    case '.markdown':
+      return 'text/markdown'
+    case '.csv':
+      return 'text/csv'
+    case '.html':
+    case '.htm':
+      return 'text/html'
+    case '.json':
+      return 'application/json'
+    case '.pdf':
+      return 'application/pdf'
+    case '.zip':
+      return 'application/zip'
+    case '.doc':
+      return 'application/msword'
+    case '.docx':
+      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    case '.xls':
+      return 'application/vnd.ms-excel'
+    case '.xlsx':
+      return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    case '.ppt':
+      return 'application/vnd.ms-powerpoint'
+    case '.pptx':
+      return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    case '.png':
+      return 'image/png'
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg'
+    case '.webp':
+      return 'image/webp'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
+function currentWorkModeInstruction(workMode: WorkModeInfo | undefined): string | undefined {
+  if (!workMode) return undefined
+  return [
+    'Current Work Mode:',
+    `- id: ${workMode.id}`,
+    `- name: ${workMode.name}`,
+    ...(workMode.description ? [`- description: ${workMode.description}`] : []),
+    'Treat this as the user-selected work mode and single-agent runtime for this turn. Its bound skills and task orchestration define how this qiongqi classic-mode step should run. If asked about the current work mode, answer from this runtime context instead of searching workspace files.'
+  ].join('\n')
+}
+
+function isRuntimeCatalogQuestion(prompt: string): boolean {
+  const text = prompt.trim().toLowerCase()
+  if (!text) return false
+  const compact = text.replace(/\s+/g, '')
+  const asksWorkMode =
+    (/\bwork\s*mode\b/.test(text) &&
+      /\b(what|which|current|selected|using|am i|where)\b/.test(text)) ||
+    (/工作模式|当前模式|运行模式/.test(compact) &&
+      /当前|现在|哪种|哪个|什么|处于|使用|所在/.test(compact))
+  const asksSkills =
+    (/\bskills?\b/.test(text) &&
+      /\b(what|which|available|installed|enabled|call|use|using|can)\b/.test(text)) ||
+    (/技能/.test(compact) && /有哪些|可用|安装|启用|调用|使用|能用|识别/.test(compact))
+  const asksTools =
+    (/\btools?\b/.test(text) &&
+      /\b(what|which|available|enabled|call|use|using|can)\b/.test(text)) ||
+    (/工具/.test(compact) && /有哪些|可用|启用|调用|使用|能用|识别/.test(compact))
+  return asksWorkMode || asksSkills || asksTools
 }

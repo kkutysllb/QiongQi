@@ -144,7 +144,21 @@ export function createKernelV3NodeHandlers(
           isToolEffectPolicy(tool.effectPolicy) ? tool.effectPolicy : undefined
         ])
       )
-      return { condition: 'next', value: { request: storedRequest, toolPolicies } }
+      return {
+        condition: 'next',
+        value: {
+          request: storedRequest,
+          toolPolicies,
+          runtimeContext: {
+            activeSkillIds: built.ctx.activeSkillIds,
+            allowedToolNames: built.ctx.allowedToolNames,
+            modelCapabilities: built.ctx.modelCapabilities,
+            approvalPolicy: built.ctx.approvalPolicy,
+            threadMode: built.ctx.effectiveMode,
+            guiPlan: built.ctx.activePlanContext
+          }
+        }
+      }
     },
 
     'invoke-model': async ({ identity, state }) => {

@@ -29,7 +29,7 @@ export type CompactionTransactionInput = {
   mode?: CompactionMode
   reason?: string
   frozenMessageCount?: number
-  summarize?: (heuristicSummary: string) => Promise<string>
+  summarize?: (heuristicSummary: string) => Promise<string | undefined>
 }
 
 export type CompactionTransactionResult = {
@@ -73,7 +73,7 @@ export class CompactionTransaction {
       revision: input.taskState.revision + 1,
       updatedAt: this.options.nowIso()
     }
-    const summaryOverride = `${modelSummary.trim()}\n\n${renderTaskStateProjection(projectedTask)}`
+    const summaryOverride = `${(modelSummary ?? base.summaryItem.summary).trim()}\n\n${renderTaskStateProjection(projectedTask)}`
     const compacted = this.options.compactor.compact({
       ...compactorInput(input),
       summaryOverride

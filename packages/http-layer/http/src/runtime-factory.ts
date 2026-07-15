@@ -12,7 +12,7 @@ import { FileAttachmentStore } from '@qiongqi/attachments'
 import { InMemoryApprovalGate } from '@qiongqi/adapter-storage'
 import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
 import { InMemoryEventBus } from '@qiongqi/adapter-storage'
-import { FileEffectResultStore, FileSessionStore, FileThreadStore, FileRunEventStore, FileRunStateStore } from '@qiongqi/adapter-storage'
+import { FileEffectResultStore, FileSessionStore, FileTaskStateStore, FileThreadStore, FileRunEventStore, FileRunStateStore } from '@qiongqi/adapter-storage'
 import { HybridSessionStore, HybridThreadStore } from '@qiongqi/adapter-storage'
 import {
   DynamicRoutedModelCompatClient,
@@ -36,14 +36,25 @@ import {
   type QiongqiCapabilitiesConfig
 } from '@qiongqi/contracts'
 import type { ApprovalPolicy, SandboxMode } from '@qiongqi/contracts'
-import { EffectCommitCoordinator, KernelTurnRunner, resolveRuntimeRolloutMode, ToolRuntimeV3, type OrchestrationMode } from '@qiongqi/loop'
+import {
+  createKernelV3NodeHandlers,
+  EffectCommitCoordinator,
+  KernelV3TurnRunner,
+  ModelProposalRunner,
+  PromptBuilder,
+  resolveRuntimeRolloutMode,
+  ToolRuntimeV3,
+  type OrchestrationMode
+} from '@qiongqi/loop'
 import type {
   ToolHost,
   ToolHostContext,
   ToolHostResult,
-  ToolCallLike
+  ToolCallLike,
+  ModelClient
 } from '@qiongqi/ports'
 import type { TurnItem } from '@qiongqi/contracts'
+import { makeApprovalItem, makeUserInputItem } from '@qiongqi/domain'
 import {
   AgentCardSchema,
   type AgentCard,
@@ -1092,6 +1103,261 @@ function isSkillPackage(root: string): boolean {
   return existsSync(join(root, 'skill.json')) || existsSync(join(root, 'SKILL.md'))
 }
 
+export function createKernelV3TurnRunner(input: {
+  options: QiongqiServeRuntimeOptions
+  core: CoreRuntime
+  model: ModelAdapter
+  modelClient: ModelClient
+  tools: ToolMatrix
+  prefix: ReturnType<typeof createImmutablePrefix>
+  tokenEconomy: TokenEconomyConfig
+  runtimeV3Root: string
+  events: FileRunEventStore
+  toolRuntime: ToolRuntimeV3
+}): KernelV3TurnRunner {
+  const { options, core, model, tools } = input
+  const snapshots = new FileRunStateStore(input.runtimeV3Root)
+  const taskStates = new FileTaskStateStore(input.runtimeV3Root)
+
+  const awaitUserInput = async (
+    threadId: string,
+    turnId: string,
+    request: {
+      id: string
+      itemId: string
+      prompt: string
+      questions: Array<{
+        header: string
+        id: string
+        question: string
+        options: Array<{ label: string; description: string }>
+      }>
+    },
+    signal: AbortSignal
+  ) => {
+    const item = makeUserInputItem({
+      id: request.itemId,
+      threadId,
+      turnId,
+      inputId: request.id,
+      prompt: request.prompt,
+      questions: request.questions
+    })
+    await core.turnService.applyItem(threadId, item)
+    await core.events.record({
+      kind: 'user_input_requested',
+      threadId,
+      turnId,
+      itemId: item.id,
+      inputId: request.id,
+      status: 'pending',
+      prompt: request.prompt,
+      questions: request.questions
+    })
+    const pending = core.userInputGate.request({ ...request, threadId, turnId })
+    const resolution = await waitForKernelUserInput(
+      pending,
+      request.id,
+      signal,
+      core.userInputGate
+    )
+    await core.turnService.updateItem(threadId, item.id, {
+      status: resolution.status,
+      finishedAt: core.nowIso()
+    } as Partial<TurnItem>)
+    await core.events.record({
+      kind: 'user_input_resolved',
+      threadId,
+      turnId,
+      itemId: item.id,
+      inputId: request.id,
+      status: resolution.status,
+      prompt: request.prompt,
+      questions: request.questions
+    })
+    return resolution
+  }
+
+  const promptBuilder = new PromptBuilder({
+    threadStore: core.threadStore,
+    sessionStore: core.sessionStore,
+    taskStates,
+    events: core.events,
+    turns: core.turnService,
+    usage: core.usageService,
+    model: input.modelClient,
+    toolHost: tools.toolHost,
+    compactor: core.compactor,
+    prefix: input.prefix,
+    ids: core.ids,
+    nowIso: core.nowIso,
+    modelCapabilities: model.modelCapabilities,
+    skillRuntime: tools.skillRuntime,
+    skillPluginHost: tools.skillPluginHost,
+    tokenEconomy: input.tokenEconomy,
+    contextCompaction: options.contextCompaction,
+    runtimeDataDir: options.dataDir,
+    ...(tools.attachmentStore ? { attachmentStore: tools.attachmentStore } : {}),
+    ...(tools.memoryStore ? { memoryStore: tools.memoryStore } : {}),
+    awaitUserInput
+  })
+  const proposalRunner = new ModelProposalRunner({
+    client: input.modelClient,
+    endpointFormat: options.endpointFormat,
+    onDelta: async (chunk, request) => {
+      // Proposal text remains quarantined until evaluate/commit-assistant.
+      if (chunk.kind !== 'usage') return
+      const usage = core.usageService.record(request.threadId, chunk.usage)
+      await core.events.record({
+        kind: 'usage',
+        threadId: request.threadId,
+        turnId: request.turnId,
+        model: request.model,
+        usage
+      })
+    }
+  })
+  const nodes = createKernelV3NodeHandlers({
+    threadStore: core.threadStore,
+    sessionStore: core.sessionStore,
+    taskStates,
+    turns: core.turnService,
+    promptBuilder,
+    proposalRunner,
+    toolRuntime: input.toolRuntime,
+    createToolContext: async (identity, state) => {
+      const [thread, turn] = await Promise.all([
+        core.threadStore.get(identity.threadId),
+        core.turnService.getTurn(identity.threadId, identity.turnId)
+      ])
+      if (!thread || !turn) throw new Error('kernel tool context scope unavailable')
+      const built = state.nodeData['build-context'] as {
+        runtimeContext?: {
+          activeSkillIds?: string[]
+          allowedToolNames?: string[]
+          modelCapabilities?: ReturnType<ModelAdapter['modelCapabilities']>
+          approvalPolicy?: ApprovalPolicy
+          threadMode?: 'agent' | 'plan'
+          guiPlan?: ToolHostContext['guiPlan']
+        }
+      } | undefined
+      const runtimeContext = built?.runtimeContext
+      return {
+        threadId: identity.threadId,
+        turnId: identity.turnId,
+        workspace: thread.workspace,
+        ownerUserId: identity.ownerUserId,
+        threadMode: runtimeContext?.threadMode ?? thread.mode,
+        ...(runtimeContext?.guiPlan ? { guiPlan: runtimeContext.guiPlan } : {}),
+        model: runtimeContext?.modelCapabilities ?? model.modelCapabilities(turn.model ?? options.model),
+        activeSkillIds: runtimeContext?.activeSkillIds ?? turn.activeSkillIds,
+        memoryPolicy: { enabled: Boolean(tools.memoryStore) },
+        delegationPolicy: { enabled: Boolean(tools.delegationRuntime) },
+        ...(runtimeContext?.allowedToolNames
+          ? { allowedToolNames: runtimeContext.allowedToolNames }
+          : {}),
+        outputBudget: {
+          outputDir: join(options.dataDir, 'threads', identity.threadId, 'tool-output'),
+          maxInlineBytes: 64 * 1024,
+          previewHeadBytes: 4 * 1024,
+          previewTailBytes: 4 * 1024
+        },
+        approvalPolicy: runtimeContext?.approvalPolicy ?? thread.approvalPolicy,
+        abortSignal: core.turnService.getAbortController(identity.turnId)
+          ?? new AbortController().signal,
+        awaitApproval: async (approval) => {
+          await core.turnService.applyItem(identity.threadId, makeApprovalItem({
+            id: `item_approval_${approval.id}`,
+            threadId: identity.threadId,
+            turnId: identity.turnId,
+            approvalId: approval.id,
+            toolName: approval.toolName,
+            summary: approval.summary
+          }))
+          await core.events.record({
+            kind: 'approval_requested',
+            threadId: identity.threadId,
+            turnId: identity.turnId,
+            approvalId: approval.id,
+            toolName: approval.toolName,
+            status: 'pending',
+            summary: approval.summary
+          })
+          const decision = await core.approvalGate.request(approval)
+          await core.turnService.updateItem(
+            identity.threadId,
+            `item_approval_${approval.id}`,
+            { status: decision === 'allow' ? 'allowed' : 'denied', finishedAt: core.nowIso() }
+          )
+          return decision
+        },
+        awaitUserInput: (request) => awaitUserInput(
+          identity.threadId,
+          identity.turnId,
+          request,
+          core.turnService.getAbortController(identity.turnId)
+            ?? new AbortController().signal
+        )
+      }
+    },
+    ids: core.ids,
+    nowIso: core.nowIso
+  })
+
+  return new KernelV3TurnRunner({
+    snapshots,
+    events: input.events,
+    leases: snapshots,
+    holderId: `qiongqi:${process.pid}`,
+    identityForTurn: async (threadId, turnId) => {
+      const thread = await core.threadStore.get(threadId)
+      return {
+        ownerUserId: thread?.ownerUserId ?? 'local-default-owner',
+        workspaceKey: thread?.workspace ?? options.dataDir,
+        threadId,
+        turnId,
+        runId: `run_${threadId}_${turnId}`
+      }
+    },
+    nodes,
+    finishTurn: async (threadId, turnId, status, outcome) => {
+      await core.turnService.finishTurn({
+        threadId,
+        turnId,
+        status,
+        ...(status === 'failed'
+          ? { error: `${outcome.reason}${outcome.retryable ? ' (retryable)' : ''}` }
+          : {})
+      })
+    },
+    nowIso: core.nowIso
+  })
+}
+
+async function waitForKernelUserInput(
+  pending: ReturnType<CoreRuntime['userInputGate']['request']>,
+  inputId: string,
+  signal: AbortSignal,
+  gate: CoreRuntime['userInputGate']
+) {
+  if (signal.aborted) {
+    gate.resolve(inputId, { status: 'cancelled' })
+    throw new Error('cancelled while awaiting user input')
+  }
+  return new Promise<Awaited<typeof pending>>((resolve, reject) => {
+    const onAbort = (): void => {
+      gate.resolve(inputId, { status: 'cancelled' })
+      signal.removeEventListener('abort', onAbort)
+      reject(new Error('cancelled while awaiting user input'))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    pending.then((resolution) => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(resolution)
+    }, reject)
+  })
+}
+
 async function assembleRuntime(input: {
   options: QiongqiServeRuntimeOptions
   core: CoreRuntime
@@ -1171,9 +1437,6 @@ async function assembleRuntime(input: {
     },
     ...(toolRuntime ? { toolRuntime } : {})
   }
-  // Stage 3/Kernel V3: choose one orchestrator. Kernel V3 wraps exactly one
-  // classic delegate so lease/checkpoint/outcome ownership is durable without
-  // launching a second turn loop.
   const loop = orchestrationMode === 'evented_v2'
     ? new EventedTurnOrchestrator(
         orchOpts,
@@ -1182,30 +1445,27 @@ async function assembleRuntime(input: {
         defaultLoopPlan(),
         defaultLoopEvaluator
       )
-    : (() => {
-        const classic = new TurnOrchestrator(orchOpts)
-        if (orchestrationMode !== 'kernel_v3') return classic
-        const snapshots = new FileRunStateStore(runtimeV3Root)
-        const events = runtimeV3Events ?? new FileRunEventStore(runtimeV3Root)
-        return new KernelTurnRunner({
-          snapshots,
-          events,
-          leases: snapshots,
-          holderId: `qiongqi:${process.pid}`,
-          identityForTurn: async (threadId, turnId) => {
-            const thread = await core.threadStore.get(threadId)
-            return {
-              ownerUserId: thread?.ownerUserId ?? 'local-default-owner',
-              workspaceKey: thread?.workspace ?? options.dataDir,
-              threadId,
-              turnId,
-              runId: `run_${threadId}_${turnId}`
-            }
-          },
-          delegate: (threadId, turnId) => classic.runTurn(threadId, turnId),
-          nowIso: core.nowIso
+    : orchestrationMode === 'kernel_v3'
+      ? createKernelV3TurnRunner({
+          options,
+          core,
+          model,
+          modelClient: scopedModelClient,
+          tools,
+          prefix,
+          tokenEconomy,
+          runtimeV3Root,
+          events: runtimeV3Events ?? new FileRunEventStore(runtimeV3Root),
+          toolRuntime: toolRuntime ?? new ToolRuntimeV3({
+            toolHost: tools.toolHost,
+            effects: new EffectCommitCoordinator({
+              events: runtimeV3Events ?? new FileRunEventStore(runtimeV3Root),
+              results: new FileEffectResultStore(runtimeV3Root),
+              nowIso: core.nowIso
+            })
+          })
         })
-      })()
+      : new TurnOrchestrator(orchOpts)
   const currentCapabilities = () => {
     const config = configStore.snapshot?.() ?? qiongqiConfigFromRuntimeOptions(options)
     const effectiveCapabilities = withRuntimeMountedSkillRoots(

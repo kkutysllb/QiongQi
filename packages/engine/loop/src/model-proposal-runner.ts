@@ -6,7 +6,7 @@ export type ModelProposalRunnerOptions = {
   client: ModelClient
   provider?: string
   endpointFormat?: 'chat_completions' | 'responses' | 'messages'
-  onDelta?: (chunk: ModelStreamChunk) => Promise<void> | void
+  onDelta?: (chunk: ModelStreamChunk, request: ModelRequest) => Promise<void> | void
 }
 
 export class ModelProposalRunner {
@@ -16,7 +16,7 @@ export class ModelProposalRunner {
     const chunks: ModelStreamChunk[] = []
     for await (const chunk of this.options.client.stream(request)) {
       chunks.push(chunk)
-      await this.options.onDelta?.(chunk)
+      await this.options.onDelta?.(chunk, request)
     }
     const completion = await normalizeModelCompletion(chunks, {
       provider: this.options.provider ?? this.options.client.provider,
