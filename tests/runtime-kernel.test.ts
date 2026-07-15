@@ -33,7 +33,11 @@ describe('RuntimeKernel', () => {
       holderId: 'test-holder',
       nowIso: () => '2026-07-15T00:00:00.000Z',
       nodes: {
-        prepare: async () => ({ condition: 'next' }),
+        prepare: async () => ({
+          condition: 'next',
+          value: { taskRevision: 2 },
+          commands: [{ type: 'set-task-revision', revision: 2 }]
+        }),
         model: async () => ({ condition: 'next' }),
         evaluate: async () => ({ condition: 'next' }),
         complete: async () => ({ outcome: { status: 'completed', reason: 'normal_stop', retryable: false } })
@@ -42,6 +46,50 @@ describe('RuntimeKernel', () => {
     await expect(kernel.run(identity)).resolves.toMatchObject({ status: 'completed', reason: 'normal_stop' })
     const persisted = await snapshots.load(identity)
     expect(persisted?.status).toBe('completed')
+    expect(persisted?.nodeData.prepare).toEqual({ taskRevision: 2 })
+    expect(persisted?.taskRevision).toBe(2)
     await expect(events.listAfter(identity, 0)).resolves.toHaveLength(8)
+  })
+
+  it('keeps a terminal outcome monotonic when afterNode middleware tries to replace it', async () => {
+    const snapshots = new InMemoryRunStateStore()
+    const kernel = new RuntimeKernel({
+      graph: {
+        version: 'terminal-v1',
+        startNodeId: 'complete',
+        predicates: ['next'],
+        nodes: [{ id: 'complete', kind: 'complete', effect: 'state', terminal: true }],
+        edges: []
+      },
+      snapshots,
+      events: new InMemoryRunEventStore(),
+      leases: snapshots,
+      holderId: 'test-holder',
+      middleware: new MiddlewareChain([{
+        id: 'late-termination',
+        version: 1,
+        hooks: ['afterNode'],
+        handle: async (_context, next) => {
+          const result = await next(_context)
+          return {
+            ...result,
+            commands: [{
+              type: 'terminate',
+              outcome: { status: 'failed', reason: 'runtime_error', retryable: true }
+            }]
+          }
+        }
+      }]),
+      nodes: {
+        complete: () => ({
+          outcome: { status: 'completed', reason: 'normal_stop', retryable: false }
+        })
+      }
+    })
+
+    await expect(kernel.run({ ...identity, runId: 'terminal-run' })).resolves.toMatchObject({
+      status: 'completed',
+      reason: 'normal_stop'
+    })
   })
 })

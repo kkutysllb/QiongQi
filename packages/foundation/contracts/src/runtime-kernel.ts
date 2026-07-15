@@ -131,6 +131,8 @@ export const RunStateV3Schema = z.object({
   budgets: BudgetStateSchema,
   recovery: RecoveryStateSchema,
   middleware: z.record(z.string(), MiddlewareStateSchema),
+  nodeData: z.record(z.string(), z.unknown()).default({}),
+  taskRevision: z.number().int().nonnegative().default(0),
   pendingEffects: z.array(EffectIntentSchema),
   committedEffects: z.array(CommittedEffectRefSchema),
   outcome: RunOutcomeSchema.optional(),

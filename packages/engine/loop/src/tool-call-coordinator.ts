@@ -535,5 +535,5 @@ function makeRuntimeIdentity(input: { ownerUserId?: string; workspace: string; t
 
 function makeRuntimeState(identity: RunIdentity): RunStateV3 {
   const now = new Date().toISOString()
-  return { version: 3, graphVersion: 'kernel-v3-tool-runtime', runtimeMode: 'kernel_v3', ...identity, status: 'running', cursor: { stepIndex: 0, nodeId: 'tool', attempt: 0, checkpointSeq: 0 }, budgets: { stepsUsed: 0, toolCallsUsed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }, recovery: { attempts: 0, maxAttempts: 1 }, middleware: {}, pendingEffects: [], committedEffects: [], createdAt: now, updatedAt: now }
+  return { version: 3, graphVersion: 'kernel-v3-tool-runtime', runtimeMode: 'kernel_v3', ...identity, status: 'running', cursor: { stepIndex: 0, nodeId: 'tool', attempt: 0, checkpointSeq: 0 }, budgets: { stepsUsed: 0, toolCallsUsed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }, recovery: { attempts: 0, maxAttempts: 1 }, middleware: {}, nodeData: {}, taskRevision: 0, pendingEffects: [], committedEffects: [], createdAt: now, updatedAt: now }
 }

@@ -6,7 +6,11 @@ export type RuntimeHook = 'beforeRun' | 'beforeNode' | 'afterNode' | 'afterRun' 
 export type MiddlewareCommand =
   | { type: 'set-middleware-state'; id: string; state: { version: number; data: unknown } }
   | { type: 'set-budget'; key: 'stepsUsed' | 'toolCallsUsed' | 'inputTokens' | 'outputTokens' | 'costUsd'; value: number }
+  | { type: 'set-node-data'; nodeId: string; value: unknown }
+  | { type: 'set-task-revision'; revision: number }
+  | { type: 'jump'; nodeId: string; condition: string; reason: string }
   | { type: 'terminate'; outcome: RunOutcome }
+  | { type: 'suspend'; outcome: RunOutcome }
   | { type: 'retry'; reason: string }
   | { type: 'repair-history'; items: unknown[] }
   | { type: 'record-warning'; code: string; message: string }
