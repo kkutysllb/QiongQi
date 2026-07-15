@@ -46,6 +46,13 @@ export const TaskStateV1Schema = z.object({
   activeSkillIds: z.array(NonEmptyString),
   artifacts: z.array(TaskArtifactRefSchema),
   toolLedger: z.array(TaskToolLedgerEntrySchema),
+  compaction: z.object({
+    itemId: NonEmptyString,
+    taskRevision: z.number().int().positive(),
+    sourceDigest: NonEmptyString,
+    sourceItemIds: z.array(NonEmptyString).min(1),
+    replacedTokens: z.number().int().positive()
+  }).strict().optional(),
   waitingFor: z.object({
     kind: z.enum(['approval', 'user_input', 'effect_verification']),
     id: NonEmptyString

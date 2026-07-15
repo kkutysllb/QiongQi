@@ -52,6 +52,7 @@ export function makeAssistantReasoningItem(input: {
   turnId: string
   threadId: string
   text: string
+  signature?: string
   status?: 'running' | 'completed' | 'failed'
 }): TurnItem {
   return {
@@ -62,7 +63,8 @@ export function makeAssistantReasoningItem(input: {
     status: input.status ?? 'running',
     createdAt: new Date().toISOString(),
     kind: 'assistant_reasoning',
-    text: input.text
+    text: input.text,
+    ...(input.signature ? { signature: input.signature } : {})
   }
 }
 
@@ -186,6 +188,8 @@ export function makeCompactionItem(input: {
   sourceDigest?: string
   digestMarker?: string
   sourceItemIds?: string[]
+  taskRevision?: number
+  taskSourceDigest?: string
 }): TurnItem {
   return {
     id: input.id,
@@ -201,7 +205,9 @@ export function makeCompactionItem(input: {
     pinnedConstraints: input.pinnedConstraints,
     ...(input.sourceDigest ? { sourceDigest: input.sourceDigest } : {}),
     ...(input.digestMarker ? { digestMarker: input.digestMarker } : {}),
-    ...(input.sourceItemIds ? { sourceItemIds: [...input.sourceItemIds] } : {})
+    ...(input.sourceItemIds ? { sourceItemIds: [...input.sourceItemIds] } : {}),
+    ...(input.taskRevision ? { taskRevision: input.taskRevision } : {}),
+    ...(input.taskSourceDigest ? { taskSourceDigest: input.taskSourceDigest } : {})
   }
 }
 

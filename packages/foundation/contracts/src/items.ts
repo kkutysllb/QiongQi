@@ -109,7 +109,9 @@ export const CompactionTurnItem = TurnItemBase.extend({
   pinnedConstraints: z.array(z.string()),
   sourceDigest: z.string().min(1).optional(),
   digestMarker: z.string().min(1).optional(),
-  sourceItemIds: z.array(z.string().min(1)).optional()
+  sourceItemIds: z.array(z.string().min(1)).optional(),
+  taskRevision: z.number().int().positive().optional(),
+  taskSourceDigest: z.string().min(1).optional()
 })
 export type CompactionTurnItem = z.infer<typeof CompactionTurnItem>
 
