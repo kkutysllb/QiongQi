@@ -1,4 +1,4 @@
-import type { ApprovalPolicy } from '@qiongqi/contracts'
+import type { ApprovalPolicy, ToolEffectPolicy } from '@qiongqi/contracts'
 import type { ApprovalRequest } from '@qiongqi/domain'
 import type { TurnItem } from '@qiongqi/contracts'
 import type { ModelCapabilityMetadata } from '@qiongqi/contracts'
@@ -52,6 +52,8 @@ export type ToolHostContext = {
   threadId: string
   turnId: string
   workspace: string
+  /** Owner of the thread, used by providers that persist user-scoped state. */
+  ownerUserId?: string
   /**
    * Thread mode advertised by the GUI. Qiongqi restricts plan tools
    * to `plan` threads plus `planDraft`/`planRefine` turn kinds. The
@@ -102,6 +104,7 @@ export type ToolCallLike = {
   providerId?: string
   toolKind?: 'tool_call' | 'command_execution' | 'file_change'
   arguments: Record<string, unknown>
+  effectPolicy?: ToolEffectPolicy
 }
 
 export type ToolExecutionUpdate = {
@@ -135,6 +138,7 @@ export interface ToolHost {
     toolKind?: 'tool_call' | 'command_execution' | 'file_change'
     providerId?: string
     providerKind?: ToolProviderKind
+    effectPolicy?: ToolEffectPolicy
   }[]>
   execute(
     call: ToolCallLike,
