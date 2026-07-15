@@ -38,7 +38,13 @@ export class RuntimeKernel {
       }
       state = { ...state, status: 'running', updatedAt: this.options.nowIso() }
       await snapshots.save(state)
-      await this.options.middleware.run('beforeRun', this.middlewareContext(identity, state, 'beforeRun'))
+      const beforeRun = await this.options.middleware.run('beforeRun', this.middlewareContext(identity, state, 'beforeRun'))
+      const beforeRunOutcome = this.commandOutcome(beforeRun?.commands)
+      if (beforeRunOutcome) {
+        state = { ...state, status: beforeRunOutcome.status, outcome: beforeRunOutcome, updatedAt: this.options.nowIso() }
+        await snapshots.save(state)
+        return beforeRunOutcome
+      }
       while (true) {
         const node = this.options.graph.nodes.find((candidate) => candidate.id === state!.cursor.nodeId)
         if (!node) throw new Error(`unknown graph node: ${state!.cursor.nodeId}`)
@@ -46,6 +52,12 @@ export class RuntimeKernel {
         const started = await this.recordEvent(identity, state, node.id, 'node.started', { nodeId: node.id, stepIndex: state.cursor.stepIndex })
         state = { ...state, cursor: { ...state.cursor, checkpointSeq: started.seq }, updatedAt: this.options.nowIso() }
         const before = await this.options.middleware.run('beforeNode', this.middlewareContext(identity, state, 'beforeNode', node))
+        const beforeOutcome = this.commandOutcome(before?.commands)
+        if (beforeOutcome) {
+          state = { ...state, status: beforeOutcome.status, outcome: beforeOutcome, updatedAt: this.options.nowIso() }
+          await snapshots.save(state)
+          return beforeOutcome
+        }
         const handler = this.options.nodes[node.id]
         if (!handler) throw new Error(`missing runtime node handler: ${node.id}`)
         const result = await handler({ identity, state, node, hook: 'beforeNode' })
@@ -55,7 +67,13 @@ export class RuntimeKernel {
         if (outcome) {
           state = { ...merged, status: outcome.status, outcome, cursor: { ...merged.cursor, checkpointSeq: completed.seq }, updatedAt: this.options.nowIso() }
           await snapshots.save(state)
-          await this.options.middleware.run('afterNode', this.middlewareContext(identity, state, 'afterNode', node))
+          const afterNode = await this.options.middleware.run('afterNode', this.middlewareContext(identity, state, 'afterNode', node))
+          const afterOutcome = this.commandOutcome(afterNode?.commands)
+          if (afterOutcome && afterOutcome.status !== state.status) {
+            state = { ...state, status: afterOutcome.status, outcome: afterOutcome, updatedAt: this.options.nowIso() }
+            await snapshots.save(state)
+            return afterOutcome
+          }
           await this.options.middleware.run('afterRun', this.middlewareContext(identity, state, 'afterRun'))
           return outcome
         }
@@ -64,7 +82,13 @@ export class RuntimeKernel {
         if (!edge) throw new Error(`no graph edge for ${node.id} condition ${condition}`)
         state = { ...merged, status: 'running', cursor: { stepIndex: merged.cursor.stepIndex + 1, nodeId: edge.to, attempt: edge.loop ? merged.cursor.attempt + 1 : 0, checkpointSeq: completed.seq }, updatedAt: this.options.nowIso() }
         await snapshots.save(state)
-        await this.options.middleware.run('afterNode', this.middlewareContext(identity, state, 'afterNode', node))
+        const afterNode = await this.options.middleware.run('afterNode', this.middlewareContext(identity, state, 'afterNode', node))
+        const afterOutcome = this.commandOutcome(afterNode?.commands)
+        if (afterOutcome) {
+          state = { ...state, status: afterOutcome.status, outcome: afterOutcome, updatedAt: this.options.nowIso() }
+          await snapshots.save(state)
+          return afterOutcome
+        }
       }
     } catch (error) {
       const outcome: RunOutcome = { status: 'failed', reason: 'runtime_error', retryable: true, details: { message: error instanceof Error ? error.message : String(error) } }
@@ -92,6 +116,10 @@ export class RuntimeKernel {
       if (command.type === 'set-budget') next = { ...next, budgets: { ...next.budgets, [command.key]: command.value } }
     }
     return next
+  }
+
+  private commandOutcome(commands: readonly { type: string; outcome?: RunOutcome }[] | undefined): RunOutcome | undefined {
+    return commands?.find((command) => command.type === 'terminate')?.outcome
   }
 
   private async recordEvent(identity: RunIdentity, state: RunStateV3, nodeId: string, eventType: string, payload: unknown): Promise<RunEventEnvelope> {

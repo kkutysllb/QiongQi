@@ -1,4 +1,4 @@
-import type { RunIdentity, RunStateV3 } from '@qiongqi/contracts'
+import type { RunIdentity, RunOutcome, RunStateV3 } from '@qiongqi/contracts'
 import type { RuntimeNode } from './execution-graph.js'
 
 export type RuntimeHook = 'beforeRun' | 'beforeNode' | 'afterNode' | 'afterRun' | 'onError' | (string & {})
@@ -6,6 +6,10 @@ export type RuntimeHook = 'beforeRun' | 'beforeNode' | 'afterNode' | 'afterRun' 
 export type MiddlewareCommand =
   | { type: 'set-middleware-state'; id: string; state: { version: number; data: unknown } }
   | { type: 'set-budget'; key: 'stepsUsed' | 'toolCallsUsed' | 'inputTokens' | 'outputTokens' | 'costUsd'; value: number }
+  | { type: 'terminate'; outcome: RunOutcome }
+  | { type: 'retry'; reason: string }
+  | { type: 'repair-history'; items: unknown[] }
+  | { type: 'record-warning'; code: string; message: string }
 
 export type MiddlewareContext = {
   readonly identity: RunIdentity
@@ -13,6 +17,7 @@ export type MiddlewareContext = {
   readonly node?: RuntimeNode
   readonly hook: RuntimeHook
   readonly error?: unknown
+  readonly facts?: Readonly<Record<string, unknown>>
   readonly commands: readonly MiddlewareCommand[]
 }
 
