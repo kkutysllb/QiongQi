@@ -92,13 +92,18 @@ async function executeTool(
 describe('Qiongqi built-in tools', () => {
   let workspace: string
   let host: LocalToolHost
+  let originalHome: string | undefined
 
   beforeEach(async () => {
     workspace = await mkdtemp(join(tmpdir(), 'kun-tools-'))
+    originalHome = process.env.HOME
+    process.env.HOME = workspace
     host = new LocalToolHost({ tools: getDefaultLocalTools() })
   })
 
   afterEach(async () => {
+    if (originalHome === undefined) delete process.env.HOME
+    else process.env.HOME = originalHome
     await rm(workspace, { recursive: true, force: true })
   })
 
