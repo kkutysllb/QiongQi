@@ -119,7 +119,12 @@ export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): P
     toolProviderMetadata: promptCtx.toolProviderMetadata,
     toolKinds: promptCtx.toolKinds,
     recordPromptPressure: (tid, model, promptTokens) =>
-      deps.promptBuilder.recordPromptPressure(tid, model, promptTokens)
+      deps.promptBuilder.recordPromptPressure({
+        ownerUserId: promptCtx.thread?.ownerUserId ?? 'local-default-owner',
+        workspaceKey: promptCtx.thread?.workspace ?? 'local-default-workspace',
+        threadId: tid,
+        turnId
+      }, model, promptTokens)
   })
   if (stepResult.kind === 'aborted') return finish('aborted')
 
@@ -159,6 +164,7 @@ export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): P
       const dispatched = await deps.coordinator.dispatch({
         calls: [decision.planCall], threadId, turnId,
         workspace: promptCtx.thread?.workspace ?? '',
+        ...(promptCtx.thread?.ownerUserId ? { ownerUserId: promptCtx.thread.ownerUserId } : {}),
         threadMode: promptCtx.effectiveMode,
         ...(promptCtx.activePlanContext ? { activePlanContext: promptCtx.activePlanContext } : {}),
         modelCapabilities: promptCtx.modelCapabilities,
@@ -174,6 +180,7 @@ export async function runStepViaEventBus(ctx: StepContext, stepIndex: number): P
       const dispatched = await deps.coordinator.dispatch({
         calls: stepResult.completedToolCalls, threadId, turnId,
         workspace: promptCtx.thread?.workspace ?? '',
+        ...(promptCtx.thread?.ownerUserId ? { ownerUserId: promptCtx.thread.ownerUserId } : {}),
         threadMode: promptCtx.effectiveMode,
         ...(promptCtx.activePlanContext ? { activePlanContext: promptCtx.activePlanContext } : {}),
         modelCapabilities: promptCtx.modelCapabilities,

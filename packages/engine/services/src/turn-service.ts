@@ -106,7 +106,7 @@ export class TurnService {
   async interruptTurn(input: { threadId: string; turnId: string; discard?: boolean }): Promise<{ status: TurnStatus }> {
     const controller = this.inflightTurns.get(input.turnId)
     if (controller) controller.abort()
-    this.deps.steering.clear()
+    this.deps.steering.clear(input.turnId)
     this.inflightTurns.delete(input.turnId)
     this.deps.inflight.end(input.turnId)
     await this.deps.events.record({
@@ -205,7 +205,7 @@ export class TurnService {
   }): Promise<void> {
     this.inflightTurns.delete(input.turnId)
     this.deps.inflight.end(input.turnId)
-    this.deps.steering.clear()
+    this.deps.steering.clear(input.turnId)
     await this.upsertThread(input.threadId, (current) => {
       const next = current.turns.map((t) => {
         if (t.id !== input.turnId) return t

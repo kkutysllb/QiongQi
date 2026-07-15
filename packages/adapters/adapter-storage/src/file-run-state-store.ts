@@ -33,8 +33,8 @@ export class FileRunStateStore implements RunSnapshotStore, RunLeaseStore {
     await writeFile(this.snapshotPath(identity), contents, 'utf8')
   }
 
-  async acquire(runId: string, holderId: string, ttlMs: number): Promise<{ acquired: boolean; expiresAt?: string }> {
-    const path = join(this.rootDir, 'leases', `${runId}.json`)
+  async acquire(identity: RunIdentity, holderId: string, ttlMs: number): Promise<{ acquired: boolean; expiresAt?: string }> {
+    const path = this.leasePath(identity)
     const current = await this.readLease(path)
     const now = Date.now()
     if (current && Date.parse(current.expiresAt) > now && current.holderId !== holderId) return { acquired: false }
@@ -43,8 +43,8 @@ export class FileRunStateStore implements RunSnapshotStore, RunLeaseStore {
     return { acquired: true, expiresAt }
   }
 
-  async renew(runId: string, holderId: string, ttlMs: number): Promise<boolean> {
-    const path = join(this.rootDir, 'leases', `${runId}.json`)
+  async renew(identity: RunIdentity, holderId: string, ttlMs: number): Promise<boolean> {
+    const path = this.leasePath(identity)
     const current = await this.readLease(path)
     if (!current || current.holderId !== holderId || Date.parse(current.expiresAt) <= Date.now()) return false
     const expiresAt = new Date(Date.now() + Math.max(1, Math.floor(ttlMs))).toISOString()
@@ -52,8 +52,8 @@ export class FileRunStateStore implements RunSnapshotStore, RunLeaseStore {
     return true
   }
 
-  async release(runId: string, holderId: string): Promise<void> {
-    const path = join(this.rootDir, 'leases', `${runId}.json`)
+  async release(identity: RunIdentity, holderId: string): Promise<void> {
+    const path = this.leasePath(identity)
     const current = await this.readLease(path)
     if (current?.holderId === holderId) await rm(path, { force: true })
   }
@@ -64,6 +64,10 @@ export class FileRunStateStore implements RunSnapshotStore, RunLeaseStore {
 
   private snapshotPath(identity: RunIdentity): string {
     return join(this.runDir(identity), 'snapshot.json')
+  }
+
+  private leasePath(identity: RunIdentity): string {
+    return join(this.rootDir, 'leases', `${runtimeScopeDigest(identity)}.json`)
   }
 
   private async readLease(path: string): Promise<Lease | undefined> {

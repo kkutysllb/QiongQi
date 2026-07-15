@@ -85,7 +85,6 @@ import {
   effectiveHistoryAfterLatestCompaction,
   resolveModelMode,
   normalizeRequestedReasoningEffort,
-  autoModelRouteKey,
   memoryInstructions,
   prefixVolatilityStageDetails,
   type ToolCatalogSnapshot,
@@ -103,9 +102,47 @@ import { CompactionTransaction } from './compaction-transaction.js'
 
 type ThreadRecord = Awaited<ReturnType<ThreadStore['get']>>
 type TurnRecord = Awaited<ReturnType<TurnService['getTurn']>>
+type PromptRuntimeScope = {
+  ownerUserId: string
+  workspaceKey: string
+  threadId: string
+  turnId: string
+}
 
 function isImageMimeType(mimeType: string | undefined): boolean {
   return Boolean(mimeType && mimeType.toLowerCase().startsWith('image/'))
+}
+
+function promptRuntimeScope(
+  thread: ThreadRecord,
+  threadId: string,
+  turnId: string
+): PromptRuntimeScope {
+  return {
+    ownerUserId: thread?.ownerUserId ?? 'local-default-owner',
+    workspaceKey: thread?.workspace ?? 'local-default-workspace',
+    threadId,
+    turnId
+  }
+}
+
+function promptScopeKey(scope: PromptRuntimeScope): string {
+  return JSON.stringify(scope)
+}
+
+function parsePromptScopeKey(key: string): PromptRuntimeScope | undefined {
+  try {
+    const value = JSON.parse(key) as Partial<PromptRuntimeScope>
+    if (
+      typeof value.ownerUserId !== 'string'
+      || typeof value.workspaceKey !== 'string'
+      || typeof value.threadId !== 'string'
+      || typeof value.turnId !== 'string'
+    ) return undefined
+    return value as PromptRuntimeScope
+  } catch {
+    return undefined
+  }
 }
 
 const TOOL_OUTPUT_MAX_INLINE_BYTES = 64 * 1024
@@ -195,16 +232,22 @@ export class PromptBuilder {
   constructor(private readonly deps: PromptBuilderDeps) {}
 
   /** Called by ModelStepRunner when a usage chunk reports prompt tokens. */
-  recordPromptPressure(threadId: string, model: string, promptTokens: number): void {
-    if (!threadId || promptTokens <= 0) return
-    const current = this.promptTokenPressure.get(threadId)
+  recordPromptPressure(scope: PromptRuntimeScope, model: string, promptTokens: number): void {
+    if (!scope.threadId || promptTokens <= 0) return
+    const key = promptScopeKey(scope)
+    const current = this.promptTokenPressure.get(key)
     if (current && current.promptTokens >= promptTokens) return
-    this.promptTokenPressure.set(threadId, { model, promptTokens })
+    this.promptTokenPressure.set(key, { model, promptTokens })
   }
 
   /** Called by the orchestrator when a turn ends. */
   clearTurnAutoRoute(threadId: string, turnId: string): void {
-    this.autoModelRoutes.delete(autoModelRouteKey(threadId, turnId))
+    for (const key of this.autoModelRoutes.keys()) {
+      const scope = parsePromptScopeKey(key)
+      if (scope?.threadId === threadId && scope.turnId === turnId) {
+        this.autoModelRoutes.delete(key)
+      }
+    }
   }
 
   async build(input: {
@@ -221,6 +264,7 @@ export class PromptBuilder {
       this.deps.threadStore.get(threadId),
       this.deps.turns.getTurn(threadId, turnId)
     ])
+    const runtimeScope = promptRuntimeScope(thread, threadId, turnId)
     await recordPipelineStage(this.deps.events, { threadId, turnId, stage: 'input_received', details: { stepIndex } })
     const activePlanContext = turn?.guiPlan
       ? { ...turn.guiPlan, turnId }
@@ -256,6 +300,7 @@ export class PromptBuilder {
     const approvalPolicy = normalizeApprovalPolicy(thread?.approvalPolicy)
     const effectiveMode = turn?.mode ?? thread?.mode
     const modelRoute = await this.resolveTurnModel({
+      scope: runtimeScope,
       threadId,
       turnId,
       latestRequest: turn?.prompt ?? '',
@@ -351,6 +396,7 @@ export class PromptBuilder {
     )
     const toolCatalog = buildToolCatalogFingerprint(toolSpecs)
     const toolCatalogDrift = this.recordToolCatalogFingerprint({
+      ownerUserId: runtimeScope.ownerUserId,
       threadId,
       workspace: thread?.workspace ?? '',
       mode: effectiveMode ?? 'agent',
@@ -398,7 +444,7 @@ export class PromptBuilder {
       toolSpecs.some((tool) => tool.name === CREATE_PLAN_TOOL_NAME)
         ? CREATE_PLAN_TOOL_NAME
         : undefined
-    const history = await this.compactIfNeeded(items, model, signal, { threadId, turnId })
+    const history = await this.compactIfNeeded(items, model, signal, runtimeScope)
     if (signal.aborted) return { kind: 'aborted' }
     await recordPipelineStage(this.deps.events, {
       threadId,
@@ -511,6 +557,7 @@ export class PromptBuilder {
   }
 
   private async resolveTurnModel(input: {
+    scope: PromptRuntimeScope
     threadId: string
     turnId: string
     latestRequest: string
@@ -527,7 +574,7 @@ export class PromptBuilder {
         ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {})
       }
     }
-    const key = autoModelRouteKey(input.threadId, input.turnId)
+    const key = promptScopeKey(input.scope)
     const cached = this.autoModelRoutes.get(key)
     if (cached) {
       return {
@@ -656,6 +703,7 @@ export class PromptBuilder {
   }
 
   private recordToolCatalogFingerprint(input: {
+    ownerUserId: string
     threadId: string
     workspace: string
     mode: string
@@ -667,6 +715,7 @@ export class PromptBuilder {
     toolHashes: Record<string, string>
   }): ToolCatalogDrift {
     const key = JSON.stringify({
+      ownerUserId: input.ownerUserId,
       threadId: input.threadId,
       workspace: input.workspace,
       mode: input.mode,
@@ -742,13 +791,13 @@ export class PromptBuilder {
   }
 
   private consumePromptPressure(
-    threadId: string,
+    scope: PromptRuntimeScope,
     model: string
   ): { model: string; promptTokens: number } | undefined {
-    if (!threadId) return undefined
-    const pressure = this.promptTokenPressure.get(threadId)
+    const key = promptScopeKey(scope)
+    const pressure = this.promptTokenPressure.get(key)
     if (!pressure) return undefined
-    this.promptTokenPressure.delete(threadId)
+    this.promptTokenPressure.delete(key)
     return {
       model: pressure.model || model,
       promptTokens: pressure.promptTokens
@@ -759,9 +808,9 @@ export class PromptBuilder {
     items: TurnItem[],
     model: string,
     signal: AbortSignal,
-    context: { threadId: string; turnId: string }
+    context: PromptRuntimeScope
   ): Promise<TurnItem[]> {
-    const pressure = this.consumePromptPressure(context.threadId, model)
+    const pressure = this.consumePromptPressure(context, model)
     const thresholdModel = pressure?.model || model
     const plan = this.deps.compactor.planCompaction(items, { model: thresholdModel, promptTokens: pressure?.promptTokens })
     if (!plan) return items

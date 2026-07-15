@@ -36,13 +36,22 @@ describe.each([
     await store.save(state())
     await expect(store.load(identity)).resolves.toMatchObject({ cursor: { stepIndex: 2 } })
 
-    await expect(store.acquire(identity.runId, 'holder-a', 60_000)).resolves.toMatchObject({ acquired: true })
-    await expect(store.acquire(identity.runId, 'holder-b', 60_000)).resolves.toMatchObject({ acquired: false })
-    await expect(store.renew(identity.runId, 'holder-b', 60_000)).resolves.toBe(false)
-    await store.release(identity.runId, 'holder-a')
-    await expect(store.acquire(identity.runId, 'holder-b', 60_000)).resolves.toMatchObject({ acquired: true })
+    await expect(store.acquire(identity, 'holder-a', 60_000)).resolves.toMatchObject({ acquired: true })
+    await expect(store.acquire(identity, 'holder-b', 60_000)).resolves.toMatchObject({ acquired: false })
+    await expect(store.renew(identity, 'holder-b', 60_000)).resolves.toBe(false)
+    await store.release(identity, 'holder-a')
+    await expect(store.acquire(identity, 'holder-b', 60_000)).resolves.toMatchObject({ acquired: true })
 
     if (store instanceof FileRunStateStore) await rm(store.rootDir, { recursive: true, force: true })
+  })
+
+  it('isolates equal run ids by owner and workspace', async () => {
+    const store = await create()
+    const other = { ...identity, ownerUserId: 'u2', workspaceKey: 'w2' }
+    await expect(store.acquire(identity, 'holder-a', 60_000)).resolves.toMatchObject({ acquired: true })
+    await expect(store.acquire(other, 'holder-b', 60_000)).resolves.toMatchObject({ acquired: true })
+    await store.release(identity, 'holder-a')
+    await store.release(other, 'holder-b')
   })
 })
 

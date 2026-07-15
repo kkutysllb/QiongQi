@@ -48,7 +48,7 @@ export class RuntimeKernel {
 
   async run(identity: RunIdentity): Promise<RunOutcome> {
     const { leases, snapshots, holderId } = this.options
-    const lease = await leases.acquire(identity.runId, holderId, this.options.leaseTtlMs)
+    const lease = await leases.acquire(identity, holderId, this.options.leaseTtlMs)
     if (!lease.acquired) {
       return {
         status: 'failed',
@@ -172,7 +172,7 @@ export class RuntimeKernel {
       }
       return state && isTerminal(state) ? outcomeFromTerminalState(state) : outcome
     } finally {
-      await leases.release(identity.runId, holderId)
+      await leases.release(identity, holderId)
     }
   }
 

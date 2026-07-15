@@ -296,7 +296,7 @@ export class TurnOrchestrator {
   }
 
   private async drainSteering(threadId: string, turnId: string, signal: AbortSignal): Promise<void> {
-    const pending = this.opts.steering.drain()
+    const pending = this.opts.steering.drain(turnId)
     if (pending.length === 0) return
     for (const text of pending) {
       const item: TurnItem = {
@@ -437,7 +437,12 @@ export async function runOrchestratorStep(input: {
     toolProviderMetadata: ctx.toolProviderMetadata,
     toolKinds: ctx.toolKinds,
     recordPromptPressure: (tid, model, promptTokens) =>
-      promptBuilder.recordPromptPressure(tid, model, promptTokens)
+      promptBuilder.recordPromptPressure({
+        ownerUserId: ctx.thread?.ownerUserId ?? 'local-default-owner',
+        workspaceKey: ctx.thread?.workspace ?? 'local-default-workspace',
+        threadId: tid,
+        turnId
+      }, model, promptTokens)
   })
   if (stepResult.kind === 'aborted') return 'aborted'
 

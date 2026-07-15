@@ -32,24 +32,26 @@ export class InMemoryRunStateStore implements RunSnapshotStore, RunLeaseStore {
     return state ? structuredClone(state) : undefined
   }
 
-  async acquire(runId: string, holderId: string, ttlMs: number): Promise<{ acquired: boolean; expiresAt?: string }> {
+  async acquire(identity: RunIdentity, holderId: string, ttlMs: number): Promise<{ acquired: boolean; expiresAt?: string }> {
+    const leaseKey = identityKey(identity)
     const now = Date.now()
-    const current = this.leases.get(runId)
+    const current = this.leases.get(leaseKey)
     if (current && current.expiresAt > now && current.holderId !== holderId) return { acquired: false }
     const expiresAt = now + Math.max(1, Math.floor(ttlMs))
-    this.leases.set(runId, { holderId, expiresAt })
+    this.leases.set(leaseKey, { holderId, expiresAt })
     return { acquired: true, expiresAt: new Date(expiresAt).toISOString() }
   }
 
-  async renew(runId: string, holderId: string, ttlMs: number): Promise<boolean> {
-    const current = this.leases.get(runId)
+  async renew(identity: RunIdentity, holderId: string, ttlMs: number): Promise<boolean> {
+    const current = this.leases.get(identityKey(identity))
     if (!current || current.holderId !== holderId || current.expiresAt <= Date.now()) return false
     current.expiresAt = Date.now() + Math.max(1, Math.floor(ttlMs))
     return true
   }
 
-  async release(runId: string, holderId: string): Promise<void> {
-    const current = this.leases.get(runId)
-    if (current?.holderId === holderId) this.leases.delete(runId)
+  async release(identity: RunIdentity, holderId: string): Promise<void> {
+    const key = identityKey(identity)
+    const current = this.leases.get(key)
+    if (current?.holderId === holderId) this.leases.delete(key)
   }
 }
