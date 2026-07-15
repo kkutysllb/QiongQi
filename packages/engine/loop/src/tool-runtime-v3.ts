@@ -13,9 +13,15 @@ export class ToolRuntimeV3 {
   async execute(input: ToolRuntimeV3Input): Promise<ToolRuntimeV3Result> {
     const key = this.options.effects.idempotencyKey(input.identity, input.call.callId)
     const committed = input.state.committedEffects.find((effect) => effect.idempotencyKey === key)
-    if (committed && input.policy.replay !== 'safe') {
-      const cached = this.options.effects.cachedResult(key) as ToolHostResult | undefined
-      if (cached) return { state: input.state, result: cached, replayed: true }
+    if (committed) {
+      const stored = await this.options.effects.storedResult(input.identity, key) as ToolHostResult | undefined
+      if (stored) return { state: input.state, result: stored, replayed: true }
+      if (input.policy.replay !== 'safe') {
+        return { state: input.state, replayed: true, outcome: { status: 'suspended', reason: 'required_action_missing', retryable: true, details: { code: 'effect_requires_verification', idempotencyKey: key } } }
+      }
+    }
+    const pending = input.state.pendingEffects.find((effect) => effect.idempotencyKey === key)
+    if (pending && input.policy.replay !== 'safe') {
       return { state: input.state, replayed: true, outcome: { status: 'suspended', reason: 'required_action_missing', retryable: true, details: { code: 'effect_requires_verification', idempotencyKey: key } } }
     }
     const prepared = this.options.effects.prepare(input.state, input.identity, { callId: input.call.callId, target: input.call.toolName, arguments: input.call.arguments }, input.policy)

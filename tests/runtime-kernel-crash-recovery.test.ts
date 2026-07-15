@@ -1,9 +1,9 @@
 import { expect, it } from 'vitest'
 import { EffectCommitCoordinator, ToolRuntimeV3 } from '@qiongqi/loop'
-import { InMemoryRunEventStore } from '@qiongqi/adapter-storage'
+import { InMemoryEffectResultStore, InMemoryRunEventStore } from '@qiongqi/adapter-storage'
 
 it('uses a stable idempotency key across retries', () => {
-  const coordinator = new EffectCommitCoordinator({ events: new InMemoryRunEventStore() })
+  const coordinator = new EffectCommitCoordinator({ events: new InMemoryRunEventStore(), results: new InMemoryEffectResultStore() })
   const identity = { ownerUserId: 'u', workspaceKey: 'w', threadId: 't', turnId: 'tu', runId: 'r' }
   expect(coordinator.idempotencyKey(identity, 'call-1')).toBe('u:w:r:call-1')
 })
@@ -12,7 +12,7 @@ it('exposes deterministic crash injection points around effect commit', async ()
   const points: string[] = []
   const runtime = new ToolRuntimeV3({
     toolHost: { id: 'test', async listTools() { return [] }, async execute() { return { item: {} as never, approved: true } } },
-    effects: new EffectCommitCoordinator({ events: new InMemoryRunEventStore() }),
+    effects: new EffectCommitCoordinator({ events: new InMemoryRunEventStore(), results: new InMemoryEffectResultStore() }),
     crashPoint: (point) => points.push(point)
   })
   const identity = { ownerUserId: 'u', workspaceKey: 'w', threadId: 't', turnId: 'tu', runId: 'r' }

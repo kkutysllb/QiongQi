@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { EffectCommitCoordinator, ToolRuntimeV3 } from '@qiongqi/loop'
-import { InMemoryRunEventStore } from '@qiongqi/adapter-storage'
+import { InMemoryEffectResultStore, InMemoryRunEventStore } from '@qiongqi/adapter-storage'
 import type { RunIdentity, RunStateV3 } from '@qiongqi/contracts'
 import type { ToolHost, ToolHostContext } from '@qiongqi/ports'
 
@@ -15,7 +15,7 @@ function host(counter: { value: number }): ToolHost {
 describe('ToolRuntimeV3', () => {
   it('replays idempotent writes without executing twice', async () => {
     const counter = { value: 0 }
-    const runtime = new ToolRuntimeV3({ toolHost: host(counter), effects: new EffectCommitCoordinator({ events: new InMemoryRunEventStore() }) })
+    const runtime = new ToolRuntimeV3({ toolHost: host(counter), effects: new EffectCommitCoordinator({ events: new InMemoryRunEventStore(), results: new InMemoryEffectResultStore() }) })
     const input = { identity, state, call: { callId: 'c1', toolName: 'write', arguments: {} }, context, policy: { effect: 'idempotent-write' as const, replay: 'verify-first' as const } }
     const first = await runtime.execute(input)
     const second = await runtime.execute({ ...input, state: first.state })
@@ -25,7 +25,7 @@ describe('ToolRuntimeV3', () => {
 
   it('suspends after a crash between non-idempotent execution and commit', async () => {
     const counter = { value: 0 }
-    const runtime = new ToolRuntimeV3({ toolHost: host(counter), effects: new EffectCommitCoordinator({ events: new InMemoryRunEventStore() }) })
+    const runtime = new ToolRuntimeV3({ toolHost: host(counter), effects: new EffectCommitCoordinator({ events: new InMemoryRunEventStore(), results: new InMemoryEffectResultStore() }) })
     const result = await runtime.execute({ identity, state, call: { callId: 'c2', toolName: 'delete', arguments: {} }, context, policy: { effect: 'non-idempotent-write', replay: 'never' }, crashAfterExecute: true })
     expect(counter.value).toBe(1)
     expect(result.outcome).toMatchObject({ status: 'suspended' })

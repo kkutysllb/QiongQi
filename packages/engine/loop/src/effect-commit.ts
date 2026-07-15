@@ -1,8 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { EffectIntent, RunEventEnvelope, RunIdentity, RunStateV3, ToolEffectPolicy } from '@qiongqi/contracts'
-import type { RunEventStore } from '@qiongqi/ports'
+import type { EffectResultStore, RunEventStore } from '@qiongqi/ports'
 
-export type EffectCommitOptions = { events: RunEventStore; nowIso?: () => string }
+export type EffectCommitOptions = {
+  events: RunEventStore
+  results: EffectResultStore
+  nowIso?: () => string
+}
 
 export function digestValue(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex')
@@ -16,7 +20,6 @@ function canonicalize(value: unknown): unknown {
 
 export class EffectCommitCoordinator {
   private readonly nowIso: () => string
-  private readonly resultCache = new Map<string, unknown>()
 
   constructor(private readonly options: EffectCommitOptions) {
     this.nowIso = options.nowIso ?? (() => new Date().toISOString())
@@ -42,11 +45,13 @@ export class EffectCommitCoordinator {
     if (existing) return { state, event: await this.append(identity, state, 'effect.committed', existing, intent.idempotencyKey) }
     const now = this.nowIso()
     const committed = { idempotencyKey: intent.idempotencyKey, resultDigest: digestValue(result), status: 'committed' as const, committedAt: now }
-    this.resultCache.set(intent.idempotencyKey, result)
+    await this.options.results.save(identity, intent.idempotencyKey, committed.resultDigest, result)
     return { state: { ...state, pendingEffects: state.pendingEffects.filter((candidate) => candidate.idempotencyKey !== intent.idempotencyKey), committedEffects: [...state.committedEffects, committed], updatedAt: now }, event: await this.append(identity, state, 'effect.committed', committed, intent.idempotencyKey) }
   }
 
-  cachedResult(idempotencyKey: string): unknown { return this.resultCache.get(idempotencyKey) }
+  async storedResult(identity: RunIdentity, idempotencyKey: string): Promise<unknown> {
+    return (await this.options.results.load(identity, idempotencyKey))?.result
+  }
 
   private async append(identity: RunIdentity, state: RunStateV3, eventType: string, payload: unknown, idempotencyKey: string): Promise<RunEventEnvelope> {
     const events = await this.options.events.listAfter(identity, 0)

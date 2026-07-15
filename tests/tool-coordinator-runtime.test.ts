@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { InMemoryRunEventStore } from '@qiongqi/adapter-storage'
+import { InMemoryEffectResultStore, InMemoryRunEventStore } from '@qiongqi/adapter-storage'
 import { EffectCommitCoordinator, InflightTracker, ToolCallCoordinator, ToolRuntimeV3 } from '@qiongqi/loop'
 import type { RunStateV3 } from '@qiongqi/contracts'
 import type { ToolCallLike, ToolHost, ToolHostContext } from '@qiongqi/ports'
@@ -8,7 +8,7 @@ it('routes coordinator tool execution through ToolRuntimeV3 when configured', as
   const events = new InMemoryRunEventStore()
   let executions = 0
   const host: ToolHost = { id: 'host', async listTools() { return [] }, async execute() { executions += 1; return { item: {} as never, approved: true } } }
-  const runtime = new ToolRuntimeV3({ toolHost: host, effects: new EffectCommitCoordinator({ events }) })
+  const runtime = new ToolRuntimeV3({ toolHost: host, effects: new EffectCommitCoordinator({ events, results: new InMemoryEffectResultStore() }) })
   const identity = { ownerUserId: 'u', workspaceKey: 'w', threadId: 't', turnId: 'tu', runId: 'r' }
   const state: RunStateV3 = { version: 3, graphVersion: 'g', runtimeMode: 'kernel_v3', ...identity, status: 'running', cursor: { stepIndex: 0, nodeId: 'tool', attempt: 0, checkpointSeq: 0 }, budgets: { stepsUsed: 0, toolCallsUsed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 }, recovery: { attempts: 0, maxAttempts: 1 }, middleware: {}, pendingEffects: [], committedEffects: [], createdAt: 'now', updatedAt: 'now' }
   let latestState = state

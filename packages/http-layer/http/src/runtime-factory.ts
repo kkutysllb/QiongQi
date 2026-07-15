@@ -12,7 +12,7 @@ import { FileAttachmentStore } from '@qiongqi/attachments'
 import { InMemoryApprovalGate } from '@qiongqi/adapter-storage'
 import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
 import { InMemoryEventBus } from '@qiongqi/adapter-storage'
-import { FileSessionStore, FileThreadStore, FileRunEventStore, FileRunStateStore } from '@qiongqi/adapter-storage'
+import { FileEffectResultStore, FileSessionStore, FileThreadStore, FileRunEventStore, FileRunStateStore } from '@qiongqi/adapter-storage'
 import { HybridSessionStore, HybridThreadStore } from '@qiongqi/adapter-storage'
 import {
   DynamicRoutedModelCompatClient,
@@ -1133,7 +1133,7 @@ async function assembleRuntime(input: {
   const runtimeV3Root = join(options.dataDir, 'runtime-v3')
   const runtimeV3Events = orchestrationMode === 'kernel_v3' ? new FileRunEventStore(runtimeV3Root) : undefined
   const toolRuntime = runtimeV3Events
-    ? new ToolRuntimeV3({ toolHost: tools.toolHost, effects: new EffectCommitCoordinator({ events: runtimeV3Events, nowIso: core.nowIso }) })
+    ? new ToolRuntimeV3({ toolHost: tools.toolHost, effects: new EffectCommitCoordinator({ events: runtimeV3Events, results: new FileEffectResultStore(runtimeV3Root), nowIso: core.nowIso }) })
     : undefined
   const orchOpts = {
     threadStore: core.threadStore,
