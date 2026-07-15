@@ -1,10 +1,11 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { buildRouter } from './routes/index.js'
-import type { ServerRuntime } from './routes/server-runtime.js'
+import type { QiongqiConfigStore, ServerRuntime } from './routes/server-runtime.js'
 import { startNodeHttpServer, type NodeHttpServerHandle } from './node-http-server.js'
 import type { DispatchRequestOptions } from './http-server.js'
 import { FileAttachmentStore } from '@qiongqi/attachments'
@@ -13,7 +14,12 @@ import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
 import { InMemoryEventBus } from '@qiongqi/adapter-storage'
 import { FileSessionStore, FileThreadStore } from '@qiongqi/adapter-storage'
 import { HybridSessionStore, HybridThreadStore } from '@qiongqi/adapter-storage'
-import { ModelCompatClient } from '@qiongqi/adapter-model'
+import {
+  DynamicRoutedModelCompatClient,
+  ModelCompatClient,
+  RoutedModelCompatClient,
+  type RoutedModelConfig
+} from '@qiongqi/adapter-model'
 import { CapabilityRegistry } from '@qiongqi/adapter-tools'
 import { buildGoalLocalTools } from '@qiongqi/adapter-tools'
 import { buildTodoLocalTools } from '@qiongqi/adapter-tools'
@@ -25,11 +31,19 @@ import { buildWebToolProviders } from '@qiongqi/adapter-tools'
 import { LocalWorkspaceInspector } from '@qiongqi/adapter-storage'
 import { createImmutablePrefix } from '@qiongqi/cache'
 import {
+  DEFAULT_WORK_MODES,
   buildRuntimeCapabilityManifest,
   type QiongqiCapabilitiesConfig
 } from '@qiongqi/contracts'
 import type { ApprovalPolicy, SandboxMode } from '@qiongqi/contracts'
-import type { OrchestrationMode } from '@qiongqi/loop'
+import { normalizeOrchestrationMode, type OrchestrationMode } from '@qiongqi/loop'
+import type {
+  ToolHost,
+  ToolHostContext,
+  ToolHostResult,
+  ToolCallLike
+} from '@qiongqi/ports'
+import type { TurnItem } from '@qiongqi/contracts'
 import {
   AgentCardSchema,
   type AgentCard,
@@ -70,9 +84,14 @@ import { UsageService } from '@qiongqi/services'
 import type { UsageEvent } from '@qiongqi/contracts'
 import {
   DEFAULT_MODEL_ENDPOINT_FORMAT,
+  normalizeModelEndpointFormat,
   type ModelEndpointFormat
 } from '@qiongqi/contracts'
 import { SkillRuntime } from '@qiongqi/skills'
+
+type RuntimeSkillsConfig = NonNullable<QiongqiCapabilitiesConfig['skills']>
+type RuntimeWorkModeConfig = RuntimeSkillsConfig['workModes']['modes'][string]
+type RuntimeModeSkillOverride = RuntimeSkillsConfig['modeSkillOverrides'][string]
 import { SkillPluginHost } from '@qiongqi/skills'
 import { buildSkillToolProvider, type SkillToolExecutor } from '@qiongqi/skills'
 import { createBashLocalTool } from '@qiongqi/adapter-tools'
@@ -83,6 +102,21 @@ import { createChildAgentExecutor } from '@qiongqi/delegation'
 import { PeerRegistry, FilePeerStore } from '@qiongqi/delegation'
 import { HttpPeerTransport } from './http-peer-transport.js'
 import { createOpenTelemetryRuntime, type OpenTelemetryRuntime, type OpenTelemetryRuntimeOptions } from './telemetry.js'
+import { AuthService } from './auth-service.js'
+import {
+  FileQiongqiConfigStore,
+  qiongqiConfigFromRuntimeOptions
+} from './qiongqi-config-store.js'
+import {
+  ensureKWorksUserWorkspace,
+  kworksUserWorkspacePaths
+} from './kworks-workspace-paths.js'
+import {
+  KWorksUserDataAuthStore,
+  type KWorksUserDataStore
+} from './kworks-user-data-store.js'
+import { SqliteKWorksUserDataStore } from './kworks-sqlite-user-data-store.js'
+import { UserScopedModelClient } from './user-scoped-model-client.js'
 
 // ---------------------------------------------------------------------------
 // Options
@@ -189,6 +223,8 @@ export interface CoreRuntime {
   userInputGate: InMemoryUserInputGate
   workspaceInspector: LocalWorkspaceInspector
   usageService: UsageService
+  authService: AuthService
+  kworksUserDataStore: KWorksUserDataStore
   inflight: InflightTracker
   steering: SteeringQueue
   compactor: ContextCompactor
@@ -206,6 +242,7 @@ export interface CoreRuntime {
     sqlite?: { available: boolean; path?: string; reason?: string }
   }
   storesShutdown?: () => Promise<void>
+  userDataShutdown?: () => void
 }
 
 /**
@@ -235,6 +272,8 @@ export async function createCore(
   options: Pick<QiongqiServeRuntimeOptions, 'dataDir' | 'storage' | 'contextCompaction' | 'models'>
 ): Promise<CoreRuntime> {
   await mkdir(options.dataDir, { recursive: true })
+  const workspaceRoot = workspaceRootFromRuntimeDataDir(options.dataDir)
+  await ensureKWorksUserWorkspace(kworksUserWorkspacePaths(workspaceRoot, workspaceUserIdFromRuntimeDataDir(options.dataDir)))
   const eventBus = new InMemoryEventBus()
   const stores = await createPersistentStores({
     dataDir: options.dataDir,
@@ -245,6 +284,12 @@ export async function createCore(
   const userInputGate = new InMemoryUserInputGate()
   const workspaceInspector = new LocalWorkspaceInspector()
   const usageService = new UsageService()
+  const kworksUserDataStore = new SqliteKWorksUserDataStore({ workspaceRoot })
+  await kworksUserDataStore.ready()
+  const authService = new AuthService({
+    store: new KWorksUserDataAuthStore(kworksUserDataStore),
+    now: () => new Date()
+  })
   const inflight = new InflightTracker()
   const steering = new SteeringQueue()
   const compactor = new ContextCompactor({
@@ -254,7 +299,24 @@ export async function createCore(
   const ids = new RandomIdGenerator()
   const nowIso = () => new Date().toISOString()
   const allocateSeq = (threadId: string) => eventBus.allocateSeq(threadId)
-  const events = new RuntimeEventRecorder({ eventBus, sessionStore: stores.sessionStore, allocateSeq, nowIso })
+  const events = new RuntimeEventRecorder({
+    eventBus,
+    sessionStore: stores.sessionStore,
+    allocateSeq,
+    nowIso,
+    usageSink: async (event) => {
+      const thread = await stores.threadStore.get(event.threadId)
+      await kworksUserDataStore.appendUsageEvent?.({
+        ...(thread?.ownerUserId ? { userId: thread.ownerUserId } : {}),
+        threadId: event.threadId,
+        seq: event.seq,
+        turnId: event.turnId,
+        ...(event.model ? { model: event.model } : {}),
+        timestamp: event.timestamp,
+        usage: event.usage
+      })
+    }
+  })
   const turnService = new TurnService({
     threadStore: stores.threadStore,
     sessionStore: stores.sessionStore,
@@ -285,6 +347,8 @@ export async function createCore(
     userInputGate,
     workspaceInspector,
     usageService,
+    authService,
+    kworksUserDataStore,
     inflight,
     steering,
     compactor,
@@ -295,8 +359,23 @@ export async function createCore(
     turnService,
     threadService,
     storageDiagnostics: stores.diagnostics,
-    storesShutdown: stores.shutdown
+    storesShutdown: stores.shutdown,
+    userDataShutdown: () => kworksUserDataStore.close()
   }
+}
+
+function workspaceRootFromRuntimeDataDir(dataDir: string): string {
+  const parts = dataDir.split(/[\\/]+/)
+  const usersIndex = parts.lastIndexOf('users')
+  if (usersIndex < 0) return dataDir
+  const leadingSlash = dataDir.startsWith('/') ? '/' : ''
+  return leadingSlash + parts.slice(0, usersIndex).filter(Boolean).join('/')
+}
+
+function workspaceUserIdFromRuntimeDataDir(dataDir: string): string {
+  const parts = dataDir.split(/[\\/]+/).filter(Boolean)
+  const usersIndex = parts.lastIndexOf('users')
+  return usersIndex >= 0 && parts[usersIndex + 1] ? parts[usersIndex + 1]! : 'runtime'
 }
 
 // ---------------------------------------------------------------------------
@@ -312,7 +391,7 @@ export async function createCore(
  * tool calls / streaming?” without re-parsing the config.
  */
 export interface ModelAdapter {
-  client: ModelCompatClient
+  client: ModelCompatClient | RoutedModelCompatClient | DynamicRoutedModelCompatClient
   profiles: ReturnType<typeof modelContextProfilesFromConfig>
   modelCapabilities: (model: string) => ReturnType<typeof modelCapabilitiesForModel>
 }
@@ -330,15 +409,43 @@ export interface ModelAdapter {
 export function createModelAdapter(
   options: Pick<
     QiongqiServeRuntimeOptions,
-    'baseUrl' | 'apiKey' | 'endpointFormat' | 'model' | 'contextCompaction' | 'models'
-  >
+    'baseUrl' | 'apiKey' | 'endpointFormat' | 'model' | 'contextCompaction' | 'models' | 'runtime'
+  >,
+  configStore?: QiongqiConfigStore
 ): ModelAdapter {
-  const client = new ModelCompatClient({
+  const streamIdleTimeoutMs = options.runtime?.modelStreamIdleTimeoutMs
+  const fallback = {
     baseUrl: options.baseUrl,
     apiKey: options.apiKey,
     endpointFormat: options.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT,
-    model: options.model
-  })
+    model: options.model,
+    ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {})
+  }
+  const routes = modelProviderRoutesFromConfig(options.models, streamIdleTimeoutMs)
+  const client = configStore
+    ? new DynamicRoutedModelCompatClient({
+        fallback: () => {
+          const config = runtimeConfigSnapshot(configStore)
+          const configStreamIdleTimeoutMs = config.runtime?.modelStreamIdleTimeoutMs ?? streamIdleTimeoutMs
+          return {
+            baseUrl: config.serve?.baseUrl ?? options.baseUrl,
+            apiKey: config.serve?.apiKey ?? options.apiKey,
+            endpointFormat: config.serve?.endpointFormat ?? options.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT,
+            model: config.serve?.model ?? options.model,
+            ...(configStreamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs: configStreamIdleTimeoutMs } : {})
+          }
+        },
+        routes: () => {
+          const config = runtimeConfigSnapshot(configStore)
+          return modelProviderRoutesFromConfig(
+            config.models,
+            config.runtime?.modelStreamIdleTimeoutMs ?? streamIdleTimeoutMs
+          )
+        }
+      })
+    : routes.length > 0
+      ? new RoutedModelCompatClient({ fallback, routes })
+      : new ModelCompatClient(fallback)
   const profiles = modelContextProfilesFromConfig({
     contextCompaction: options.contextCompaction,
     models: options.models
@@ -346,8 +453,67 @@ export function createModelAdapter(
   return {
     client,
     profiles,
-    modelCapabilities: (model: string) => modelCapabilitiesForModel(model, profiles)
+    modelCapabilities: (model: string) => {
+      const config = configStore?.snapshot?.()
+      if (config) {
+        return modelCapabilitiesForModel(
+          model,
+          modelContextProfilesFromConfig({
+            contextCompaction: config.contextCompaction ?? options.contextCompaction,
+            models: config.models ?? options.models
+          })
+        )
+      }
+      return modelCapabilitiesForModel(model, profiles)
+    }
   }
+}
+
+function runtimeConfigSnapshot(configStore: QiongqiConfigStore): ReturnType<NonNullable<QiongqiConfigStore['snapshot']>> {
+  const snapshot = configStore.snapshot?.()
+  if (!snapshot) {
+    throw new Error('dynamic model routing requires a synchronous config snapshot')
+  }
+  return snapshot
+}
+
+function skillEnabledMapFromCompatSetting(value: unknown): Record<string, boolean> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const out: Record<string, boolean> = {}
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof raw === 'boolean') {
+      out[name] = raw
+    } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const enabled = (raw as Record<string, unknown>).enabled
+      if (typeof enabled === 'boolean') out[name] = enabled
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+function modelProviderRoutesFromConfig(
+  models: ModelConfig | undefined,
+  streamIdleTimeoutMs?: number
+): RoutedModelConfig[] {
+  const profiles = models?.profiles
+  if (!profiles) return []
+  const routes: RoutedModelConfig[] = []
+  for (const [modelId, profile] of Object.entries(profiles)) {
+    const baseUrl = typeof profile.baseUrl === 'string' ? profile.baseUrl.trim() : ''
+    if (!baseUrl) continue
+    const providerModel = typeof profile.providerModel === 'string' && profile.providerModel.trim()
+      ? profile.providerModel.trim()
+      : modelId
+    routes.push({
+      baseUrl,
+      apiKey: typeof profile.apiKey === 'string' ? profile.apiKey : '',
+      endpointFormat: normalizeModelEndpointFormat(profile.endpointFormat),
+      model: providerModel,
+      aliases: [modelId, ...(Array.isArray(profile.aliases) ? profile.aliases : [])],
+      ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {})
+    })
+  }
+  return routes
 }
 
 // ---------------------------------------------------------------------------
@@ -364,7 +530,7 @@ export function createModelAdapter(
  */
 export interface ToolMatrix {
   registry: CapabilityRegistry
-  toolHost: LocalToolHost
+  toolHost: ToolHost
   mcpProviders: Awaited<ReturnType<typeof buildMcpToolProviders>>
   webProviders: ReturnType<typeof buildWebToolProviders>
   skillRuntime: SkillRuntime
@@ -374,6 +540,41 @@ export interface ToolMatrix {
   peerRegistry: PeerRegistry
   attachmentStore: FileAttachmentStore | undefined
   memoryStore: FileMemoryStore | undefined
+  refreshRuntimeTools: () => Promise<void>
+  refreshMcpTools: () => Promise<void>
+}
+
+class RefreshableToolHost implements ToolHost {
+  readonly id = 'local'
+  private delegate: LocalToolHost
+
+  constructor(delegate: LocalToolHost) {
+    this.delegate = delegate
+  }
+
+  replace(delegate: LocalToolHost): void {
+    this.delegate = delegate
+  }
+
+  listTools(context?: ToolHostContext) {
+    return this.delegate.listTools(context)
+  }
+
+  execute(
+    call: ToolCallLike,
+    context: ToolHostContext,
+    onUpdate?: (item: TurnItem) => Promise<void> | void
+  ): Promise<ToolHostResult> {
+    return this.delegate.execute(call, context, onUpdate)
+  }
+
+  clearReadTracker(threadId?: string): void {
+    this.delegate.clearReadTracker(threadId)
+  }
+
+  diagnostics() {
+    return this.delegate.diagnostics()
+  }
 }
 
 /**
@@ -408,29 +609,36 @@ export async function createToolMatrix(
    * forwarded down — keeps the registry lifetime tied to the agent,
    * not the tool matrix.
    */
-  peerRegistry?: PeerRegistry
+  peerRegistry?: PeerRegistry,
+  configStore?: QiongqiConfigStore
 ): Promise<ToolMatrix> {
   const nowIso = core.nowIso
-  const skillRuntime = await SkillRuntime.create(options.capabilities?.skills)
-  const skillPluginHost = await SkillPluginHost.create(options.capabilities?.skills, {
-    builtinRoot: await resolveBuiltinSkillRoot(options.dataDir, options.skillRoots)
+  const runtimeMountedSkillRoots = options.capabilities?.skills.roots ?? []
+  const initialCapabilities = withRuntimeMountedSkillRoots(options.capabilities, runtimeMountedSkillRoots)
+  const builtinSkillRoots = await filterDuplicateBuiltinSkillRoots(
+    await resolveBuiltinSkillRoots(options.dataDir, options.skillRoots),
+    initialCapabilities?.skills.roots ?? []
+  )
+  const skillRuntime = await SkillRuntime.create(initialCapabilities?.skills)
+  const skillPluginHost = await SkillPluginHost.create(initialCapabilities?.skills, {
+    builtinRoots: builtinSkillRoots,
+    enabledSkillsProvider: configStore
+      ? (context) => {
+          const owner = context?.ownerUserId
+          const userEnabledSkills = owner
+            ? skillEnabledMapFromCompatSetting(core.kworksUserDataStore.getUserSettingSync?.(owner, 'capabilities.skills.compat'))
+            : undefined
+          return userEnabledSkills ?? runtimeConfigSnapshot(configStore).capabilities?.skills?.enabledSkills
+        }
+      : undefined
   })
-  const skillMcpServers = collectSkillMcpServers(
+  let skillMcpServers = collectSkillMcpServers(
     skillPluginHost.list(),
     process.cwd(),
     (p) => skillPluginHost.isEnabled(p)
   )
-  const mergedMcpConfig = options.capabilities?.mcp && Object.keys(skillMcpServers).length > 0
-    ? {
-        ...options.capabilities.mcp,
-        servers: {
-          ...options.capabilities.mcp.servers,
-          ...skillMcpServers as Record<string, typeof options.capabilities.mcp.servers[string]>
-        }
-      }
-    : options.capabilities?.mcp
-  const mcpProviders = await buildMcpToolProviders(mergedMcpConfig)
-  const webProviders = buildWebToolProviders(options.capabilities?.web)
+  let mcpProviders = await buildMcpToolProviders(mergedMcpConfig(options.capabilities?.mcp, skillMcpServers))
+  let webProviders = buildWebToolProviders(options.capabilities?.web)
   const attachmentStore = options.capabilities?.attachments.enabled
     ? new FileAttachmentStore({
         rootDir: join(options.dataDir, 'attachments'),
@@ -445,7 +653,7 @@ export async function createToolMatrix(
         nowIso
       })
     : undefined
-  const baseToolProviders = [
+  const baseToolProviders = () => [
     {
       id: 'builtin',
       kind: 'built-in' as const,
@@ -457,7 +665,7 @@ export async function createToolMatrix(
     ...webProviders.providers,
     ...buildMemoryToolProviders(memoryStore)
   ]
-  const childRegistry = new CapabilityRegistry(baseToolProviders)
+  const childRegistry = new CapabilityRegistry(baseToolProviders())
   const childToolHost = new LocalToolHost({ registry: childRegistry, readTracker: true })
   const tokenEconomy = tokenEconomyConfigForOptions(options)
   const delegationRuntime = options.capabilities?.subagents.enabled
@@ -492,8 +700,8 @@ export async function createToolMatrix(
         }
       })
     : undefined
-  const registry = new CapabilityRegistry([
-    ...baseToolProviders,
+  const buildMainRegistry = () => new CapabilityRegistry([
+    ...baseToolProviders(),
     {
       id: 'goal',
       kind: 'gui' as const,
@@ -527,12 +735,40 @@ export async function createToolMatrix(
       return provider.tools.length ? [provider] : []
     })()
   ])
-  const toolHost = new LocalToolHost({ registry, readTracker: true })
+  let registry = buildMainRegistry()
+  const toolHost = new RefreshableToolHost(new LocalToolHost({ registry, readTracker: true }))
+  const refreshRuntimeTools = async () => {
+    if (!configStore) return
+    const previous = mcpProviders
+    const current = runtimeConfigSnapshot(configStore)
+    const currentCapabilities = withRuntimeMountedSkillRoots(current.capabilities, runtimeMountedSkillRoots)
+    // Normalize legacy "task" work-mode to "office" before reloading the skill
+    // host, so effectiveSkillIds resolves correctly for the office mode.
+    const normalizedSkills = ensureBuiltinWorkModes(
+      normalizeLegacyTaskSkills(currentCapabilities?.skills)
+    )
+    await skillRuntime.reload(normalizedSkills)
+    await skillPluginHost.reload(normalizedSkills)
+    skillMcpServers = collectSkillMcpServers(
+      skillPluginHost.list(),
+      process.cwd(),
+      (p) => skillPluginHost.isEnabled(p)
+    )
+    mcpProviders = await buildMcpToolProviders(mergedMcpConfig(currentCapabilities?.mcp, skillMcpServers))
+    webProviders = buildWebToolProviders(currentCapabilities?.web)
+    registry = buildMainRegistry()
+    toolHost.replace(new LocalToolHost({ registry, readTracker: true }))
+    matrix.registry = registry
+    matrix.mcpProviders = mcpProviders
+    matrix.webProviders = webProviders
+    await previous.close().catch(() => undefined)
+  }
+  const refreshMcpTools = refreshRuntimeTools
   // Stage 2: always give ToolMatrix a peer registry. When the caller
   // didn't supply one (e.g. tests, legacy paths), create a standalone
   // one so the interface is always satisfied.
   const effectivePeerRegistry = peerRegistry ?? new PeerRegistry()
-  return {
+  const matrix: ToolMatrix = {
     registry,
     toolHost,
     mcpProviders,
@@ -542,7 +778,24 @@ export async function createToolMatrix(
     delegationRuntime,
     peerRegistry: effectivePeerRegistry,
     attachmentStore,
-    memoryStore
+    memoryStore,
+    refreshRuntimeTools,
+    refreshMcpTools
+  }
+  return matrix
+}
+
+function mergedMcpConfig(
+  mcp: QiongqiCapabilitiesConfig['mcp'] | undefined,
+  skillMcpServers: ReturnType<typeof collectSkillMcpServers>
+): QiongqiCapabilitiesConfig['mcp'] | undefined {
+  if (!mcp || Object.keys(skillMcpServers).length === 0) return mcp
+  return {
+    ...mcp,
+    servers: {
+      ...mcp.servers,
+      ...skillMcpServers as Record<string, typeof mcp.servers[string]>
+    }
   }
 }
 
@@ -612,7 +865,11 @@ export async function createAgent(
   options: QiongqiServeRuntimeOptions
 ): Promise<ServerRuntime> {
   const core = await createCore(options)
-  const model = createModelAdapter(options)
+  const configStore = new FileQiongqiConfigStore({
+    path: options.configPath,
+    initial: qiongqiConfigFromRuntimeOptions(options)
+  })
+  const model = createModelAdapter(options, configStore)
   // Stage 2: create the PeerRegistry that will be shared between
   // the HTTP routes (agent-card discovery), delegation runtime
   // (child agents), and external callers (A2A).
@@ -640,8 +897,8 @@ export async function createAgent(
       // the operator can re-discover them later.
     })
   }
-  const tools = await createToolMatrix(options, core, model, peerRegistry)
-  return await assembleRuntime({ options, core, model, tools })
+  const tools = await createToolMatrix(options, core, model, peerRegistry, configStore)
+  return await assembleRuntime({ options, core, model, tools, configStore })
 }
 
 /**
@@ -670,13 +927,148 @@ function tokenEconomyConfigForOptions(
   }
 }
 
+function withRuntimeMountedSkillRoots(
+  capabilities: QiongqiCapabilitiesConfig | undefined,
+  runtimeMountedSkillRoots: readonly string[]
+): QiongqiCapabilitiesConfig | undefined {
+  if (!capabilities?.skills || runtimeMountedSkillRoots.length === 0) return capabilities
+  // When the KWorks desktop app mounts skill roots at startup (via
+  // KWorks_SKILLS_PATH), skills are a core capability that must stay enabled.
+  // Per-section/per-user config writes can flip enabled=false; force-retain it
+  // here so the live SkillPluginHost never sees a disabled state.
+  return {
+    ...capabilities,
+    skills: {
+      ...capabilities.skills,
+      enabled: true,
+      roots: uniqueStrings([
+        ...runtimeMountedSkillRoots,
+        ...capabilities.skills.roots
+      ])
+    }
+  }
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)]
+}
+
+/**
+ * Rename a legacy `task` work-mode entry to `office` in a skills config.
+ * Prevents the skill host from seeing a stale `task` mode (which produces
+ * wrong effectiveSkillIds for the office mode). Mirrors the normalization in
+ * kworks-compat.ts but operates on the skills capability section.
+ */
+function normalizeLegacyTaskSkills(skills: QiongqiCapabilitiesConfig['skills'] | undefined): QiongqiCapabilitiesConfig['skills'] | undefined {
+  if (!skills?.workModes?.modes) return skills
+  const modes = skills.workModes.modes as Record<string, RuntimeWorkModeConfig>
+  if (!('task' in modes)) return skills
+  const { task, ...rest } = modes
+  const nextModes: Record<string, RuntimeWorkModeConfig> = 'office' in rest
+    ? rest
+    : { ...rest, office: { ...task, id: 'office' } }
+  const nextDefault = skills.workModes.defaultModeId === 'task' ? 'office' : skills.workModes.defaultModeId
+  const overrides = { ...((skills.modeSkillOverrides ?? {}) as Record<string, RuntimeModeSkillOverride>) }
+  if (overrides.task) {
+    overrides.office = {
+      ...(overrides.office ?? { addedSkillIds: [], removedSkillIds: [] }),
+      ...overrides.task
+    }
+    delete overrides.task
+  }
+  return {
+    ...skills,
+    workModes: { ...skills.workModes, defaultModeId: nextDefault, modes: nextModes },
+    modeSkillOverrides: overrides
+  }
+}
+
+/**
+ * Ensure all built-in work modes from DEFAULT_WORK_MODES exist in the skills
+ * config. Old per-user snapshots persisted before a new built-in mode (e.g.
+ * `finance`) was added will be missing it — without this the SkillPluginHost
+ * never sees the mode and its skills are invisible.
+ */
+function ensureBuiltinWorkModes(skills: QiongqiCapabilitiesConfig['skills'] | undefined): QiongqiCapabilitiesConfig['skills'] | undefined {
+  if (!skills?.workModes?.modes) return skills
+  const modes = skills.workModes.modes as Record<string, RuntimeWorkModeConfig>
+  const builtinIds = Object.keys(DEFAULT_WORK_MODES)
+  const missing = builtinIds.filter((id) => !modes[id])
+  if (missing.length === 0) return skills
+  const merged = { ...modes }
+  for (const id of missing) {
+    const builtin = DEFAULT_WORK_MODES[id as keyof typeof DEFAULT_WORK_MODES]
+    if (builtin) {
+      merged[id] = { ...builtin }
+    }
+  }
+  return {
+    ...skills,
+    workModes: { ...skills.workModes, modes: merged }
+  }
+}
+
+async function filterDuplicateBuiltinSkillRoots(
+  builtinRoots: readonly string[],
+  configuredRoots: readonly string[]
+): Promise<string[]> {
+  if (builtinRoots.length === 0 || configuredRoots.length === 0) return uniqueStrings(builtinRoots)
+  const configuredIds = await skillPackageIdsFromRoots(configuredRoots)
+  if (configuredIds.size === 0) return uniqueStrings(builtinRoots)
+
+  const roots: string[] = []
+  for (const root of builtinRoots) {
+    const packages = await skillPackageRoots(root)
+    if (packages.length === 0) {
+      roots.push(root)
+      continue
+    }
+    const missing = packages.filter((pkg) => !configuredIds.has(pkg.id))
+    if (missing.length === packages.length) {
+      roots.push(root)
+    } else {
+      roots.push(...missing.map((pkg) => pkg.root))
+    }
+  }
+  return uniqueStrings(roots)
+}
+
+async function skillPackageIdsFromRoots(roots: readonly string[]): Promise<Set<string>> {
+  const ids = new Set<string>()
+  for (const root of roots) {
+    for (const pkg of await skillPackageRoots(root)) ids.add(pkg.id)
+  }
+  return ids
+}
+
+async function skillPackageRoots(root: string): Promise<Array<{ id: string; root: string }>> {
+  if (!existsSync(root)) return []
+  const packages: Array<{ id: string; root: string }> = []
+  if (isSkillPackage(root)) packages.push({ id: basename(root), root })
+  try {
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const candidate = join(root, entry.name)
+      if (isSkillPackage(candidate)) packages.push({ id: entry.name, root: candidate })
+    }
+  } catch {
+    return packages
+  }
+  return packages
+}
+
+function isSkillPackage(root: string): boolean {
+  return existsSync(join(root, 'skill.json')) || existsSync(join(root, 'SKILL.md'))
+}
+
 async function assembleRuntime(input: {
   options: QiongqiServeRuntimeOptions
   core: CoreRuntime
   model: ModelAdapter
   tools: ToolMatrix
+  configStore: QiongqiConfigStore
 }): Promise<ServerRuntime> {
-  const { options, core, model, tools } = input
+  const { options, core, model, tools, configStore } = input
   const prefix = createImmutablePrefix({
     systemPrompt: options.systemPrompt ?? QIONGQI_SYSTEM_PROMPT,
     pinnedConstraints: options.pinnedConstraints ?? [
@@ -686,10 +1078,18 @@ async function assembleRuntime(input: {
     ]
   })
   const tokenEconomy = tokenEconomyConfigForOptions(options)
+  const scopedModelClient = new UserScopedModelClient({
+    fallback: model.client,
+    threadService: core.threadService,
+    userDataStore: core.kworksUserDataStore,
+    ...(options.runtime?.modelStreamIdleTimeoutMs !== undefined
+      ? { streamIdleTimeoutMs: options.runtime.modelStreamIdleTimeoutMs }
+      : {})
+  })
   const reviewService = new ReviewService({
     threadStore: core.threadStore,
     turns: core.turnService,
-    model: model.client,
+    model: scopedModelClient,
     defaultModel: options.model,
     nowIso: core.nowIso,
     modelCapabilities: model.modelCapabilities,
@@ -703,7 +1103,7 @@ async function assembleRuntime(input: {
     sessionStore: core.sessionStore,
     approvalGate: core.approvalGate,
     userInputGate: core.userInputGate,
-    model: model.client,
+    model: scopedModelClient,
     toolHost: tools.toolHost,
     usage: core.usageService,
     events: core.events,
@@ -719,6 +1119,7 @@ async function assembleRuntime(input: {
     skillPluginHost: tools.skillPluginHost,
     tokenEconomy,
     contextCompaction: options.contextCompaction,
+    runtimeDataDir: options.dataDir,
     ...(options.runtime?.toolStorm ? { toolStorm: options.runtime.toolStorm } : {}),
     ...(options.runtime?.toolArgumentRepair ? { toolArgumentRepair: options.runtime.toolArgumentRepair } : {}),
     ...(tools.attachmentStore ? { attachmentStore: tools.attachmentStore } : {}),
@@ -733,7 +1134,8 @@ async function assembleRuntime(input: {
     }
   }
   // Stage 3: choose classic or evented orchestrator.
-  const loop = options.orchestrationMode === 'evented'
+  const orchestrationMode = normalizeOrchestrationMode(options.orchestrationMode)
+  const loop = orchestrationMode === 'evented_v2'
     ? new EventedTurnOrchestrator(
         orchOpts,
         new FileTurnStateStore(join(options.dataDir, 'turn-states')),
@@ -742,35 +1144,42 @@ async function assembleRuntime(input: {
         defaultLoopEvaluator
       )
     : new TurnOrchestrator(orchOpts)
-  const capabilities = buildRuntimeCapabilityManifest({
-    config: options.capabilities,
-    model: model.modelCapabilities(options.model),
-    mcp: {
-      configuredServers: Object.keys(options.capabilities?.mcp.servers ?? {}).length,
-      connectedServers: tools.mcpProviders.connectedServers,
-      toolCount: tools.mcpProviders.toolCount,
-      lastError: tools.mcpProviders.diagnostics.find((d) => d.lastError)?.lastError,
-      search: {
-        active: tools.mcpProviders.search.active,
-        indexedToolCount: tools.mcpProviders.search.indexedToolCount,
-        advertisedToolCount: tools.mcpProviders.search.advertisedToolCount
-      }
-    },
-    web: {
-      fetchAvailable: tools.webProviders.fetchAvailable,
-      searchAvailable: tools.webProviders.searchAvailable,
-      provider: tools.webProviders.provider,
-      reason: tools.webProviders.diagnostics.find((d) => d.reason)?.reason
-    },
-    skills: {
-      configuredRoots: options.capabilities?.skills.roots.length,
-      discoveredSkills: tools.skillRuntime.count(),
-      reason: tools.skillRuntime.diagnostics().validationErrors[0]?.message
-    },
-    attachments: { available: Boolean(tools.attachmentStore) },
-    memory: { available: Boolean(tools.memoryStore) },
-    subagents: { available: Boolean(tools.delegationRuntime) }
-  })
+  const currentCapabilities = () => {
+    const config = configStore.snapshot?.() ?? qiongqiConfigFromRuntimeOptions(options)
+    const effectiveCapabilities = withRuntimeMountedSkillRoots(
+      config.capabilities ?? options.capabilities,
+      options.capabilities?.skills.roots ?? []
+    )
+    return buildRuntimeCapabilityManifest({
+      config: effectiveCapabilities,
+      model: model.modelCapabilities(config.serve?.model ?? options.model),
+      mcp: {
+        configuredServers: Object.keys(effectiveCapabilities?.mcp.servers ?? {}).length,
+        connectedServers: tools.mcpProviders.connectedServers,
+        toolCount: tools.mcpProviders.toolCount,
+        lastError: tools.mcpProviders.diagnostics.find((d) => d.lastError)?.lastError,
+        search: {
+          active: tools.mcpProviders.search.active,
+          indexedToolCount: tools.mcpProviders.search.indexedToolCount,
+          advertisedToolCount: tools.mcpProviders.search.advertisedToolCount
+        }
+      },
+      web: {
+        fetchAvailable: tools.webProviders.fetchAvailable,
+        searchAvailable: tools.webProviders.searchAvailable,
+        provider: tools.webProviders.provider,
+        reason: tools.webProviders.diagnostics.find((d) => d.reason)?.reason
+      },
+      skills: {
+        configuredRoots: effectiveCapabilities?.skills.roots.length,
+        discoveredSkills: tools.skillRuntime.count(),
+        reason: tools.skillRuntime.diagnostics().validationErrors[0]?.message
+      },
+      attachments: { available: Boolean(tools.attachmentStore) },
+      memory: { available: Boolean(tools.memoryStore) },
+      subagents: { available: Boolean(tools.delegationRuntime) }
+    })
+  }
   const startedAt = options.startedAt ?? core.nowIso()
 
   // Stage 2: build or accept the AgentCard. When the caller supplied
@@ -785,6 +1194,7 @@ async function assembleRuntime(input: {
     ...(s.description ? { description: s.description } : {}),
     category: 'workflow' as const
   }))
+  const initialCapabilities = currentCapabilities()
   const endpointFormat = options.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT
   const agentCard = options.agentCard ?? await buildAgentCard({
     dataDir: options.dataDir,
@@ -793,7 +1203,7 @@ async function assembleRuntime(input: {
     agentName: options.agentName ?? 'Qiongqi',
     model: options.model,
     endpointFormats: [endpointFormat],
-    capabilities,
+    capabilities: initialCapabilities,
     skills: skillSummaries
   })
 
@@ -802,6 +1212,8 @@ async function assembleRuntime(input: {
     turnService: core.turnService,
     reviewService,
     usageService: core.usageService,
+    authService: core.authService,
+    kworksUserDataStore: core.kworksUserDataStore,
     eventBus: core.eventBus,
     sessionStore: core.sessionStore,
     events: core.events,
@@ -825,6 +1237,9 @@ async function assembleRuntime(input: {
       return reviewService.runReview(input)
     },
     storageDiagnostics: core.storageDiagnostics,
+    configStore,
+    refreshRuntimeTools: tools.refreshRuntimeTools,
+    refreshMcpTools: tools.refreshMcpTools,
     runtimeToken: options.runtimeToken,
     insecure: options.insecure,
     allocateSeq: core.allocateSeq,
@@ -835,7 +1250,11 @@ async function assembleRuntime(input: {
       port: options.port,
       configPath: options.configPath,
       dataDir: options.dataDir,
-      model: options.model,
+      // Dynamic: prefer the live serve.model from the config store so that
+      // `activateModel` (which writes serve.model) is reflected without a
+      // restart. Falls back to the startup option when no store/snapshot/model
+      // is available, preserving the previous behaviour.
+      model: configStore?.snapshot?.()?.serve?.model ?? options.model,
       endpointFormat: options.endpointFormat ?? DEFAULT_MODEL_ENDPOINT_FORMAT,
       approvalPolicy: options.approvalPolicy,
       sandboxMode: options.sandboxMode,
@@ -843,7 +1262,7 @@ async function assembleRuntime(input: {
       insecure: options.insecure,
       startedAt,
       pid: process.pid,
-      capabilities
+      capabilities: currentCapabilities()
     }),
     toolDiagnostics: async () => ({
       providers: tools.registry.diagnostics(),
@@ -858,16 +1277,66 @@ async function assembleRuntime(input: {
         ? await tools.memoryStore.diagnostics()
         : { enabled: false, rootDir: '', activeCount: 0, tombstoneCount: 0, lastInjectedIds: [] }
     }),
+    models: () => {
+      const config = runtimeConfigSnapshot(configStore)
+      return modelListFromConfig(
+        config.models ?? options.models,
+        config.serve?.model ?? options.model,
+        config.serve?.baseUrl ?? options.baseUrl
+      )
+    },
     skills: () => tools.skillRuntime.diagnostics(),
     skillsV2: () => tools.skillPluginHost.diagnostics(),
     shutdown: async () => {
       try {
         await tools.mcpProviders.close()
       } finally {
-        await core.storesShutdown?.()
+        try {
+          await core.storesShutdown?.()
+        } finally {
+          core.userDataShutdown?.()
+        }
       }
     }
   }
+}
+
+function modelListFromConfig(
+  models: ModelConfig | undefined,
+  defaultModel: string,
+  defaultBaseUrl: string
+): Array<Record<string, unknown>> {
+  const profiles = models?.profiles
+  if (!profiles || Object.keys(profiles).length === 0) {
+    return [{
+      id: defaultModel,
+      name: defaultModel,
+      use: 'qiongqi',
+      model: defaultModel,
+      display_name: defaultModel,
+      description: 'QiongQi runtime model',
+      api_key: null,
+      base_url: defaultBaseUrl,
+      supports_thinking: true,
+      supports_reasoning_effort: true,
+      reasoning_effort_values: ['auto', 'off', 'low', 'medium', 'high', 'max']
+    }]
+  }
+  return Object.entries(profiles).map(([name, profile]) => ({
+    id: name,
+    name,
+    use: 'qiongqi',
+    model: typeof profile.providerModel === 'string' ? profile.providerModel : name,
+    display_name: name,
+    description: 'QiongQi runtime model',
+    api_key: typeof profile.apiKey === 'string' && profile.apiKey.length > 0 ? '********' : null,
+    base_url: typeof profile.baseUrl === 'string' ? profile.baseUrl : defaultBaseUrl,
+    max_tokens: typeof profile.contextWindowTokens === 'number' ? profile.contextWindowTokens : null,
+    supports_thinking: true,
+    supports_vision: Array.isArray(profile.inputModalities) && profile.inputModalities.includes('image'),
+    supports_reasoning_effort: true,
+    reasoning_effort_values: ['auto', 'off', 'low', 'medium', 'high', 'max']
+  }))
 }
 
 async function createPersistentStores(input: {
@@ -1035,16 +1504,43 @@ export async function startQiongqiServe(
  * packagers. Returns undefined when neither is available so the
  * runtime simply starts with an empty skill registry.
  */
-async function resolveBuiltinSkillRoot(
+export async function resolveBuiltinSkillRoots(
   dataDir: string,
   skillRoots?: string[]
-): Promise<string | undefined> {
+): Promise<string[]> {
   if (skillRoots && skillRoots.length > 0) {
-    const first = skillRoots.find((root) => existsSync(root))
-    if (first) return first
+    const explicit = skillRoots.filter((root) => existsSync(root))
+    if (explicit.length > 0) return [...new Set(explicit)]
   }
+  const roots: string[] = []
   const packaged = join(dataDir, 'builtin-skills')
-  return existsSync(packaged) ? packaged : undefined
+  if (existsSync(packaged)) roots.push(packaged)
+  const qiongqiCodingRoot = await resolveQiongqiCodingSkillRoot()
+  if (qiongqiCodingRoot) roots.push(qiongqiCodingRoot)
+  return [...new Set(roots)]
+}
+
+async function resolveQiongqiCodingSkillRoot(): Promise<string | undefined> {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const candidates = [
+    join(here, '../../../../skills'),
+    join(process.cwd(), 'skills'),
+    join(process.cwd(), 'qiongqi/skills')
+  ]
+  for (const candidate of candidates) {
+    if (await hasSkillPackages(candidate)) return candidate
+  }
+  return undefined
+}
+
+async function hasSkillPackages(root: string): Promise<boolean> {
+  try {
+    const info = await stat(root)
+    if (!info.isDirectory()) return false
+    return existsSync(join(root, 'tdd', 'skill.json')) || existsSync(join(root, 'review', 'skill.json'))
+  } catch {
+    return false
+  }
 }
 
 // ---------------------------------------------------------------------------

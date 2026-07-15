@@ -98,8 +98,15 @@ export interface TurnStateSerializer {
  *
  * When all tests pass in `evented` mode, the default flips.
  */
-export const ORCHESTRATION_MODES = ['classic', 'evented'] as const
+export const ORCHESTRATION_MODES = ['classic', 'evented', 'evented_v2', 'kernel_v3'] as const
 export type OrchestrationMode = (typeof ORCHESTRATION_MODES)[number]
+
+/** Normalize legacy configuration without changing the classic default. */
+export function normalizeOrchestrationMode(value: unknown): OrchestrationMode {
+  if (value === 'kernel_v3') return 'kernel_v3'
+  if (value === 'evented' || value === 'evented_v2') return 'evented_v2'
+  return 'classic'
+}
 
 // Re-exported from loop-plan.ts so persistence code and consumers reference
 // a single shape under its persistence-schema name. `LoopRun` is the

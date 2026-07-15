@@ -59,7 +59,14 @@ export const ModelContextProfileConfigSchema = z
     inputModalities: z.array(ModelInputModality).optional(),
     outputModalities: z.array(ModelInputModality).optional(),
     supportsToolCalling: z.boolean().optional(),
-    messageParts: z.array(ModelMessagePartSupport).optional()
+    messageParts: z.array(ModelMessagePartSupport).optional(),
+    providerModel: z.string().min(1).optional(),
+    baseUrl: z.string().min(1).optional(),
+    apiKey: z.string().optional(),
+    endpointFormat: z.preprocess(
+      normalizeModelEndpointFormat,
+      z.enum(MODEL_ENDPOINT_FORMATS)
+    ).optional()
   })
   .strict()
   .superRefine((profile, ctx) => {
@@ -116,6 +123,13 @@ export const ContextCompactionConfigSchema = z
 
 export const RuntimeTuningConfigSchema = z
   .object({
+    orchestrationMode: z.enum(['classic', 'evented', 'evented_v2', 'kernel_v3']).optional(),
+    kernelRollout: z.object({
+      enabled: z.boolean().optional(),
+      defaultMode: z.enum(['classic', 'kernel_v3']).optional(),
+      fallbackBeforeEffect: z.boolean().optional()
+    }).strict().optional(),
+    modelStreamIdleTimeoutMs: PositiveInt.optional(),
     toolStorm: z
       .object({
         enabled: z.boolean().optional(),
@@ -219,6 +233,7 @@ export type QiongqiServeConfig = z.infer<typeof QiongqiServeConfigSchema>
 export type ModelConfig = z.infer<typeof ModelConfigSchema>
 export type ContextCompactionConfig = z.infer<typeof ContextCompactionConfigSchema>
 export type RuntimeTuningConfig = z.infer<typeof RuntimeTuningConfigSchema>
+export type KernelRolloutConfig = NonNullable<RuntimeTuningConfig['kernelRollout']>
 export type TokenEconomyConfig = z.infer<typeof TokenEconomyConfigSchema>
 export type StorageConfig = z.infer<typeof StorageConfigSchema>
 export type OpenTelemetryConfig = z.infer<typeof OpenTelemetryConfigSchema>
