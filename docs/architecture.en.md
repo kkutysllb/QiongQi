@@ -614,13 +614,14 @@ The key decoupling from Stage 1.3. **Goal**: decouple the model client from hard
 
 **Adding a new vendor's pricing**: implement `PricingProvider` and register it with `Composite`; no client modification needed.
 
-### 4.4 OrchestrationMode: classic vs evented dual track
+### 4.4 OrchestrationMode: Kernel v3 with classic/evented compatibility
 
-The event-driven refactor introduced in Stage 3. `QiongqiServeRuntimeOptions.orchestrationMode: 'classic' | 'evented'`, defaulting to `classic`.
+The runtime now selects `kernel_v3` by default. `classic` and `evented`/`evented_v2` remain explicit compatibility modes via `QiongqiServeRuntimeOptions.orchestrationMode`.
 
 | Mode | Orchestrator | Crash recovery | Use case |
 |------|--------------|----------------|----------|
-| `classic` | `TurnOrchestrator` (explicit step advancement) | none | default, low overhead |
+| `kernel_v3` | durable kernel loop with checkpoints and idempotent effects | yes | default production mode |
+| `classic` | `TurnOrchestrator` (explicit step advancement) | none | explicit compatibility fallback |
 | `evented` | `EventedTurnOrchestrator` + `LoopRunner` (declarative phase interpretation) | yes (`FileTurnStateStore` persists `LoopRun` / `TurnStateV2`, with `TurnStateV1` upgrade on load) | critical workflows, long turns |
 
 **Shared policy**: the classic path keeps using `runOrchestratorStep`; the evented path interprets `LoopPlan.phases` through `LoopRunner` (build-prompt → run-model → decide → evaluate → dispatch-tools), publishes rich events such as `prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`, and appends them to `LoopRun.events`. `runStepViaEventBus` is retained only as a compatibility API.

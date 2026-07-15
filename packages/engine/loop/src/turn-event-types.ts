@@ -91,17 +91,20 @@ export interface TurnStateSerializer {
 /**
  * Orchestration mode (Stage 3.4 dual-run strategy).
  *
- * - `classic` — the existing imperative `TurnOrchestrator` (default,
- *   battle-tested, no behaviour change).
+ * - `kernel_v3` — the durable kernel loop used by the production runtime
+ *   factory by default.
+ * - `classic` — the existing imperative `TurnOrchestrator` (explicit
+ *   compatibility fallback, battle-tested, no behaviour change).
  * - `evented` — the Stage-3 event-driven orchestrator with
  *   `TurnState` persistence and crash recovery.
  *
- * When all tests pass in `evented` mode, the default flips.
+ * The generic normalizer retains classic as its legacy fallback; production
+ * default selection is handled by `orchestrationModeForRuntimeOptions`.
  */
 export const ORCHESTRATION_MODES = ['classic', 'evented', 'evented_v2', 'kernel_v3'] as const
 export type OrchestrationMode = (typeof ORCHESTRATION_MODES)[number]
 
-/** Normalize legacy configuration without changing the classic default. */
+/** Normalize legacy configuration while retaining classic as the safe fallback. */
 export function normalizeOrchestrationMode(value: unknown): OrchestrationMode {
   if (value === 'kernel_v3') return 'kernel_v3'
   if (value === 'evented' || value === 'evented_v2') return 'evented_v2'

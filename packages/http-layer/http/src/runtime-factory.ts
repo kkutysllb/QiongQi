@@ -187,7 +187,9 @@ export type QiongqiServeRuntimeOptions = {
   /**
    * Stage 3: orchestration mode for the turn loop.
    *
-   * - `classic` (default) — the existing imperative
+   * - `kernel_v3` (default) — the durable kernel loop with persisted
+   *   checkpoints, effect idempotency, and provider-neutral tool handling.
+   * - `classic` — the existing imperative
    *   `TurnOrchestrator`, battle-tested, no behaviour change.
    * - `evented` — the Stage-3 event-driven orchestrator with
    *   `TurnState` persistence and crash recovery.
@@ -207,9 +209,15 @@ export function orchestrationModeForRuntimeOptions(
   options: Pick<QiongqiServeRuntimeOptions, 'orchestrationMode' | 'runtime'>
 ): OrchestrationMode {
   const rollout = options.runtime?.kernelRollout
+  const configured = options.orchestrationMode
+    ?? options.runtime?.orchestrationMode
+    ?? rollout?.defaultMode
+    ?? 'kernel_v3'
+  const explicitlyRequestedKernel = options.orchestrationMode === 'kernel_v3'
+    || options.runtime?.orchestrationMode === 'kernel_v3'
   return resolveRuntimeRolloutMode({
-    configured: options.orchestrationMode ?? options.runtime?.orchestrationMode ?? rollout?.defaultMode,
-    enabled: options.orchestrationMode === 'kernel_v3' || rollout?.enabled === true
+    configured,
+    enabled: explicitlyRequestedKernel || rollout?.enabled !== false
   })
 }
 
