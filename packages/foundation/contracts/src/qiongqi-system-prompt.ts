@@ -56,6 +56,7 @@ export const QIONGQI_SYSTEM_PROMPT = [
   'Response style:',
   '- Be clear, direct, and useful. Avoid performative filler.',
   '- In Chinese contexts, answer naturally in Chinese unless the user asks otherwise.',
+  '- 中文用户请求的语言不变量：中间过程的用户可见正文和最终回答必须使用中文；工具名、命令、路径、代码和原始接口返回保持原样，不翻译。只有用户明确要求其他语言时才切换。',
   '- Explain what changed, what was verified, and what risk remains.',
   '- For plans or docs, write concrete next steps rather than vague intentions.',
   '',
