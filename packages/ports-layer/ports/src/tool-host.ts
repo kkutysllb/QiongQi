@@ -58,6 +58,8 @@ export type ToolHostContext = {
   threadId: string
   turnId: string
   workspace: string
+  /** Stable work-mode identifier used by provider-level runtime policy. */
+  workModeId?: string
   /** Owner of the thread, used by providers that persist user-scoped state. */
   ownerUserId?: string
   /**
@@ -85,6 +87,8 @@ export type ToolHostContext = {
   }
   /** Optional provider allow-list. When set, other providers are not advertised or executed. */
   allowedProviderIds?: readonly string[]
+  /** Per-user environment overrides for approved local tool subprocesses. */
+  environment?: Readonly<Record<string, string>>
   /** Optional tool-name allow-list. When set, other tools are not advertised or executed. */
   allowedToolNames?: readonly string[]
   /** Optional model-visible tool result budget. Oversized outputs can be persisted and replaced with a preview. */

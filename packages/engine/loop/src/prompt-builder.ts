@@ -174,6 +174,7 @@ export type BuildContext = {
   turn: TurnRecord
   healedItems: readonly TurnItem[]
   activePlanContext: GuiPlanContext | undefined
+  workModeId: string | undefined
   effectiveMode: 'agent' | 'plan' | undefined
   approvalPolicy: ApprovalPolicy
   planTurnActive: boolean
@@ -388,6 +389,7 @@ export class PromptBuilder {
       threadId,
       turnId,
       workspace: thread?.workspace ?? '',
+      ...(workModeId ? { workModeId } : {}),
       ...(thread?.ownerUserId ? { ownerUserId: thread.ownerUserId } : {}),
       threadMode: effectiveMode,
       ...(activePlanContext ? { guiPlan: activePlanContext } : {}),
@@ -563,6 +565,7 @@ export class PromptBuilder {
       turn,
       healedItems: healed.items,
       activePlanContext,
+      workModeId,
       effectiveMode,
       approvalPolicy,
       planTurnActive,

@@ -197,6 +197,7 @@ export function createKernelV3NodeHandlers(
             modelCapabilities: built.ctx.modelCapabilities,
             approvalPolicy: built.ctx.approvalPolicy,
             threadMode: built.ctx.effectiveMode,
+            workModeId: built.ctx.workModeId,
             guiPlan: built.ctx.activePlanContext
           }
         },

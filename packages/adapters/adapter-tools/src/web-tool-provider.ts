@@ -91,13 +91,15 @@ export function buildWebToolProviders(
 function createFetchTool(config: WebCapabilityConfig, provider: WebProvider) {
   return LocalToolHost.defineTool({
     name: 'web_fetch',
-    description: 'Fetch an allowed HTTP or HTTPS URL and return extracted text with source metadata.',
+    description: 'Fetch an allowed HTTP or HTTPS URL and return extracted text with source metadata. In finance mode this is a fallback only after the official Tushare/iWencai skill failed; provide primary_source_attempted=true and fallback_reason.',
     inputSchema: {
       type: 'object',
       properties: {
         url: { type: 'string' },
         max_bytes: { type: 'number' },
-        timeout_ms: { type: 'number' }
+        timeout_ms: { type: 'number' },
+        primary_source_attempted: { type: 'boolean' },
+        fallback_reason: { type: 'string' }
       },
       required: ['url'],
       additionalProperties: false
@@ -105,6 +107,8 @@ function createFetchTool(config: WebCapabilityConfig, provider: WebProvider) {
     policy: 'untrusted',
     execute: async (args, context) => {
       const startedAt = Date.now()
+      const financeGuard = validateFinanceFallback(context, args)
+      if (!financeGuard.ok) return toolError(financeGuard.code, financeGuard.reason)
       const rawUrl = pickString(args.url)
       if (!rawUrl) return toolError('invalid_url', 'url is required')
       const policy = validateUrlPolicy(rawUrl, config)
@@ -143,13 +147,15 @@ function createFetchTool(config: WebCapabilityConfig, provider: WebProvider) {
 function createSearchTool(config: WebCapabilityConfig, provider: WebProvider) {
   return LocalToolHost.defineTool({
     name: 'web_search',
-    description: 'Search the web through the configured provider and return ranked results with source metadata.',
+    description: 'Search the web through the configured provider and return ranked results with source metadata. In finance mode this is a fallback only after the official Tushare/iWencai skill failed; provide primary_source_attempted=true and fallback_reason.',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string' },
         limit: { type: 'number' },
-        timeout_ms: { type: 'number' }
+        timeout_ms: { type: 'number' },
+        primary_source_attempted: { type: 'boolean' },
+        fallback_reason: { type: 'string' }
       },
       required: ['query'],
       additionalProperties: false
@@ -157,6 +163,8 @@ function createSearchTool(config: WebCapabilityConfig, provider: WebProvider) {
     policy: 'untrusted',
     execute: async (args, context) => {
       const startedAt = Date.now()
+      const financeGuard = validateFinanceFallback(context, args)
+      if (!financeGuard.ok) return toolError(financeGuard.code, financeGuard.reason)
       const query = pickString(args.query)
       if (!query) return toolError('invalid_query', 'query is required')
       if (!provider.search) return toolError('provider_unavailable', 'web search provider is unavailable')
@@ -188,6 +196,28 @@ function createSearchTool(config: WebCapabilityConfig, provider: WebProvider) {
       }
     }
   })
+}
+
+function validateFinanceFallback(
+  context: { workModeId?: string },
+  args: Record<string, unknown>
+): { ok: true } | { ok: false; code: string; reason: string } {
+  if (context.workModeId !== 'finance') return { ok: true }
+  if (args.primary_source_attempted !== true) {
+    return {
+      ok: false,
+      code: 'finance_primary_source_required',
+      reason: '金融量化模式必须先调用官方 Tushare/iWencai 技能；Web 只能在主数据源明确失败后降级。'
+    }
+  }
+  if (typeof args.fallback_reason !== 'string' || !args.fallback_reason.trim()) {
+    return {
+      ok: false,
+      code: 'finance_fallback_reason_required',
+      reason: '金融量化模式使用 Web 降级时必须提供主数据源失败原因。'
+    }
+  }
+  return { ok: true }
 }
 
 class FetchWebProvider implements WebProvider {

@@ -86,6 +86,7 @@ export class ToolCallCoordinator {
     turnId: string
     workspace: string
     ownerUserId?: string
+    workModeId?: string
     threadMode?: 'agent' | 'plan'
     activePlanContext?: GuiPlanContext
     modelCapabilities: ModelCapabilityMetadata
@@ -210,6 +211,7 @@ export class ToolCallCoordinator {
     turnId: string
     workspace: string
     ownerUserId?: string
+    workModeId?: string
     threadMode?: 'agent' | 'plan'
     activePlanContext?: GuiPlanContext
     modelCapabilities: ModelCapabilityMetadata
@@ -225,6 +227,7 @@ export class ToolCallCoordinator {
       threadId: input.threadId,
       turnId: input.turnId,
       workspace: input.workspace,
+      ...(input.workModeId ? { workModeId: input.workModeId } : {}),
       ...(input.ownerUserId ? { ownerUserId: input.ownerUserId } : {}),
       threadMode: input.threadMode,
       ...(input.activePlanContext ? { guiPlan: input.activePlanContext } : {}),

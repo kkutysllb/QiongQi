@@ -109,6 +109,45 @@ describe('Web tool provider', () => {
     }
   })
 
+  it('requires an explicit primary-source failure before web fallback in finance mode', async () => {
+    const config = QiongqiCapabilitiesConfig.parse({
+      web: {
+        enabled: true,
+        searchEnabled: true,
+        allowDomains: []
+      }
+    })
+    const host = new LocalToolHost({
+      registry: new CapabilityRegistry(buildWebToolProviders(config.web, {
+        provider: deterministicProvider()
+      }).providers)
+    })
+    const context = { ...buildContext(), workModeId: 'finance' }
+
+    const denied = await host.execute({
+      callId: 'finance_web_1',
+      toolName: 'web_search',
+      arguments: { query: 'market' }
+    }, context)
+    expect(denied.item).toMatchObject({ kind: 'tool_result', isError: true })
+    if (denied.item.kind === 'tool_result') {
+      expect(denied.item.output).toMatchObject({
+        error: { code: 'finance_primary_source_required' }
+      })
+    }
+
+    const allowed = await host.execute({
+      callId: 'finance_web_2',
+      toolName: 'web_search',
+      arguments: {
+        query: 'kun web',
+        primary_source_attempted: true,
+        fallback_reason: 'official skill returned empty data'
+      }
+    }, context)
+    expect(allowed.item).toMatchObject({ kind: 'tool_result', isError: false })
+  })
+
   it('rejects fetch responses when content-length exceeds max_bytes', async () => {
     vi.stubGlobal('fetch', async () => new Response('abcdefghijklmnopqrstuvwxyz', {
       headers: {

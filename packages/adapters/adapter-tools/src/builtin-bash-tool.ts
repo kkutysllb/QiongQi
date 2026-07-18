@@ -88,6 +88,7 @@ async function bashExecute(
   cwd: string,
   signal: AbortSignal,
   timeoutSeconds: number,
+  environment: Readonly<Record<string, string>> | undefined,
   onUpdate?: (update: { output: unknown; isError?: boolean }) => Promise<void> | void,
   execOperation?: (
     command: string,
@@ -108,7 +109,7 @@ async function bashExecute(
     ? null
     : spawn(shellRuntime.shell, shellCommandArgs(shellRuntime, command), {
         cwd,
-        env: process.env,
+        env: { ...process.env, ...(environment ?? {}) },
         detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true
@@ -489,6 +490,7 @@ async function startBashSession(
     signal: AbortSignal
     timeoutSeconds: number
     yieldSeconds: number
+    environment?: Readonly<Record<string, string>>
   },
   onUpdate?: (update: { output: unknown; isError?: boolean }) => Promise<void> | void
 ): Promise<{ payload: BashPayload; isError?: boolean }> {
@@ -496,7 +498,7 @@ async function startBashSession(
   const shellRuntime = shellRuntimeInfo()
   const child = spawn(shellRuntime.shell, shellCommandArgs(shellRuntime, input.command), {
     cwd: input.cwd,
-    env: process.env,
+    env: { ...process.env, ...(input.environment ?? {}) },
     detached: process.platform !== 'win32',
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true
@@ -683,7 +685,8 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
               cwd,
               signal: context.abortSignal,
               timeoutSeconds: timeout,
-              yieldSeconds
+              yieldSeconds,
+              environment: context.environment
             },
             onUpdate
           )
@@ -697,6 +700,7 @@ export function createBashLocalTool(options: BashLocalToolOptions = {}): LocalTo
           cwd,
           context.abortSignal,
           timeout,
+          context.environment,
           onUpdate,
           bashOps.exec
         )

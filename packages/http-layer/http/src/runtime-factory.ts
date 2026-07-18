@@ -130,6 +130,7 @@ import {
 } from './kworks-user-data-store.js'
 import { SqliteKWorksUserDataStore } from './kworks-sqlite-user-data-store.js'
 import { UserScopedModelClient } from './user-scoped-model-client.js'
+import { loadFinanceDataSource } from './finance-credentials.js'
 
 // ---------------------------------------------------------------------------
 // Options
@@ -590,9 +591,14 @@ export interface ToolMatrix {
 class RefreshableToolHost implements ToolHost {
   readonly id = 'local'
   private delegate: LocalToolHost
+  private readonly enrichContext?: (context: ToolHostContext) => Promise<ToolHostContext>
 
-  constructor(delegate: LocalToolHost) {
+  constructor(
+    delegate: LocalToolHost,
+    enrichContext?: (context: ToolHostContext) => Promise<ToolHostContext>
+  ) {
     this.delegate = delegate
+    this.enrichContext = enrichContext
   }
 
   replace(delegate: LocalToolHost): void {
@@ -604,7 +610,7 @@ class RefreshableToolHost implements ToolHost {
   }
 
   prepare(call: ToolCallLike, context: ToolHostContext): Promise<ToolHostPreparation> {
-    return this.delegate.prepare(call, context)
+    return this.withContext(context, (resolved) => this.delegate.prepare(call, resolved))
   }
 
   execute(
@@ -613,7 +619,7 @@ class RefreshableToolHost implements ToolHost {
     onUpdate?: (item: TurnItem) => Promise<void> | void,
     preparation?: ToolHostPreparation
   ): Promise<ToolHostResult> {
-    return this.delegate.execute(call, context, onUpdate, preparation)
+    return this.withContext(context, (resolved) => this.delegate.execute(call, resolved, onUpdate, preparation))
   }
 
   clearReadTracker(threadId?: string): void {
@@ -622,6 +628,13 @@ class RefreshableToolHost implements ToolHost {
 
   diagnostics() {
     return this.delegate.diagnostics()
+  }
+
+  private async withContext<T>(
+    context: ToolHostContext,
+    operation: (resolved: ToolHostContext) => Promise<T>
+  ): Promise<T> {
+    return operation(this.enrichContext ? await this.enrichContext(context) : context)
   }
 }
 
@@ -713,8 +726,22 @@ export async function createToolMatrix(
     ...webProviders.providers,
     ...buildMemoryToolProviders(memoryStore)
   ]
+  const enrichFinanceContext = async (context: ToolHostContext): Promise<ToolHostContext> => {
+    if (!context.ownerUserId) return context
+    const resolved = await loadFinanceDataSource(core.kworksUserDataStore, context.ownerUserId)
+    return {
+      ...context,
+      environment: {
+        ...(context.environment ?? {}),
+        ...resolved.environment
+      }
+    }
+  }
   const childRegistry = new CapabilityRegistry(baseToolProviders())
-  const childToolHost = new LocalToolHost({ registry: childRegistry, readTracker: true })
+  const childToolHost: ToolHost = new RefreshableToolHost(
+    new LocalToolHost({ registry: childRegistry, readTracker: true }),
+    enrichFinanceContext
+  )
   const tokenEconomy = tokenEconomyConfigForOptions(options)
   const delegationRuntime = options.capabilities?.subagents.enabled
     ? new DelegationRuntime({
@@ -784,7 +811,10 @@ export async function createToolMatrix(
     })()
   ])
   let registry = buildMainRegistry()
-  const toolHost = new RefreshableToolHost(new LocalToolHost({ registry, readTracker: true }))
+  const toolHost = new RefreshableToolHost(
+    new LocalToolHost({ registry, readTracker: true }),
+    enrichFinanceContext
+  )
   const refreshRuntimeTools = async () => {
     if (!configStore) return
     const previous = mcpProviders
@@ -1249,6 +1279,7 @@ export function createKernelV3TurnRunner(input: {
           modelCapabilities?: ReturnType<ModelAdapter['modelCapabilities']>
           approvalPolicy?: ApprovalPolicy
           threadMode?: 'agent' | 'plan'
+          workModeId?: string
           guiPlan?: ToolHostContext['guiPlan']
         }
       } | undefined
@@ -1259,6 +1290,9 @@ export function createKernelV3TurnRunner(input: {
         workspace: thread.workspace,
         ownerUserId: identity.ownerUserId,
         threadMode: runtimeContext?.threadMode ?? thread.mode,
+        ...(runtimeContext?.workModeId ?? turn.workModeId ?? thread.workModeId
+          ? { workModeId: runtimeContext?.workModeId ?? turn.workModeId ?? thread.workModeId }
+          : {}),
         ...(runtimeContext?.guiPlan ? { guiPlan: runtimeContext.guiPlan } : {}),
         model: runtimeContext?.modelCapabilities ?? model.modelCapabilities(turn.model ?? options.model),
         activeSkillIds: runtimeContext?.activeSkillIds ?? turn.activeSkillIds,
