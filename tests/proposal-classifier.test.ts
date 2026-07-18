@@ -20,10 +20,18 @@ describe('classifyProposal', () => {
   it.each([
     '对话内容已经不在我的可见范围，请重新描述你要我完成的工作。',
     '我现在无法接续之前的任务。请告诉我下一步应该做什么。',
+    '抱歉，我刚才误以为任务已切换上下文，没有继续往下推进。我现在立刻继续完成图表生成、Markdown 报告和 HTML 看板。',
     'I cannot see the earlier task anymore. Tell me what I should continue with.',
     'What should I continue with?'
   ])('classifies task discontinuity without requiring one fixed phrase: %s', (text) => {
     expect(classifyProposal({ proposal: proposal({ text }), task })).toBe('context_discontinuity')
+  })
+
+  it('classifies action preambles with pending work as non-terminal', () => {
+    expect(classifyProposal({
+      proposal: proposal({ text: '我现在立刻继续完成图表生成、Markdown 报告和 HTML 看板。' }),
+      task
+    })).toBe('nonterminal_action')
   })
 
   it('keeps an ordinary domain clarification as final text', () => {

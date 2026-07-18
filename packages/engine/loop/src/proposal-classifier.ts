@@ -8,6 +8,7 @@ export type ProposalClass =
   | 'safety_or_refusal'
   | 'protocol_error'
   | 'context_discontinuity'
+  | 'nonterminal_action'
 
 export function classifyProposal(input: {
   proposal: ModelProposal
@@ -33,6 +34,7 @@ export function classifyProposal(input: {
   if (proposal.toolIntents.length > 0) return 'tool_intents'
   if (proposal.stopClass === 'length') return 'length_limited'
   if (!proposal.text.trim() && !proposal.reasoning.trim()) return 'empty'
+  if (signals.some((text) => isNonterminalActionText(text, input.task))) return 'nonterminal_action'
   return 'final_text'
 }
 
@@ -58,10 +60,13 @@ function isContextDiscontinuityText(text: string): boolean {
     'restateyourtask',
     'repeattherequest'
   ])
-  if (!asksForTask) return false
-
   const statesDiscontinuity = includesAny(normalized, [
     '上下文',
+    '上下文切换',
+    '切换上下文',
+    '任务切换',
+    '任务已切换上下文',
+    '误以为任务已切换上下文',
     '对话内容',
     '之前的任务',
     '之前的请求',
@@ -75,15 +80,63 @@ function isContextDiscontinuityText(text: string): boolean {
     'nolongerhavetheprior',
     'lostthecontext',
     'contextisnotavailable',
-    'earliertaskanymore'
+    'earliertaskanymore',
+    'contextswitch',
+    'switchedcontext'
   ])
-  if (statesDiscontinuity) return true
+  const promisesResume = includesAny(normalized, [
+    '继续',
+    '接着',
+    '往下推进',
+    '继续往下',
+    'resume',
+    'continue',
+    'proceed'
+  ])
+  if (statesDiscontinuity && (asksForTask || promisesResume) && !looksTerminal(normalized)) return true
 
   // A bare continuation question is discontinuity-specific. Domain
   // clarifications ask for a concrete field, entity, or time range instead.
   return normalized === 'whatshouldicontinuewith'
     || normalized === '请告诉我下一步应该做什么'
     || normalized === '我应该继续什么'
+}
+
+function isNonterminalActionText(text: string, task: TaskStateV1): boolean {
+  if (!hasPendingWork(task)) return false
+  const normalized = text
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+  if (!normalized || looksTerminal(normalized)) return false
+  return includesAny(normalized, [
+    '我将',
+    '我会',
+    '我先',
+    '我现在',
+    '现在开始',
+    '接下来',
+    '下一步',
+    '继续分析',
+    '继续执行',
+    '继续完成',
+    '立刻继续',
+    '继续往下',
+    '往下推进',
+    'letme',
+    'iwill',
+    'ill',
+    'nexti',
+    'nowi'
+  ])
+}
+
+function hasPendingWork(task: TaskStateV1): boolean {
+  return task.pendingActions.some((action) => action.status === 'pending' || action.status === 'in_progress')
+}
+
+function looksTerminal(normalized: string): boolean {
+  return /(?:分析完成|任务完成|已完成|修复完成|生成完成|处理完成|结论|总结|根因|最终答案|finalanswer|completed|done|result|summary)/i.test(normalized)
 }
 
 function includesAny(text: string, candidates: readonly string[]): boolean {

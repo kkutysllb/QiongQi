@@ -70,6 +70,43 @@ describe('ContinuationPolicy', () => {
     expect(calls).toBe(3)
   })
 
+  it('continues after an apology that only promises to resume unfinished work', async () => {
+    let calls = 0
+    const h = makeHarness({
+      provider: 'resume-promise-runner',
+      model: 'resume-promise-runner',
+      async *stream(): AsyncIterable<ModelStreamChunk> {
+        calls += 1
+        if (calls === 1) {
+          yield {
+            kind: 'assistant_text_delta',
+            text: '抱歉，我刚才误以为任务已切换上下文，没有继续往下推进。我现在立刻继续完成图表生成、Markdown 报告和 HTML 看板。'
+          }
+          yield { kind: 'completed', stopReason: 'stop' }
+          return
+        }
+        if (calls === 2) {
+          yield {
+            kind: 'tool_call_complete',
+            callId: 'call_pwd_resume',
+            toolName: 'pwd',
+            arguments: {}
+          }
+          yield { kind: 'completed', stopReason: 'tool_calls' }
+          return
+        }
+        yield { kind: 'assistant_text_delta', text: '图表、Markdown 报告和 HTML 看板已生成完成。' }
+        yield { kind: 'completed', stopReason: 'stop' }
+      }
+    }, { toolStorm: { enabled: false } })
+    await bootstrapThread(h)
+
+    const status = await h.loop.runTurn(h.threadId, h.turnId)
+
+    expect(status).toBe('completed')
+    expect(calls).toBe(3)
+  })
+
   it('recovers from an empty terminal response after tool execution', async () => {
     let calls = 0
     const h = makeHarness({

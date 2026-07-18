@@ -123,5 +123,5 @@ function looksTerminal(text: string): boolean {
 
 function looksLikeActionPreamble(text: string): boolean {
   const compact = text.replace(/\s+/g, '')
-  return /(?:我将|我会|我先|先读取|先检查|先分析|现在开始|接下来|下一步|继续分析|继续执行|需要先|让我|letme|i(?:'ll|will|needto|should)|nexti|nowi)/i.test(compact)
+  return /(?:我将|我会|我先|我现在|先读取|先检查|先分析|现在开始|接下来|下一步|继续分析|继续执行|继续完成|立刻继续|继续往下|往下推进|需要先|让我|letme|i(?:'ll|will|needto|should)|nexti|nowi)/i.test(compact)
 }

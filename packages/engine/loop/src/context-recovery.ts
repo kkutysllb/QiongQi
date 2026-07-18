@@ -13,7 +13,7 @@ export function transitionContextRecovery(input: {
   recovery: RecoveryState
   proposalClass: ProposalClass
 }): ContextRecoveryTransition {
-  if (input.proposalClass !== 'context_discontinuity') {
+  if (!isRecoverableProposalClass(input.proposalClass)) {
     return {
       action: 'accept',
       recovery: input.recovery,
@@ -50,6 +50,10 @@ export function transitionContextRecovery(input: {
       }
     }
   }
+}
+
+function isRecoverableProposalClass(proposalClass: ProposalClass): boolean {
+  return proposalClass === 'context_discontinuity' || proposalClass === 'nonterminal_action'
 }
 
 export function renderRecoveryContinuationEntry(task: TaskStateV1): string {

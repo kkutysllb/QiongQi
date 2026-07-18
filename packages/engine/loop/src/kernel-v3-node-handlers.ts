@@ -336,13 +336,14 @@ export function createKernelV3NodeHandlers(
       }
       if (
         proposalClass === 'context_discontinuity'
+        || proposalClass === 'nonterminal_action'
         || proposalClass === 'empty'
         || proposalClass === 'length_limited'
       ) {
         const transition = transitionContextRecovery({
           task,
           recovery: state.recovery,
-          proposalClass: 'context_discontinuity'
+          proposalClass
         })
         if (transition.action === 'degrade') {
           return {

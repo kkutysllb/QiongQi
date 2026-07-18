@@ -71,6 +71,32 @@ describe('Kernel v3 production node handlers', () => {
     ])
   })
 
+  it('recovers from a non-terminal action preamble instead of completing the turn', async () => {
+    const premature = '抱歉，我刚才误以为任务已切换上下文，没有继续往下推进。我现在立刻继续完成图表生成、Markdown 报告和 HTML 看板。'
+    const harness = await createHarness([
+      proposal({
+        proposalId: 'proposal-premature-preamble',
+        text: premature
+      }),
+      proposal({ proposalId: 'proposal-after-preamble-recovery', text: '图表、Markdown 报告和 HTML 看板已生成完成。' })
+    ])
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+
+    expect(harness.applied).not.toContainEqual(expect.objectContaining({
+      kind: 'assistant_text',
+      text: premature
+    }))
+    expect(harness.requests[1]?.contextInstructions).toContainEqual(
+      expect.stringContaining('Authoritative task recovery entry')
+    )
+    expect(await nodeSequence(harness.events)).toEqual([
+      'prepare-turn', 'restore-task', 'build-context', 'invoke-model',
+      'normalize-proposal', 'account-model', 'evaluate', 'recover-context', 'build-context',
+      'invoke-model', 'normalize-proposal', 'account-model', 'evaluate', 'commit-assistant'
+    ])
+  })
+
   it('recovers before executing valid tool intents paired with context-loss text', async () => {
     const harness = await createHarness([
       proposal({
