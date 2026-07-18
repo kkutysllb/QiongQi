@@ -41,6 +41,8 @@ export class ContextEstimator {
         return item.summary
       case 'review':
         return `${item.title} ${item.reviewText ?? ''} ${item.output ? JSON.stringify(item.output) : ''}`
+      case 'runtime_progress':
+        return ''
       case 'error':
         return item.message
     }

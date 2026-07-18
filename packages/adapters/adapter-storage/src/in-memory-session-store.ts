@@ -50,6 +50,17 @@ export class InMemorySessionStore implements SessionStore {
     }
   }
 
+  async appendItemOnce(
+    threadId: string,
+    item: TurnItem
+  ): Promise<{ item: TurnItem; created: boolean }> {
+    const list = this.items.get(threadId) ?? []
+    const existing = list.find((candidate) => candidate.id === item.id)
+    if (existing) return { item: existing, created: false }
+    await this.appendItem(threadId, item)
+    return { item, created: true }
+  }
+
   async rewriteItems(threadId: string, items: TurnItem[]): Promise<void> {
     const nextItems = [...items]
     this.items.set(threadId, nextItems)
@@ -82,6 +93,21 @@ export class InMemorySessionStore implements SessionStore {
       })
     }
     return updated
+  }
+
+  async updateItemOnce(
+    threadId: string,
+    itemId: string,
+    patch: Partial<TurnItem>
+  ): Promise<{ item: TurnItem; updated: boolean } | null> {
+    const current = (this.items.get(threadId) ?? []).find((item) => item.id === itemId)
+    if (!current) return null
+    const desired = { ...current, ...patch } as TurnItem
+    if (JSON.stringify(current) === JSON.stringify(desired)) {
+      return { item: current, updated: false }
+    }
+    const updated = await this.updateItem(threadId, itemId, patch)
+    return updated ? { item: updated, updated: true } : null
   }
 
   async loadEventsSince(threadId: string, sinceSeq: number): Promise<RuntimeEvent[]> {

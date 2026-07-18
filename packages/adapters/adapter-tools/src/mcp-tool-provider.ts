@@ -1,5 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { createHash } from 'node:crypto'
+import { isAbsolute, resolve } from 'node:path'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -417,7 +418,13 @@ function slug(value: string): string {
 }
 
 function normalizePathForTrust(value: string): string {
-  return value.replace(/\\/g, '/').replace(/\/+$/g, '')
+  const trimmed = value.trim()
+  const resolved = !trimmed || trimmed === 'default' || trimmed === '~'
+    ? process.cwd()
+    : isAbsolute(trimmed)
+      ? trimmed
+      : resolve(process.cwd(), trimmed)
+  return resolved.replace(/\\/g, '/').replace(/\/+$/g, '')
 }
 
 function errorMessage(error: unknown): string {

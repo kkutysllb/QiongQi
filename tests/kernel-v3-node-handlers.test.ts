@@ -5,6 +5,7 @@ import { makeToolResultItem, makeUserItem } from '@qiongqi/domain'
 import {
   RuntimeKernel,
   createKernelV3NodeHandlers,
+  digestValue,
   productionKernelV3Graph
 } from '@qiongqi/loop'
 
@@ -35,6 +36,7 @@ describe('Kernel v3 production node handlers', () => {
       'build-context',
       'invoke-model',
       'normalize-proposal',
+      'account-model',
       'evaluate',
       'commit-assistant'
     ])
@@ -42,7 +44,11 @@ describe('Kernel v3 production node handlers', () => {
 
   it('recovers from task discontinuity without committing the model question', async () => {
     const harness = await createHarness([
-      proposal({ text: 'What should I continue with?' }),
+      proposal({
+        proposalId: 'proposal-recovery',
+        reasoning: 'I no longer have the previous context.',
+        text: 'What should I continue with?'
+      }),
       proposal({ text: '已继续生成报告。' })
     ])
     await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
@@ -51,14 +57,67 @@ describe('Kernel v3 production node handlers', () => {
       kind: 'assistant_text',
       text: 'What should I continue with?'
     }))
+    expect(harness.applied).not.toContainEqual(expect.objectContaining({
+      kind: 'assistant_reasoning',
+      text: 'I no longer have the previous context.'
+    }))
     expect(harness.requests[1]?.contextInstructions).toContainEqual(
       expect.stringContaining('Authoritative task recovery entry')
     )
     expect(await nodeSequence(harness.events)).toEqual([
       'prepare-turn', 'restore-task', 'build-context', 'invoke-model',
-      'normalize-proposal', 'evaluate', 'recover-context', 'build-context',
-      'invoke-model', 'normalize-proposal', 'evaluate', 'commit-assistant'
+      'normalize-proposal', 'account-model', 'evaluate', 'recover-context', 'build-context',
+      'invoke-model', 'normalize-proposal', 'account-model', 'evaluate', 'commit-assistant'
     ])
+  })
+
+  it('recovers before executing valid tool intents paired with context-loss text', async () => {
+    const harness = await createHarness([
+      proposal({
+        proposalId: 'proposal-tool-context-loss',
+        stopClass: 'tool_calls',
+        text: 'What should I continue with?',
+        toolIntents: [{ callId: 'call-lost', toolName: 'read_data', arguments: { path: 'lost.json' } }]
+      }),
+      proposal({ proposalId: 'proposal-after-recovery', text: '已从恢复入口继续。' })
+    ])
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+
+    expect(harness.applied).not.toContainEqual(expect.objectContaining({
+      id: 'item_kernel_text_proposal-tool-context-loss'
+    }))
+    expect(harness.applied).not.toContainEqual(expect.objectContaining({ callId: 'call-lost' }))
+    expect(harness.toolExecutions).toBe(0)
+    expect(harness.requests[1]?.contextInstructions).toContainEqual(
+      expect.stringContaining('Authoritative task recovery entry')
+    )
+  })
+
+  it('recovers before executing valid tool intents paired with reasoning-only context loss', async () => {
+    const harness = await createHarness([
+      proposal({
+        proposalId: 'proposal-tool-reasoning-context-loss',
+        stopClass: 'tool_calls',
+        reasoning: 'What should I continue with?',
+        text: '',
+        toolIntents: [{ callId: 'call-reasoning-lost', toolName: 'read_data', arguments: {} }]
+      }),
+      proposal({ proposalId: 'proposal-after-reasoning-recovery', text: '已恢复。' })
+    ])
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+
+    expect(harness.applied).not.toContainEqual(expect.objectContaining({
+      id: 'item_kernel_reasoning_proposal-tool-reasoning-context-loss'
+    }))
+    expect(harness.applied).not.toContainEqual(expect.objectContaining({
+      callId: 'call-reasoning-lost'
+    }))
+    expect(harness.toolExecutions).toBe(0)
+    expect(harness.requests[1]?.contextInstructions).toContainEqual(
+      expect.stringContaining('Authoritative task recovery entry')
+    )
   })
 
   it('commits tools, advances TaskState, and loops back through build-context', async () => {
@@ -78,10 +137,176 @@ describe('Kernel v3 production node handlers', () => {
     })
     expect(await nodeSequence(harness.events)).toEqual([
       'prepare-turn', 'restore-task', 'build-context', 'invoke-model',
-      'normalize-proposal', 'evaluate', 'prepare-tools', 'commit-tools',
-      'build-context', 'invoke-model', 'normalize-proposal', 'evaluate',
+      'normalize-proposal', 'account-model', 'evaluate', 'materialize-proposal', 'prepare-tools', 'commit-tools', 'project-progress', 'govern-progress',
+      'build-context', 'invoke-model', 'normalize-proposal', 'account-model', 'evaluate',
       'commit-assistant'
     ])
+  })
+
+  it('materializes tool proposal reasoning and text before the tool call', async () => {
+    const harness = await createHarness([
+      proposal({
+        proposalId: 'proposal-tool',
+        stopClass: 'tool_calls',
+        toolIntents: [{ callId: 'call-1', toolName: 'read_data', arguments: { path: 'data.json' } }],
+        reasoning: '  I should inspect the data first.  ',
+        text: '  I will read the data before answering.  '
+      }),
+      proposal({ proposalId: 'proposal-final', text: '数据读取完成。' })
+    ])
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+
+    expect(harness.applied.map((item) => item.kind)).toEqual([
+      'assistant_reasoning',
+      'assistant_text',
+      'tool_call',
+      'tool_result',
+      'assistant_text'
+    ])
+    expect(harness.applied.slice(0, 2)).toEqual([
+      expect.objectContaining({
+        id: 'item_kernel_reasoning_proposal-tool',
+        text: '  I should inspect the data first.  '
+      }),
+      expect.objectContaining({
+        id: 'item_kernel_text_proposal-tool',
+        text: '  I will read the data before answering.  '
+      })
+    ])
+    expect(await nodeSequence(harness.events)).toEqual([
+      'prepare-turn', 'restore-task', 'build-context', 'invoke-model',
+      'normalize-proposal', 'account-model', 'evaluate', 'materialize-proposal', 'prepare-tools', 'commit-tools', 'project-progress', 'govern-progress',
+      'build-context', 'invoke-model', 'normalize-proposal', 'account-model', 'evaluate',
+      'commit-assistant'
+    ])
+  })
+
+  it('re-entering materialization persists one item per stable proposal item id', async () => {
+    const harness = await createHarness([])
+    const repeated = proposal({
+      proposalId: 'proposal-replayed',
+      reasoning: 'reason once',
+      text: 'text once'
+    })
+    const state = {
+      nodeData: { 'normalize-proposal': repeated }
+    }
+
+    await harness.handlers['materialize-proposal']?.({ identity, state } as never)
+    await harness.handlers['materialize-proposal']?.({ identity, state } as never)
+
+    expect([...harness.persistedItems.values()]).toEqual([
+      expect.objectContaining({ id: 'item_kernel_reasoning_proposal-replayed' }),
+      expect.objectContaining({ id: 'item_kernel_text_proposal-replayed' })
+    ])
+  })
+
+  it('accounts one normalized model proposal with sanitized facts', async () => {
+    const harness = await createHarness([])
+    const normalized = proposal({
+      proposalId: 'proposal-accounted',
+      stopClass: 'normal',
+      text: 'private model text',
+      reasoning: 'private reasoning',
+      usage: {
+        promptTokens: 12,
+        completionTokens: 4,
+        totalTokens: 16,
+        cacheHitRate: null,
+        turns: 1,
+        costUsd: 0.08
+      }
+    })
+
+    const result = await harness.handlers['account-model']?.({
+      identity,
+      state: { nodeData: { 'normalize-proposal': normalized, 'restore-task': task() } }
+    } as never)
+
+    expect(result).toMatchObject({
+      condition: 'next',
+      commands: [{
+        type: 'add-budget',
+        usageId: 'model:proposal-accounted',
+        delta: { stepsUsed: 1, inputTokens: 12, outputTokens: 4, costUsd: 0.08 }
+      }],
+      facts: {
+        proposalClass: 'final_text',
+        stopClass: 'normal',
+        inputTokens: 12,
+        outputTokens: 4,
+        costUsd: 0.08
+      }
+    })
+    expect(result?.facts).not.toHaveProperty('text')
+    expect(result?.facts).not.toHaveProperty('reasoning')
+  })
+
+  it('accounts each logical tool call absent from the persisted task ledger', async () => {
+    const harness = await createHarness([])
+    const restored = task()
+    restored.toolLedger = [{
+      callId: 'call-1',
+      toolName: 'read_data',
+      status: 'committed'
+    }]
+    const normalized = proposal({
+      proposalId: 'proposal-tools',
+      stopClass: 'tool_calls',
+      text: '',
+      toolIntents: [
+        { callId: 'call-1', toolName: 'read_data', arguments: { secret: 'hidden' } },
+        { callId: 'call-2', toolName: 'read_data', arguments: { path: 'data.json' } }
+      ]
+    })
+
+    const result = await harness.handlers['prepare-tools']?.({
+      identity,
+      state: { nodeData: { 'normalize-proposal': normalized, 'restore-task': restored } }
+    } as never)
+
+    expect(result?.commands).toEqual([{
+      type: 'add-budget',
+      usageId: `tools:${digestValue({
+        proposalId: 'proposal-tools',
+        callIds: ['call-2']
+      })}`,
+      delta: { toolCallsUsed: 1 }
+    }])
+    expect(result?.commands).not.toContainEqual(expect.objectContaining({
+      arguments: expect.anything()
+    }))
+  })
+
+  it('uses one stable accounting command for a large ordered tool batch', async () => {
+    const harness = await createHarness([])
+    const calls = Array.from({ length: 200 }, (_, index) => ({
+      callId: `call-${index}`,
+      toolName: 'read_data',
+      arguments: { index }
+    }))
+    const normalized = proposal({
+      proposalId: 'proposal-large-batch',
+      stopClass: 'tool_calls',
+      text: '',
+      toolIntents: calls
+    })
+
+    const result = await harness.handlers['prepare-tools']?.({
+      identity,
+      state: {
+        nodeData: { 'normalize-proposal': normalized, 'restore-task': task() }
+      }
+    } as never)
+
+    expect(result?.commands).toEqual([{
+      type: 'add-budget',
+      usageId: `tools:${digestValue({
+        proposalId: 'proposal-large-batch',
+        callIds: calls.map((call) => call.callId)
+      })}`,
+      delta: { toolCallsUsed: 200 }
+    }])
   })
 })
 
@@ -92,7 +317,9 @@ async function createHarness(proposals: ModelProposal[]) {
   const prepared = await taskStates.prepare(task(), 0)
   await taskStates.commit(prepared)
   const applied: Array<Record<string, unknown>> = []
+  const persistedItems = new Map<string, Record<string, unknown>>()
   const requests: Array<Record<string, unknown>> = []
+  let toolExecutions = 0
   const queue = [...proposals]
   const signal = new AbortController().signal
   const thread = {
@@ -132,6 +359,13 @@ async function createHarness(proposals: ModelProposal[]) {
       getAbortController: () => signal,
       applyItem: async (_threadId: string, item: Record<string, unknown>) => {
         applied.push(item)
+        persistedItems.set(String(item.id), item)
+      },
+      applyItemOnce: async (_threadId: string, item: Record<string, unknown>) => {
+        if (persistedItems.has(String(item.id))) return false
+        applied.push(item)
+        persistedItems.set(String(item.id), item)
+        return true
       },
       updateItem: async () => null
     } as never,
@@ -165,21 +399,24 @@ async function createHarness(proposals: ModelProposal[]) {
       }
     } as never,
     toolRuntime: {
-      execute: async (input: { state: unknown; call: { callId: string; toolName: string } }) => ({
-        state: input.state,
-        replayed: false,
-        result: {
-          approved: true,
-          item: makeToolResultItem({
-            id: `result-${input.call.callId}`,
-            threadId: identity.threadId,
-            turnId: identity.turnId,
-            callId: input.call.callId,
-            toolName: input.call.toolName,
-            output: { ok: true }
-          })
+      execute: async (input: { state: unknown; call: { callId: string; toolName: string } }) => {
+        toolExecutions += 1
+        return {
+          state: input.state,
+          replayed: false,
+          result: {
+            approved: true,
+            item: makeToolResultItem({
+              id: `result-${input.call.callId}`,
+              threadId: identity.threadId,
+              turnId: identity.turnId,
+              callId: input.call.callId,
+              toolName: input.call.toolName,
+              output: { ok: true }
+            })
+          }
         }
-      })
+      }
     } as never,
     createToolContext: async () => ({
       threadId: identity.threadId,
@@ -203,9 +440,12 @@ async function createHarness(proposals: ModelProposal[]) {
       nodes: handlers
     }),
     events,
+    handlers,
     taskStates,
     applied,
-    requests
+    persistedItems,
+    requests,
+    get toolExecutions() { return toolExecutions }
   }
 }
 

@@ -2,6 +2,7 @@ import type {
   ToolHost,
   ToolHostContext,
   ToolHostResult,
+  ToolHostPreparation,
   ToolCallLike,
   ToolExecutionUpdate
 } from '@qiongqi/ports'
@@ -49,11 +50,19 @@ export type LocalTool = {
    * `create_plan`.
    */
   shouldAdvertise?: (context: ToolHostContext) => boolean
+  /** Provider-neutral capability used when the executor does not supply richer semantics. */
+  capabilityClass?: string
+  semantic?: (
+    args: Record<string, unknown>,
+    context: ToolHostContext,
+    result: { output: unknown; isError?: boolean },
+    call: ToolCallLike
+  ) => ToolHostResult['semantic'] | undefined
   execute: (
     args: Record<string, unknown>,
     context: ToolHostContext,
     onUpdate?: (update: ToolExecutionUpdate) => Promise<void> | void
-  ) => Promise<{ output: unknown; isError?: boolean }>
+  ) => Promise<{ output: unknown; isError?: boolean; semantic?: ToolHostResult['semantic'] }>
 }
 
 export type LocalToolHostOptions = {
@@ -103,42 +112,58 @@ export class LocalToolHost implements ToolHost {
     return this.registry.diagnostics()
   }
 
-  async execute(
-    call: ToolCallLike,
-    context: ToolHostContext,
-    onUpdate?: (item: TurnItem) => Promise<void> | void
-  ): Promise<ToolHostResult> {
-    if (context.abortSignal.aborted) {
-      throw new Error('tool call aborted before start')
-    }
+  async prepare(call: ToolCallLike, context: ToolHostContext): Promise<ToolHostPreparation> {
+    if (context.abortSignal.aborted) throw new Error('tool call aborted before start')
     const { tool } = this.registry.resolveTool(call.toolName, context, call.providerId)
-    if (tool.policy === 'never') {
-      throw new Error(`tool ${call.toolName} is disabled by policy`)
-    }
+    if (tool.policy === 'never') throw new Error(`tool ${call.toolName} is disabled by policy`)
     let preHookResults
     try {
       preHookResults = await runToolHooks({
         hooks: this.hooks,
-        invocation: {
-          phase: 'PreToolUse',
-          call,
-          context: hookContext(context)
-        }
+        invocation: { phase: 'PreToolUse', call, context: hookContext(context) }
       })
     } catch (error) {
       return {
-        item: this.errorToolResult(context, call, tool, hookErrorMessage(error), 'hook_failed'),
-        approved: false
+        call,
+        result: this.resultWithSemantic(
+          this.errorToolResult(context, call, tool, hookErrorMessage(error), 'hook_failed'),
+          false,
+          tool,
+          call,
+          context
+        ),
+        state: { tool }
       }
     }
-    const preHookDecision = applyPreToolHookResults(call, preHookResults)
-    if (preHookDecision.denied) {
+    const decision = applyPreToolHookResults(call, preHookResults)
+    if (decision.denied) {
       return {
-        item: this.errorToolResult(context, preHookDecision.call, tool, preHookDecision.denied, 'hook_denied'),
-        approved: false
+        call: decision.call,
+        result: this.resultWithSemantic(
+          this.errorToolResult(context, decision.call, tool, decision.denied, 'hook_denied'),
+          false,
+          tool,
+          decision.call,
+          context
+        ),
+        state: { tool }
       }
     }
-    const activeCall = preHookDecision.call
+    return { call: decision.call, state: { tool } }
+  }
+
+  async execute(
+    call: ToolCallLike,
+    context: ToolHostContext,
+    onUpdate?: (item: TurnItem) => Promise<void> | void,
+    preparation?: ToolHostPreparation
+  ): Promise<ToolHostResult> {
+    const prepared = preparation ?? await this.prepare(call, context)
+    if (prepared.result) return prepared.result
+    const activeCall = prepared.call
+    const preparedState = prepared.state as { tool?: LocalTool } | undefined
+    const tool = preparedState?.tool
+      ?? this.registry.resolveTool(activeCall.toolName, context, activeCall.providerId).tool
     const readValidation = this.readTracker.validateBeforeTool({ context, call: activeCall })
     if (!readValidation.ok) {
       return {
@@ -199,9 +224,14 @@ export class LocalToolHost implements ToolHost {
       })
       await onUpdate(partialItem)
     })
-    let postHookResults
+    let lastOutput: unknown
     try {
-      postHookResults = await runToolHooks({
+      lastOutput = result.output
+    } catch {
+      lastOutput = undefined
+    }
+    try {
+      const postHookResults = await runToolHooks({
         hooks: this.hooks,
         invocation: {
           phase: 'PostToolUse',
@@ -210,34 +240,53 @@ export class LocalToolHost implements ToolHost {
           result
         }
       })
-    } catch (error) {
-      return {
-        item: this.errorToolResult(context, activeCall, tool, hookErrorMessage(error), 'hook_failed'),
-        approved: true
+      const hookedResult = applyPostToolHookResults(result, postHookResults)
+      lastOutput = hookedResult.output
+      const rateLimited = normalizeRateLimitedToolOutput(hookedResult.output)
+      const rawOutput = rateLimited.rateLimited ? rateLimited.output : hookedResult.output
+      const isError = hookedResult.isError || rateLimited.isError
+      const output = await this.applyOutputBudget(activeCall.toolName, rawOutput, context)
+      lastOutput = output
+      this.readTracker.observeToolResult({ context, call: activeCall, output, isError })
+      const item = makeToolResultItem({
+        id: `item_${activeCall.callId}`,
+        turnId: context.turnId,
+        threadId: context.threadId,
+        callId: activeCall.callId,
+        toolName: activeCall.toolName,
+        toolKind: activeCall.toolKind ?? tool.toolKind,
+        output,
+        isError
+      })
+      let semantic: ToolHostResult['semantic']
+      try {
+        semantic = result.semantic
+      } catch {
+        semantic = undefined
       }
+      if (!semantic && tool.semantic) {
+        try {
+          semantic = tool.semantic(activeCall.arguments, context, { output, isError }, activeCall)
+        } catch {
+          semantic = undefined
+        }
+      }
+      semantic ??= { capabilityClass: tool.capabilityClass ?? tool.name, resourceKeys: [] }
+      return { item, approved: !needsApproval, semantic }
+    } catch {
+      return this.resultWithSemantic(
+        this.postprocessErrorToolResult(
+          context,
+          activeCall,
+          tool,
+          cloneIfSafe(lastOutput)
+        ),
+        !needsApproval,
+        tool,
+        activeCall,
+        context
+      )
     }
-    const hookedResult = applyPostToolHookResults(result, postHookResults)
-    const rateLimited = normalizeRateLimitedToolOutput(hookedResult.output)
-    const rawOutput = rateLimited.rateLimited ? rateLimited.output : hookedResult.output
-    const isError = hookedResult.isError || rateLimited.isError
-    const output = await this.applyOutputBudget(activeCall.toolName, rawOutput, context)
-    this.readTracker.observeToolResult({
-      context,
-      call: activeCall,
-      output,
-      isError
-    })
-    const item = makeToolResultItem({
-      id: `item_${activeCall.callId}`,
-      turnId: context.turnId,
-      threadId: context.threadId,
-      callId: activeCall.callId,
-      toolName: activeCall.toolName,
-      toolKind: activeCall.toolKind ?? tool.toolKind,
-      output,
-      isError
-    })
-    return { item, approved: !needsApproval }
   }
 
   clearReadTracker(threadId?: string): void {
@@ -326,6 +375,49 @@ export class LocalToolHost implements ToolHost {
     })
   }
 
+  private resultWithSemantic(
+    item: TurnItem,
+    approved: boolean,
+    tool: LocalTool,
+    call: ToolCallLike,
+    context: ToolHostContext
+  ): ToolHostResult {
+    if (item.kind !== 'tool_result') return { item, approved }
+    let semantic: ToolHostResult['semantic']
+    try {
+      semantic = tool.semantic?.(call.arguments, context, { output: item.output, isError: item.isError }, call)
+    } catch {
+      semantic = undefined
+    }
+    return {
+      item,
+      approved,
+      semantic: semantic ?? { capabilityClass: tool.capabilityClass ?? tool.name, resourceKeys: [] }
+    }
+  }
+
+  private postprocessErrorToolResult(
+    context: ToolHostContext,
+    call: ToolCallLike,
+    tool: LocalTool,
+    preservedOutput: unknown
+  ): TurnItem {
+    return makeToolResultItem({
+      id: `item_${call.callId}`,
+      turnId: context.turnId,
+      threadId: context.threadId,
+      callId: call.callId,
+      toolName: call.toolName,
+      toolKind: call.toolKind ?? tool.toolKind,
+      output: {
+        code: 'tool_postprocess_failed',
+        error: 'tool result post-processing failed',
+        ...(preservedOutput === undefined ? {} : { result: preservedOutput })
+      },
+      isError: true
+    })
+  }
+
   /** Tool builder helper for tests and feature scripts. */
   static defineTool(
     tool: Omit<LocalTool, 'policy' | 'toolKind'> & {
@@ -340,6 +432,8 @@ export class LocalToolHost implements ToolHost {
       inputSchema: tool.inputSchema,
       toolKind: tool.toolKind ?? 'tool_call',
       execute: tool.execute,
+      ...(tool.capabilityClass ? { capabilityClass: tool.capabilityClass } : {}),
+      ...(tool.semantic ? { semantic: tool.semantic } : {}),
       ...(tool.shouldAdvertise ? { shouldAdvertise: tool.shouldAdvertise } : {})
     }
   }
@@ -371,6 +465,15 @@ function outputToBudgetableText(output: unknown): string | null {
     return JSON.stringify(output, null, 2)
   } catch {
     return null
+  }
+}
+
+function cloneIfSafe(value: unknown): unknown {
+  if (value === undefined) return undefined
+  try {
+    return structuredClone(value)
+  } catch {
+    return undefined
   }
 }
 

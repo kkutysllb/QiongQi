@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { UsageSnapshotSchema } from './usage.js'
 
 const NonEmptyString = z.string().trim().min(1)
 
@@ -17,6 +18,7 @@ export const RunOutcomeReasonSchema = z.enum([
   'normal_stop',
   'awaiting_user_input',
   'tool_completed_no_final_text',
+  'context_capacity_exceeded',
   'context_recovery_exhausted',
   'loop_capped',
   'step_capped',
@@ -206,7 +208,8 @@ export type NormalizedModelCompletion = z.infer<typeof NormalizedModelCompletion
 
 export const ModelProposalSchema = NormalizedModelCompletionSchema.extend({
   proposalId: NonEmptyString,
-  model: NonEmptyString
+  model: NonEmptyString,
+  usage: UsageSnapshotSchema.optional()
 }).strict()
 export type ModelProposal = z.infer<typeof ModelProposalSchema>
 

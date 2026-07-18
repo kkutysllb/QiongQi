@@ -1,4 +1,5 @@
 import type { TurnItem } from '@qiongqi/contracts'
+import type { RuntimeProgressTurnItem } from '@qiongqi/contracts'
 import type { ReviewOutput, ReviewTarget } from '@qiongqi/contracts'
 
 export type ItemEntity = TurnItem
@@ -240,6 +241,38 @@ export function makeReviewItem(input: {
     title: input.title,
     ...(input.reviewText ? { reviewText: input.reviewText } : {}),
     ...(input.output ? { output: input.output } : {})
+  }
+}
+
+export function makeRuntimeProgressItem(input: {
+  id: string
+  turnId: string
+  threadId: string
+  phase: RuntimeProgressTurnItem['phase']
+  summary: string
+  modelSteps: number
+  toolCalls: number
+  evidenceCount?: number
+  artifactCount?: number
+  reason?: string
+}): RuntimeProgressTurnItem {
+  const now = new Date().toISOString()
+  return {
+    id: input.id,
+    turnId: input.turnId,
+    threadId: input.threadId,
+    role: 'system',
+    status: 'completed',
+    createdAt: now,
+    finishedAt: now,
+    kind: 'runtime_progress',
+    phase: input.phase,
+    summary: input.summary,
+    modelSteps: input.modelSteps,
+    toolCalls: input.toolCalls,
+    evidenceCount: input.evidenceCount ?? 0,
+    artifactCount: input.artifactCount ?? 0,
+    ...(input.reason !== undefined ? { reason: input.reason } : {})
   }
 }
 

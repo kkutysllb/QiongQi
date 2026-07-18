@@ -32,6 +32,13 @@ export function createReadLocalTool(options: ReadLocalToolOptions = {}): LocalTo
       additionalProperties: false
     },
     policy: 'auto',
+    capabilityClass: 'file.read',
+    semantic: (args, context) => {
+      const rawPath = typeof args.path === 'string' ? args.path : ''
+      if (!rawPath.trim()) return { capabilityClass: 'file.read', resourceKeys: [] }
+      const { absolutePath } = resolveWorkspacePath(rawPath, context)
+      return { capabilityClass: 'file.read', resourceKeys: [absolutePath] }
+    },
     execute: async (args, context) => withToolBoundary(async () => {
       const rawPath = typeof args.path === 'string' ? args.path : ''
       if (!rawPath.trim()) return { output: { error: 'path is required' }, isError: true }

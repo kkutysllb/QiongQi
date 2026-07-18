@@ -50,6 +50,7 @@ import type {
   ToolHost,
   ToolHostContext,
   ToolHostResult,
+  ToolHostPreparation,
   ToolCallLike,
   ModelClient
 } from '@qiongqi/ports'
@@ -602,12 +603,17 @@ class RefreshableToolHost implements ToolHost {
     return this.delegate.listTools(context)
   }
 
+  prepare(call: ToolCallLike, context: ToolHostContext): Promise<ToolHostPreparation> {
+    return this.delegate.prepare(call, context)
+  }
+
   execute(
     call: ToolCallLike,
     context: ToolHostContext,
-    onUpdate?: (item: TurnItem) => Promise<void> | void
+    onUpdate?: (item: TurnItem) => Promise<void> | void,
+    preparation?: ToolHostPreparation
   ): Promise<ToolHostResult> {
-    return this.delegate.execute(call, context, onUpdate)
+    return this.delegate.execute(call, context, onUpdate, preparation)
   }
 
   clearReadTracker(threadId?: string): void {
@@ -1116,7 +1122,7 @@ export function createKernelV3TurnRunner(input: {
   toolRuntime: ToolRuntimeV3
 }): KernelV3TurnRunner {
   const { options, core, model, tools } = input
-  const snapshots = new FileRunStateStore(input.runtimeV3Root)
+  const snapshots = new FileRunStateStore(input.runtimeV3Root, { requireFence: true })
   const taskStates = new FileTaskStateStore(input.runtimeV3Root)
 
   const awaitUserInput = async (
@@ -1204,17 +1210,15 @@ export function createKernelV3TurnRunner(input: {
   const proposalRunner = new ModelProposalRunner({
     client: input.modelClient,
     endpointFormat: options.endpointFormat,
-    onDelta: async (chunk, request) => {
-      // Proposal text remains quarantined until evaluate/commit-assistant.
-      if (chunk.kind !== 'usage') return
+    onUsage: async (snapshot, request) => {
       const thread = await core.threadStore.get(request.threadId)
       promptBuilder.recordPromptPressure({
         ownerUserId: thread?.ownerUserId ?? 'local-default-owner',
         workspaceKey: thread?.workspace ?? options.dataDir,
         threadId: request.threadId,
         turnId: request.turnId
-      }, request.model, chunk.usage.promptTokens)
-      const usage = core.usageService.record(request.threadId, chunk.usage)
+      }, request.model, snapshot.promptTokens)
+      const usage = core.usageService.record(request.threadId, snapshot)
       await core.events.record({
         kind: 'usage',
         threadId: request.threadId,
@@ -1308,7 +1312,8 @@ export function createKernelV3TurnRunner(input: {
       }
     },
     ids: core.ids,
-    nowIso: core.nowIso
+    nowIso: core.nowIso,
+    emitRuntimeProgress: true
   })
 
   return new KernelV3TurnRunner({
@@ -1328,6 +1333,29 @@ export function createKernelV3TurnRunner(input: {
     },
     nodes,
     finishTurn: async (threadId, turnId, status, outcome) => {
+      const progressId = `item_kernel_progress_run_${threadId}_${turnId}`
+      await core.turnService.applyItemOnce(threadId, {
+        id: progressId,
+        threadId,
+        turnId,
+        role: 'system',
+        status: 'completed',
+        createdAt: core.nowIso(),
+        kind: 'runtime_progress',
+        phase: 'terminated',
+        summary: outcome.status === 'completed' ? 'Task completed.' : `Task stopped: ${outcome.reason}.`,
+        modelSteps: 0,
+        toolCalls: 0,
+        evidenceCount: 0,
+        artifactCount: 0,
+        reason: outcome.reason
+      })
+      await core.turnService.updateItemOnce(threadId, progressId, {
+        status: 'completed',
+        phase: 'terminated',
+        summary: outcome.status === 'completed' ? 'Task completed.' : `Task stopped: ${outcome.reason}.`,
+        reason: outcome.reason
+      } as never)
       await core.turnService.finishTurn({
         threadId,
         turnId,
@@ -1404,7 +1432,7 @@ async function assembleRuntime(input: {
   })
   const orchestrationMode = orchestrationModeForRuntimeOptions(options)
   const runtimeV3Root = join(options.dataDir, 'runtime-v3')
-  const runtimeV3Events = orchestrationMode === 'kernel_v3' ? new FileRunEventStore(runtimeV3Root) : undefined
+  const runtimeV3Events = orchestrationMode === 'kernel_v3' ? new FileRunEventStore(runtimeV3Root, { requireFence: true }) : undefined
   const toolRuntime = runtimeV3Events
     ? new ToolRuntimeV3({ toolHost: tools.toolHost, effects: new EffectCommitCoordinator({ events: runtimeV3Events, results: new FileEffectResultStore(runtimeV3Root), nowIso: core.nowIso }) })
     : undefined

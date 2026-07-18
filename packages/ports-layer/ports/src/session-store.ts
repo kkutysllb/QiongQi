@@ -13,6 +13,11 @@ import type { TurnItem } from '@qiongqi/contracts'
 export interface SessionStore {
   appendEvent(threadId: string, event: RuntimeEvent): Promise<void>
   appendItem(threadId: string, item: TurnItem): Promise<void>
+  /** Return the canonical durable item, appending it only when the stable id is absent. */
+  appendItemOnce(
+    threadId: string,
+    item: TurnItem
+  ): Promise<{ item: TurnItem; created: boolean }>
   /**
    * Replace the canonical item stream for a thread. File-backed stores
    * should write atomically because this is used by load-time healing
@@ -20,6 +25,12 @@ export interface SessionStore {
    */
   rewriteItems(threadId: string, items: TurnItem[]): Promise<void>
   updateItem(threadId: string, itemId: string, patch: Partial<TurnItem>): Promise<TurnItem | null>
+  /** Apply a deterministic target patch only when it changes the latest durable revision. */
+  updateItemOnce(
+    threadId: string,
+    itemId: string,
+    patch: Partial<TurnItem>
+  ): Promise<{ item: TurnItem; updated: boolean } | null>
   loadEventsSince(threadId: string, sinceSeq: number): Promise<RuntimeEvent[]>
   loadItems(threadId: string): Promise<TurnItem[]>
   loadSession(threadId: string): Promise<AgentSession | null>

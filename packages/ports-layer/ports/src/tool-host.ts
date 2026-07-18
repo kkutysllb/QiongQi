@@ -1,4 +1,10 @@
-import type { ApprovalPolicy, RunIdentity, RunStateV3, ToolEffectPolicy } from '@qiongqi/contracts'
+import type {
+  ApprovalPolicy,
+  RunIdentity,
+  RunStateV3,
+  TaskArtifactRef,
+  ToolEffectPolicy
+} from '@qiongqi/contracts'
 import type { ApprovalRequest } from '@qiongqi/domain'
 import type { TurnItem } from '@qiongqi/contracts'
 import type { ModelCapabilityMetadata } from '@qiongqi/contracts'
@@ -119,6 +125,18 @@ export type ToolHostResult = {
   item: TurnItem
   /** True if the call was decided by an approval. */
   approved: boolean
+  semantic?: {
+    capabilityClass: string
+    resourceKeys: string[]
+    artifactRefs?: TaskArtifactRef[]
+  }
+}
+
+export type ToolHostPreparation = {
+  call: ToolCallLike
+  result?: ToolHostResult
+  /** Host-private state passed back to execute so preparation is applied exactly once. */
+  state?: unknown
 }
 
 /**
@@ -143,10 +161,13 @@ export interface ToolHost {
     providerKind?: ToolProviderKind
     effectPolicy?: ToolEffectPolicy
   }[]>
+  /** Resolve provider-neutral rewrites/denials before an effect is prepared. */
+  prepare?(call: ToolCallLike, context: ToolHostContext): Promise<ToolHostPreparation>
   execute(
     call: ToolCallLike,
     context: ToolHostContext,
-    onUpdate?: (item: TurnItem) => Promise<void> | void
+    onUpdate?: (item: TurnItem) => Promise<void> | void,
+    preparation?: ToolHostPreparation
   ): Promise<ToolHostResult>
   /** Optional runtime hygiene hook used when compaction/discard invalidates read context. */
   clearReadTracker?(threadId?: string): void

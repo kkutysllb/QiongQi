@@ -5,6 +5,7 @@ import type {
   DailyUsageCounters,
   DailyUsageResponse,
   ModelUsageBucket,
+  ModelUsageDayBucket,
   ModelUsageResponse,
   ThreadUsageBucket,
   ThreadUsageResponse,
@@ -104,6 +105,11 @@ type ThreadUsageAccumulator = ThreadUsageBucket & {
 }
 
 type ModelUsageAccumulator = ModelUsageBucket & {
+  threadIds: Set<string>
+  hasCacheTelemetry: boolean
+}
+
+type ModelDayUsageAccumulator = ModelUsageDayBucket & {
   threadIds: Set<string>
   hasCacheTelemetry: boolean
 }
@@ -363,6 +369,16 @@ function emptyModelBucket(model: string): ModelUsageAccumulator {
   }
 }
 
+function emptyModelDayBucket(model: string, date: string): ModelDayUsageAccumulator {
+  return {
+    date,
+    model,
+    ...emptyCounters(),
+    threadIds: new Set<string>(),
+    hasCacheTelemetry: false
+  }
+}
+
 function finalizeDailyBucket(bucket: DailyUsageAccumulator): DailyUsageBucket {
   const finalized = finalizeCacheRate(bucket, bucket.hasCacheTelemetry)
   return {
@@ -411,6 +427,30 @@ function finalizeThreadBucket(bucket: ThreadUsageAccumulator): ThreadUsageBucket
 function finalizeModelBucket(bucket: ModelUsageAccumulator): ModelUsageBucket {
   const finalized = finalizeCacheRate(bucket, bucket.hasCacheTelemetry)
   return {
+    model: bucket.model,
+    input_tokens: finalized.input_tokens,
+    output_tokens: finalized.output_tokens,
+    reasoning_tokens: finalized.reasoning_tokens,
+    cached_tokens: finalized.cached_tokens,
+    cache_miss_tokens: finalized.cache_miss_tokens,
+    total_tokens: finalized.total_tokens,
+    cost_usd: finalized.cost_usd,
+    cost_cny: finalized.cost_cny,
+    cache_savings_usd: finalized.cache_savings_usd,
+    cache_savings_cny: finalized.cache_savings_cny,
+    token_economy_savings_tokens: finalized.token_economy_savings_tokens,
+    token_economy_savings_usd: finalized.token_economy_savings_usd,
+    token_economy_savings_cny: finalized.token_economy_savings_cny,
+    turns: finalized.turns,
+    thread_count: bucket.threadIds.size,
+    cache_hit_rate: finalized.cache_hit_rate
+  }
+}
+
+function finalizeModelDayBucket(bucket: ModelDayUsageAccumulator): ModelUsageDayBucket {
+  const finalized = finalizeCacheRate(bucket, bucket.hasCacheTelemetry)
+  return {
+    date: bucket.date,
     model: bucket.model,
     input_tokens: finalized.input_tokens,
     output_tokens: finalized.output_tokens,
@@ -551,10 +591,13 @@ export function buildModelUsageResponse(
   const days = inclusiveDayCount(query.from, query.to)
   assertValidTimezone(query.timezone)
   const start = parseDateString(query.from, 'from')
+  const dateKeys: string[] = []
   const dayBuckets = new Map<string, DailyUsageAccumulator>()
   const modelBuckets = new Map<string, ModelUsageAccumulator>()
+  const modelDayBuckets = new Map<string, ModelDayUsageAccumulator>()
   for (let offset = 0; offset < days; offset += 1) {
     const day = dateString(addUtcDays(start, offset))
+    dateKeys.push(day)
     dayBuckets.set(day, emptyDailyBucket(day))
   }
 
@@ -566,18 +609,37 @@ export function buildModelUsageResponse(
 
     const model = record.model?.trim() || 'unknown'
     const modelBucket = modelBuckets.get(model) ?? emptyModelBucket(model)
+    const modelDayKey = `${day}\u0000${model}`
+    const modelDayBucket = modelDayBuckets.get(modelDayKey) ?? emptyModelDayBucket(model, day)
     const dayAdded = addUsageCounters(dayBucket, record.usage)
     const modelAdded = addUsageCounters(modelBucket, record.usage)
+    const modelDayAdded = addUsageCounters(modelDayBucket, record.usage)
     dayBucket.threadIds.add(record.threadId)
     dayBucket.thread_count = dayBucket.threadIds.size
     dayBucket.hasCacheTelemetry = dayBucket.hasCacheTelemetry || dayAdded.hasCacheTelemetry
     modelBucket.threadIds.add(record.threadId)
     modelBucket.thread_count = modelBucket.threadIds.size
     modelBucket.hasCacheTelemetry = modelBucket.hasCacheTelemetry || modelAdded.hasCacheTelemetry
+    modelDayBucket.threadIds.add(record.threadId)
+    modelDayBucket.thread_count = modelDayBucket.threadIds.size
+    modelDayBucket.hasCacheTelemetry = modelDayBucket.hasCacheTelemetry || modelDayAdded.hasCacheTelemetry
     modelBuckets.set(model, modelBucket)
+    modelDayBuckets.set(modelDayKey, modelDayBucket)
+  }
+
+  for (const model of modelBuckets.keys()) {
+    for (const day of dateKeys) {
+      const modelDayKey = `${day}\u0000${model}`
+      if (!modelDayBuckets.has(modelDayKey)) {
+        modelDayBuckets.set(modelDayKey, emptyModelDayBucket(model, day))
+      }
+    }
   }
 
   const finalizedDays = [...dayBuckets.values()].map(finalizeDailyBucket)
+  const finalizedModelDays = [...modelDayBuckets.values()]
+    .map(finalizeModelDayBucket)
+    .sort((a, b) => a.date.localeCompare(b.date) || a.model.localeCompare(b.model))
   const finalizedModels = [...modelBuckets.values()]
     .map(finalizeModelBucket)
     .sort((a, b) => b.total_tokens - a.total_tokens || a.model.localeCompare(b.model))
@@ -627,6 +689,7 @@ export function buildModelUsageResponse(
     timezone: query.timezone,
     buckets: finalizedModels,
     days: finalizedDays,
+    model_days: finalizedModelDays,
     totals
   }
 }

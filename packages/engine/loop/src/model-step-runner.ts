@@ -20,7 +20,7 @@ import {
   makeAssistantTextItem,
   makeToolCallItem
 } from '@qiongqi/domain'
-import { repairDispatchToolArguments } from './tool-call-repair.js'
+import { repairDispatchToolCall } from './tool-call-repair.js'
 import { recordPipelineStage } from './loop-events.js'
 
 type StopReason = 'stop' | 'tool_calls' | 'length' | 'error'
@@ -65,6 +65,7 @@ export class ModelStepRunner {
     const reasoningAccumulator: { value: string } = { value: '' }
     let textItemId = ''
     let reasoningItemId = ''
+    let reasoningSignature = ''
     const completedToolCalls: ToolCallLike[] = []
     let stopReason: StopReason = 'stop'
 
@@ -91,6 +92,7 @@ export class ModelStepRunner {
         case 'assistant_reasoning_delta':
           reasoningItemId ||= this.deps.ids.next('item_reasoning')
           reasoningAccumulator.value += chunk.text
+          if (chunk.signature) reasoningSignature = chunk.signature
           await this.deps.events.record({
             kind: 'assistant_reasoning_delta',
             threadId,
@@ -101,6 +103,7 @@ export class ModelStepRunner {
               turnId,
               threadId,
               text: chunk.text,
+              ...(chunk.signature ? { signature: chunk.signature } : {}),
               status: 'running'
             })
           })
@@ -110,20 +113,20 @@ export class ModelStepRunner {
         case 'tool_call_complete': {
           const provider = input.toolProviderMetadata.get(chunk.toolName)
           const toolKind = input.toolKinds.get(chunk.toolName)
-          const repaired = repairDispatchToolArguments(chunk.arguments, {
+          const repaired = repairDispatchToolCall({
+            callId: chunk.callId,
+            toolName: chunk.toolName,
+            ...(provider?.providerId ? { providerId: provider.providerId } : {}),
+            toolKind,
+            arguments: chunk.arguments
+          }, {
             toolName: chunk.toolName,
             ...(toolKind ? { toolKind } : {}),
             ...(this.deps.toolArgumentRepair?.maxStringBytes !== undefined
               ? { maxStringBytes: this.deps.toolArgumentRepair.maxStringBytes }
               : {})
           })
-          completedToolCalls.push({
-            callId: chunk.callId,
-            toolName: chunk.toolName,
-            ...(provider?.providerId ? { providerId: provider.providerId } : {}),
-            toolKind,
-            arguments: repaired.arguments
-          })
+          completedToolCalls.push(repaired.call)
           const itemId = `item_tool_${turnId}_${chunk.callId}`
           await this.deps.turns.applyItem(
             threadId,
@@ -131,12 +134,12 @@ export class ModelStepRunner {
               id: itemId,
               turnId,
               threadId,
-              callId: chunk.callId,
-              toolName: chunk.toolName,
-              toolKind,
-              arguments: repaired.arguments,
+              callId: repaired.call.callId,
+              toolName: repaired.call.toolName,
+              toolKind: repaired.call.toolKind ?? toolKind,
+              arguments: repaired.call.arguments,
               ...(repaired.notes.length
-                ? { summary: `Repaired tool arguments: ${repaired.notes.join('; ')}` }
+                ? { summary: `Repaired tool call: ${repaired.notes.join('; ')}` }
                 : {})
             })
           )
@@ -145,8 +148,8 @@ export class ModelStepRunner {
             threadId,
             turnId,
             itemId,
-            callId: chunk.callId,
-            toolName: chunk.toolName,
+            callId: repaired.call.callId,
+            toolName: repaired.call.toolName,
             readyCount: completedToolCalls.length
           })
           break
@@ -187,7 +190,7 @@ export class ModelStepRunner {
         toolCallCount: completedToolCalls.length
       }
     })
-    if (reasoningAccumulator.value) {
+    if (reasoningAccumulator.value || reasoningSignature) {
       const itemId = reasoningItemId || this.deps.ids.next('item_reasoning')
       await this.deps.turns.applyItem(
         threadId,
@@ -196,6 +199,7 @@ export class ModelStepRunner {
           turnId,
           threadId,
           text: reasoningAccumulator.value,
+          ...(reasoningSignature ? { signature: reasoningSignature } : {}),
           status: 'completed'
         })
       )

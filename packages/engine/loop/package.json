@@ -28,7 +28,8 @@
     "@qiongqi/adapter-model": "workspace:*",
     "@qiongqi/attachments": "workspace:*",
     "@qiongqi/skills": "workspace:*",
-    "@qiongqi/memory": "workspace:*"
+    "@qiongqi/memory": "workspace:*",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "typescript": "^5.8.2",

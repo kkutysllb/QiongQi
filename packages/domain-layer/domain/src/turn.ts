@@ -11,6 +11,7 @@ export function createTurnRecord(input: {
   model?: string
   reasoningEffort?: TurnReasoningEffort
   attachmentIds?: string[]
+  workModeId?: string
   guiPlan?: GuiPlanContextJson
   mode?: ThreadMode
   createdAt?: string
@@ -28,6 +29,7 @@ export function createTurnRecord(input: {
     attachmentIds: [...(input.attachmentIds ?? [])],
     activeSkillIds: [],
     injectedMemoryIds: [],
+    ...(input.workModeId ? { workModeId: input.workModeId } : {}),
     ...(model ? { model } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(input.guiPlan ? { guiPlan: input.guiPlan } : {}),

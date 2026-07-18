@@ -407,6 +407,8 @@ function summarizeItem(item: TurnItem): string {
         : ''
     case 'review':
       return `- Review ${item.title}: ${clipText(item.reviewText || stringifyCompact(item.output))}`
+    case 'runtime_progress':
+      return ''
     case 'error':
       return `- Error${item.code ? ` ${item.code}` : ''}: ${clipText(item.message)}`
   }

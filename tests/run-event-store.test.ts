@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FileRunEventStore, InMemoryRunEventStore } from '@qiongqi/adapter-storage'
+import { FileRunEventStore, FileRunStateStore, InMemoryRunEventStore, runtimeScopeDigest } from '@qiongqi/adapter-storage'
 import type { RunEventEnvelope, RunIdentity } from '@qiongqi/contracts'
 
 const identity: RunIdentity = {
@@ -36,4 +36,26 @@ describe.each([
     await expect(store.listAfter(identity, 0)).resolves.toHaveLength(1)
     if (store instanceof FileRunEventStore) await rm(store.rootDir, { recursive: true, force: true })
   })
+})
+
+it('rejects stale fenced event appends at the file store boundary', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'qiongqi-run-events-fence-'))
+  const leases = new FileRunStateStore(rootDir)
+  const events = new FileRunEventStore(rootDir, { requireFence: true })
+  const first = await leases.acquire(identity, 'holder-a', 1)
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  const second = await leases.acquire(identity, 'holder-b', 60_000)
+  await expect(events.append(event(1), first.fence)).rejects.toThrow(/fence|lease/i)
+  await expect(events.append(event(1), second.fence)).resolves.toMatchObject({ seq: 1 })
+  await rm(rootDir, { recursive: true, force: true })
+})
+
+it('reclaims a lock directory left by a dead acquisition process', async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), 'qiongqi-run-events-stale-lock-'))
+  const store = new FileRunEventStore(rootDir)
+  const lockPath = join(rootDir, 'leases', `${runtimeScopeDigest(identity)}.json.lock`)
+  await mkdir(lockPath, { recursive: true })
+  await writeFile(join(lockPath, 'owner.json'), JSON.stringify({ pid: 999999, createdAtMs: Date.now(), key: 'test' }))
+  await expect(store.append(event(1))).resolves.toMatchObject({ seq: 1 })
+  await rm(rootDir, { recursive: true, force: true })
 })

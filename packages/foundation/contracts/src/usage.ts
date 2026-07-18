@@ -98,7 +98,9 @@ export const ModelUsageBucketSchema = DailyUsageCountersSchema.extend({
 })
 export type ModelUsageBucket = z.infer<typeof ModelUsageBucketSchema>
 
-export const ModelUsageDayBucketSchema = DailyUsageBucketSchema
+export const ModelUsageDayBucketSchema = DailyUsageBucketSchema.extend({
+  model: z.string().min(1)
+})
 export type ModelUsageDayBucket = z.infer<typeof ModelUsageDayBucketSchema>
 
 export const ModelUsageResponseSchema = z.object({
@@ -107,7 +109,8 @@ export const ModelUsageResponseSchema = z.object({
   to: DateStringSchema,
   timezone: z.string().min(1),
   buckets: z.array(ModelUsageBucketSchema),
-  days: z.array(ModelUsageDayBucketSchema),
+  days: z.array(DailyUsageBucketSchema),
+  model_days: z.array(ModelUsageDayBucketSchema),
   totals: DailyUsageTotalsSchema
 })
 export type ModelUsageResponse = z.infer<typeof ModelUsageResponseSchema>

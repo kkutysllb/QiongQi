@@ -38,7 +38,14 @@ function toResponse(response: Response | JsonResponse, observability?: {
     }
     return response
   }
-  const headers = new Headers(response.headers)
+  const headers = new Headers()
+  for (const [key, value] of Object.entries(response.headers)) {
+    if (Array.isArray(value)) {
+      for (const v of value) headers.append(key, v)
+    } else {
+      headers.set(key, value)
+    }
+  }
   if (observability?.requestId) headers.set('x-request-id', observability.requestId)
   if (observability?.traceparent) headers.set('traceparent', observability.traceparent)
   return new Response(response.body, {

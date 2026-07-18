@@ -40,6 +40,7 @@ function normalizeLoadedItem(item: TurnItem, index: number): TurnItem | null {
     case 'user_input':
     case 'compaction':
     case 'review':
+    case 'runtime_progress':
     case 'error':
       return base
     default:

@@ -52,6 +52,8 @@ function fewShotText(item: TurnItem): string {
       return item.summary
     case 'review':
       return `${item.title} ${item.reviewText ?? ''} ${stableStringify(item.output ?? {})}`
+    case 'runtime_progress':
+      return ''
     case 'error':
       return item.message
   }

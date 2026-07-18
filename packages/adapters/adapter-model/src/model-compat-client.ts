@@ -785,6 +785,7 @@ export class ModelCompatClient implements ModelClient {
           : null
       case 'approval':
       case 'user_input':
+      case 'runtime_progress':
       case 'error':
         return null
     }

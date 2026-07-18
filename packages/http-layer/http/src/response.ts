@@ -1,6 +1,6 @@
 export type JsonResponse = {
   status: number
-  headers: Record<string, string>
+  headers: Record<string, string | string[]>
   body: string
 }
 

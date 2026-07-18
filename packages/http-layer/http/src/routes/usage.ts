@@ -15,6 +15,8 @@ import {
 import type { UsageEvent } from '@qiongqi/contracts'
 import type { ServerRuntime } from './server-runtime.js'
 import { jsonResponse, type JsonResponse } from '../response.js'
+import type { AuthActor } from '../auth-service.js'
+import type { KWorksUsageEventRecord } from '../kworks-user-data-store.js'
 
 /**
  * Usage endpoint response shape. The `total` field mirrors the
@@ -26,10 +28,10 @@ export type UsageEndpointResponse = {
   perThread: Array<{ threadId: string; usage: ReturnType<UsageService['forThread']> }>
 }
 
-export async function buildUsageResponse(runtime: ServerRuntime): Promise<UsageEndpointResponse> {
-  const threads = await runtime.threadService.list()
+export async function buildUsageResponse(runtime: ServerRuntime, actor?: AuthActor): Promise<UsageEndpointResponse> {
+  const threads = await runtime.threadService.list({ ownerUserId: actor?.userId })
   return {
-    total: runtime.usageService.total(),
+    total: actor ? mergeUsageSnapshots(threads.map((thread) => runtime.usageService.forThread(thread.id))) : runtime.usageService.total(),
     perThread: threads.map((thread) => ({
       threadId: thread.id,
       usage: runtime.usageService.forThread(thread.id)
@@ -39,17 +41,20 @@ export async function buildUsageResponse(runtime: ServerRuntime): Promise<UsageE
 
 export async function usageJsonResponse(
   request: Request,
-  runtime: ServerRuntime
+  runtime: ServerRuntime,
+  actor?: AuthActor,
+  options?: { defaultWindow?: string }
 ): Promise<JsonResponse> {
   const query = queryRecord(request)
+  applyDefaultUsageWindow(query, options?.defaultWindow)
   const groupBy = stringParam(query, 'group_by') ?? 'runtime'
   if (groupBy === 'thread') {
-    return jsonResponse(buildThreadUsageResponse(await usageRecords(runtime)))
+    return jsonResponse(buildThreadUsageResponse(await usageRecords(runtime, actor)))
   }
   if (groupBy === 'day') {
     try {
       return jsonResponse(
-        buildDailyUsageResponse(await usageRecords(runtime), parseDailyUsageQuery(query))
+        buildDailyUsageResponse(await usageRecords(runtime, actor), parseDailyUsageQuery(query))
       )
     } catch (error) {
       if (error instanceof UsageValidationError) {
@@ -61,7 +66,7 @@ export async function usageJsonResponse(
   if (groupBy === 'model') {
     try {
       return jsonResponse(
-        buildModelUsageResponse(await usageRecords(runtime), parseModelUsageQuery(query))
+        buildModelUsageResponse(await usageRecords(runtime, actor), parseModelUsageQuery(query))
       )
     } catch (error) {
       if (error instanceof UsageValidationError) {
@@ -73,7 +78,7 @@ export async function usageJsonResponse(
   if (groupBy !== 'runtime') {
     return jsonResponse({ code: 'validation_error', message: `unsupported usage grouping: ${groupBy}` }, 400)
   }
-  return jsonResponse(await buildUsageResponse(runtime))
+  return jsonResponse(await buildUsageResponse(runtime, actor))
 }
 
 function queryRecord(request: Request): Record<string, string> {
@@ -90,10 +95,22 @@ function stringParam(input: Record<string, unknown>, key: string): string | unde
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
-async function usageRecords(runtime: ServerRuntime): Promise<ThreadUsageRecord[]> {
+function applyDefaultUsageWindow(query: Record<string, string>, defaultWindow?: string): void {
+  if (!defaultWindow) return
+  const groupBy = stringParam(query, 'group_by')
+  if (groupBy !== 'day' && groupBy !== 'model') return
+  if (stringParam(query, 'from') || stringParam(query, 'to') || stringParam(query, 'window')) return
+  query.window = defaultWindow
+}
+
+async function usageRecords(runtime: ServerRuntime, actor?: AuthActor): Promise<ThreadUsageRecord[]> {
+  const ledgerRecords = await usageRecordsFromLedger(runtime, actor?.userId)
+  const ledgerThreadIds = new Set(ledgerRecords.map((record) => record.threadId))
+
   const records: ThreadUsageRecord[] = []
-  const threadSummaries = await runtime.threadService.list()
+  const threadSummaries = await runtime.threadService.list({ ownerUserId: actor?.userId })
   for (const threadSummary of threadSummaries) {
+    if (ledgerThreadIds.has(threadSummary.id)) continue
     const thread = await runtime.threadService.get(threadSummary.id) ?? { ...threadSummary, turns: [] }
     let latestPersisted = emptyUsageSnapshot()
     const events = await runtime.sessionStore.loadEventsSince(thread.id, 0)
@@ -124,7 +141,69 @@ async function usageRecords(runtime: ServerRuntime): Promise<ThreadUsageRecord[]
       })
     }
   }
+  return [...ledgerRecords, ...records]
+}
+
+async function usageRecordsFromLedger(runtime: ServerRuntime, userId?: string): Promise<ThreadUsageRecord[]> {
+  const store = runtime.kworksUserDataStore
+  if (!store?.listUsageEvents) return []
+  const events = await store.listUsageEvents(userId)
+  return usageLedgerEventsToRecords(events)
+}
+
+function usageLedgerEventsToRecords(events: KWorksUsageEventRecord[]): ThreadUsageRecord[] {
+  const records: ThreadUsageRecord[] = []
+  let currentThreadId = ''
+  let latestPersisted = emptyUsageSnapshot()
+  for (const event of [...events].sort(compareUsageLedgerEvents)) {
+    if (event.threadId !== currentThreadId) {
+      currentThreadId = event.threadId
+      latestPersisted = emptyUsageSnapshot()
+    }
+    const delta = diffUsage(event.usage, latestPersisted)
+    latestPersisted = event.usage
+    if (!hasUsage(delta)) continue
+    records.push({
+      threadId: event.threadId,
+      model: event.model?.trim() || 'unknown',
+      completedAt: event.timestamp,
+      usage: delta
+    })
+  }
   return records
+}
+
+function compareUsageLedgerEvents(a: KWorksUsageEventRecord, b: KWorksUsageEventRecord): number {
+  return a.threadId.localeCompare(b.threadId) || a.seq - b.seq
+}
+
+function mergeUsageSnapshots(snapshots: UsageSnapshot[]): UsageSnapshot {
+  const total = emptyUsageSnapshot()
+  for (const usage of snapshots) {
+    total.promptTokens += usage.promptTokens
+    total.completionTokens += usage.completionTokens
+    total.totalTokens += usage.totalTokens
+    total.cachedTokens = (total.cachedTokens ?? 0) + (usage.cachedTokens ?? 0)
+    total.cacheHitTokens = (total.cacheHitTokens ?? 0) + (usage.cacheHitTokens ?? 0)
+    total.cacheMissTokens = (total.cacheMissTokens ?? 0) + (usage.cacheMissTokens ?? 0)
+    total.turns += usage.turns
+    if (usage.costUsd !== undefined) total.costUsd = (total.costUsd ?? 0) + usage.costUsd
+    if (usage.costCny !== undefined) total.costCny = (total.costCny ?? 0) + usage.costCny
+    if (usage.cacheSavingsUsd !== undefined) total.cacheSavingsUsd = (total.cacheSavingsUsd ?? 0) + usage.cacheSavingsUsd
+    if (usage.cacheSavingsCny !== undefined) total.cacheSavingsCny = (total.cacheSavingsCny ?? 0) + usage.cacheSavingsCny
+    if (usage.tokenEconomySavingsTokens !== undefined) {
+      total.tokenEconomySavingsTokens = (total.tokenEconomySavingsTokens ?? 0) + usage.tokenEconomySavingsTokens
+    }
+    if (usage.tokenEconomySavingsUsd !== undefined) {
+      total.tokenEconomySavingsUsd = (total.tokenEconomySavingsUsd ?? 0) + usage.tokenEconomySavingsUsd
+    }
+    if (usage.tokenEconomySavingsCny !== undefined) {
+      total.tokenEconomySavingsCny = (total.tokenEconomySavingsCny ?? 0) + usage.tokenEconomySavingsCny
+    }
+    total.hasError ||= usage.hasError
+  }
+  total.cacheHitRate = total.promptTokens > 0 ? (total.cacheHitTokens ?? 0) / total.promptTokens : null
+  return total
 }
 
 function usageRecordModel(

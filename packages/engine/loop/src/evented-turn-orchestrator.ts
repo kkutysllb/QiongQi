@@ -69,6 +69,7 @@ export class EventedTurnOrchestrator {
       ids: opts.ids,
       nowIso: opts.nowIso,
       memoryStoreEnabled: Boolean(opts.memoryStore),
+      ...(opts.runtimeDataDir ? { runtimeDataDir: opts.runtimeDataDir } : {}),
       ...(opts.toolStorm ? { toolStorm: opts.toolStorm } : {}),
       ...(opts.onPlanWritten ? { onPlanWritten: opts.onPlanWritten } : {})
     })
@@ -96,6 +97,7 @@ export class EventedTurnOrchestrator {
       ...(opts.skillRuntime ? { skillRuntime: opts.skillRuntime } : {}),
       ...(opts.skillPluginHost ? { skillPluginHost: opts.skillPluginHost } : {}),
       ...(opts.attachmentStore ? { attachmentStore: opts.attachmentStore } : {}),
+      ...(opts.runtimeDataDir ? { runtimeDataDir: opts.runtimeDataDir } : {}),
       ...(opts.memoryStore ? { memoryStore: opts.memoryStore } : {}),
       ...(opts.tokenEconomy ? { tokenEconomy: opts.tokenEconomy } : {}),
       ...(opts.contextCompaction ? { contextCompaction: opts.contextCompaction } : {}),

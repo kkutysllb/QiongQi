@@ -18,6 +18,7 @@ const MS_PER_DAY = 86_400_000
  */
 export class FileSessionStore implements SessionStore {
   private readonly dataDir: string
+  private readonly itemMutationQueues = new Map<string, Promise<void>>()
   private readonly usageEventCompaction: {
     maxBytes: number
     retentionDays: number
@@ -63,6 +64,34 @@ export class FileSessionStore implements SessionStore {
     await appendFile(path, `${JSON.stringify(item)}\n`, 'utf-8')
   }
 
+  async appendItemOnce(
+    threadId: string,
+    item: TurnItem
+  ): Promise<{ item: TurnItem; created: boolean }> {
+    let canonical: TurnItem | undefined
+    let created = false
+    const previous = this.itemMutationQueues.get(threadId) ?? Promise.resolve()
+    const run = previous.catch(() => undefined).then(async () => {
+      const raw = await readJsonl<TurnItem>(this.messagesPath(threadId))
+      canonical = [...raw].reverse().find((existing) => existing.id === item.id)
+      if (canonical) return
+      await this.appendItem(threadId, item)
+      canonical = item
+      created = true
+    })
+    const guard = run.then(() => undefined, () => undefined)
+    this.itemMutationQueues.set(threadId, guard)
+    try {
+      await run
+      if (!canonical) throw new Error('appendItemOnce completed without a canonical item')
+      return { item: canonical, created }
+    } finally {
+      if (this.itemMutationQueues.get(threadId) === guard) {
+        this.itemMutationQueues.delete(threadId)
+      }
+    }
+  }
+
   async rewriteItems(threadId: string, items: TurnItem[]): Promise<void> {
     await this.ensureDir(this.threadDir(threadId))
     const contents = items.map((item) => JSON.stringify(item)).join('\n')
@@ -79,6 +108,42 @@ export class FileSessionStore implements SessionStore {
     return updated
   }
 
+  async updateItemOnce(
+    threadId: string,
+    itemId: string,
+    patch: Partial<TurnItem>
+  ): Promise<{ item: TurnItem; updated: boolean } | null> {
+    let outcome: { item: TurnItem; updated: boolean } | null | undefined
+    const previous = this.itemMutationQueues.get(threadId) ?? Promise.resolve()
+    const run = previous.catch(() => undefined).then(async () => {
+      const raw = await readJsonl<TurnItem>(this.messagesPath(threadId))
+      const current = [...raw].reverse().find((item) => item.id === itemId)
+      if (!current) {
+        outcome = null
+        return
+      }
+      const desired = { ...current, ...patch } as TurnItem
+      if (sameItem(current, desired)) {
+        outcome = { item: current, updated: false }
+        return
+      }
+      await this.ensureDir(this.threadDir(threadId))
+      await appendFile(this.messagesPath(threadId), `${JSON.stringify(desired)}\n`, 'utf-8')
+      outcome = { item: desired, updated: true }
+    })
+    const guard = run.then(() => undefined, () => undefined)
+    this.itemMutationQueues.set(threadId, guard)
+    try {
+      await run
+      if (outcome === undefined) throw new Error('updateItemOnce completed without an outcome')
+      return outcome
+    } finally {
+      if (this.itemMutationQueues.get(threadId) === guard) {
+        this.itemMutationQueues.delete(threadId)
+      }
+    }
+  }
+
   async loadEventsSince(threadId: string, sinceSeq: number): Promise<RuntimeEvent[]> {
     const all = await readJsonl<RuntimeEvent>(this.eventsPath(threadId))
     return all
@@ -89,18 +154,14 @@ export class FileSessionStore implements SessionStore {
   async loadItems(threadId: string): Promise<TurnItem[]> {
     const raw = await readJsonl<TurnItem>(this.messagesPath(threadId))
     const latestById = new Map<string, TurnItem>()
+    const order: string[] = []
     for (const item of raw) {
+      if (!latestById.has(item.id)) order.push(item.id)
       latestById.set(item.id, item)
     }
-    const seen = new Set<string>()
-    const ordered: TurnItem[] = []
-    for (let index = raw.length - 1; index >= 0; index -= 1) {
-      const item = raw[index]!
-      if (seen.has(item.id)) continue
-      seen.add(item.id)
-      ordered.unshift(latestById.get(item.id)!)
-    }
-    return ordered
+    return order
+      .map((id) => latestById.get(id))
+      .filter((item): item is TurnItem => item !== undefined)
   }
 
   async loadSession(threadId: string): Promise<AgentSession | null> {
@@ -173,6 +234,10 @@ export class FileSessionStore implements SessionStore {
       return false
     }
   }
+}
+
+function sameItem(left: TurnItem, right: TurnItem): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 function compactUsageEvents(

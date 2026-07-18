@@ -124,6 +124,24 @@ export const ReviewTurnItem = TurnItemBase.extend({
 })
 export type ReviewTurnItem = z.infer<typeof ReviewTurnItem>
 
+export const RuntimeProgressTurnItem = TurnItemBase.extend({
+  kind: z.literal('runtime_progress'),
+  phase: z.enum([
+    'preparing',
+    'executing',
+    'checkpoint',
+    'summarizing',
+    'terminated'
+  ]),
+  summary: z.string().min(1),
+  modelSteps: z.number().int().nonnegative(),
+  toolCalls: z.number().int().nonnegative(),
+  evidenceCount: z.number().int().nonnegative().default(0),
+  artifactCount: z.number().int().nonnegative().default(0),
+  reason: z.string().optional()
+}).strict()
+export type RuntimeProgressTurnItem = z.infer<typeof RuntimeProgressTurnItem>
+
 export const ErrorTurnItem = TurnItemBase.extend({
   kind: z.literal('error'),
   message: z.string(),
@@ -143,6 +161,7 @@ export const TurnItem = z.discriminatedUnion('kind', [
   UserInputTurnItem,
   CompactionTurnItem,
   ReviewTurnItem,
+  RuntimeProgressTurnItem,
   ErrorTurnItem
 ])
 export type TurnItem = z.infer<typeof TurnItem>

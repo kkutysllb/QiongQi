@@ -3,6 +3,12 @@ import type { RunEventStore, RunLeaseStore, RunSnapshotStore } from '@qiongqi/po
 import { productionKernelV3Graph } from './kernel-v3-graph.js'
 import { RuntimeKernel } from './runtime-kernel.js'
 import type { RuntimeNodeHandler } from './runtime-kernel-context.js'
+import { MiddlewareChain } from './middleware-chain.js'
+import { budgetMiddleware } from './middleware/budget-middleware.js'
+import { contextRecoveryMiddleware } from './middleware/context-recovery-middleware.js'
+import { loopGovernorMiddleware } from './middleware/loop-governor-middleware.js'
+import { safetyTerminationMiddleware } from './middleware/safety-termination-middleware.js'
+import { terminalResponseMiddleware } from './middleware/terminal-response-middleware.js'
 
 export type KernelV3TurnRunnerOptions = {
   snapshots: RunSnapshotStore
@@ -18,6 +24,7 @@ export type KernelV3TurnRunnerOptions = {
     outcome: RunOutcome
   ) => Promise<void> | void
   nowIso?: () => string
+  middleware?: MiddlewareChain
 }
 
 export class KernelV3TurnRunner {
@@ -32,6 +39,7 @@ export class KernelV3TurnRunner {
       leases: this.options.leases,
       holderId: this.options.holderId,
       nodes: this.options.nodes,
+      middleware: this.options.middleware ?? defaultKernelV3Middleware(),
       ...(this.options.nowIso ? { nowIso: this.options.nowIso } : {})
     })
     const outcome = await kernel.run(identity)
@@ -39,6 +47,16 @@ export class KernelV3TurnRunner {
     await this.options.finishTurn(threadId, turnId, status, outcome)
     return status
   }
+}
+
+export function defaultKernelV3Middleware(): MiddlewareChain {
+  return new MiddlewareChain([
+    budgetMiddleware({ maxSteps: 96, maxToolCalls: 256, maxTokens: 4_000_000 }),
+    contextRecoveryMiddleware(),
+    terminalResponseMiddleware(),
+    safetyTerminationMiddleware(),
+    loopGovernorMiddleware()
+  ])
 }
 
 function legacyStatus(outcome: RunOutcome): 'completed' | 'failed' | 'aborted' {

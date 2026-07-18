@@ -16,11 +16,19 @@ export async function startTurn(
   turns: TurnService,
   threadId: string,
   request: Request,
-  onStarted?: (response: StartTurnResponse) => void
+  onStarted?: (response: StartTurnResponse) => void,
+  defaultModel?: string
 ): Promise<JsonResponse | Response> {
   const body = await readJsonBody(request)
   if (!body.ok) return body.response
-  const parsed = StartTurnRequest.safeParse(body.value)
+  const value = body.value && typeof body.value === 'object' && !Array.isArray(body.value)
+    ? body.value as Record<string, unknown>
+    : body.value
+  const parsed = StartTurnRequest.safeParse(
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...value, ...(defaultModel && !('model' in value) ? { model: defaultModel } : {}) }
+      : value
+  )
   if (!parsed.success) {
     return ERRORS.validation('invalid start turn body', parsed.error.issues)
   }

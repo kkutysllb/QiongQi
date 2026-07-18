@@ -3,6 +3,7 @@ import type {
   RunOutcome,
   TaskStateV1,
   TaskToolLedgerEntry,
+  ToolObservation,
   ToolEffectPolicy,
   TurnItem
 } from '@qiongqi/contracts'
@@ -22,15 +23,25 @@ import type { PromptBuilder } from './prompt-builder.js'
 import type { RuntimeNodeHandler } from './runtime-kernel-context.js'
 import type { ToolRuntimeV3 } from './tool-runtime-v3.js'
 import { classifyProposal, type ProposalClass } from './proposal-classifier.js'
+import { materializableProposalContent } from './proposal-materializer.js'
 import { renderRecoveryContinuationEntry, transitionContextRecovery } from './context-recovery.js'
 import { migrateLegacyTaskState } from './legacy-task-state-migrator.js'
 import { digestValue } from './effect-commit.js'
+import { projectTaskState } from './task-progress-projector.js'
 
 export type KernelV3NodeDependencies = {
   threadStore: ThreadStore
   sessionStore: SessionStore
   taskStates: TaskStateStore
-  turns: Pick<TurnService, 'getTurn' | 'getAbortController' | 'applyItem' | 'updateItem'>
+  turns: Pick<
+    TurnService,
+    | 'getTurn'
+    | 'getAbortController'
+    | 'applyItem'
+    | 'applyItemOnce'
+    | 'updateItem'
+    | 'updateItemOnce'
+  >
   promptBuilder: Pick<PromptBuilder, 'build'>
   proposalRunner: Pick<ModelProposalRunner, 'run'>
   toolRuntime: Pick<ToolRuntimeV3, 'execute'>
@@ -40,6 +51,7 @@ export type KernelV3NodeDependencies = {
   ) => Promise<ToolHostContext> | ToolHostContext
   ids: Pick<IdGenerator, 'next'>
   nowIso: () => string
+  emitRuntimeProgress?: boolean
 }
 
 type StoredRequest = Omit<Parameters<ModelProposalRunner['run']>[0], 'abortSignal'>
@@ -47,6 +59,31 @@ type StoredRequest = Omit<Parameters<ModelProposalRunner['run']>[0], 'abortSigna
 export function createKernelV3NodeHandlers(
   deps: KernelV3NodeDependencies
 ): Record<string, RuntimeNodeHandler> {
+  const materializeProposal = async (
+    identity: Parameters<RuntimeNodeHandler>[0]['identity'],
+    proposal: ModelProposal
+  ): Promise<void> => {
+    const content = materializableProposalContent(proposal)
+    if (content.reasoning) {
+      await deps.turns.applyItemOnce(identity.threadId, makeAssistantReasoningItem({
+        id: `item_kernel_reasoning_${proposal.proposalId}`,
+        threadId: identity.threadId,
+        turnId: identity.turnId,
+        text: content.reasoning,
+        status: 'completed'
+      }))
+    }
+    if (content.text) {
+      await deps.turns.applyItemOnce(identity.threadId, makeAssistantTextItem({
+        id: `item_kernel_text_${proposal.proposalId}`,
+        threadId: identity.threadId,
+        turnId: identity.turnId,
+        text: content.text,
+        status: 'completed'
+      }))
+    }
+  }
+
   return {
     'prepare-turn': async ({ identity }) => {
       const [thread, turn] = await Promise.all([
@@ -56,6 +93,10 @@ export function createKernelV3NodeHandlers(
       if (!thread || !turn) {
         return { outcome: failedOutcome('turn or thread not found') }
       }
+      await emitProgress(deps, identity, {
+        phase: 'preparing', summary: 'Preparing the task state and execution context.', modelSteps: 0, toolCalls: 0,
+        evidenceCount: 0, artifactCount: 0
+      })
       const owner = thread.ownerUserId ?? 'local-default-owner'
       if (
         owner !== identity.ownerUserId
@@ -176,12 +217,96 @@ export function createKernelV3NodeHandlers(
       value: ModelProposalSchema.parse(requireNodeValue(state, 'invoke-model'))
     }),
 
-    evaluate: ({ state }) => {
+    'account-model': ({ state }) => {
       const task = requireNodeValue<TaskStateV1>(state, 'restore-task')
       const proposal = ModelProposalSchema.parse(requireNodeValue(state, 'normalize-proposal'))
       const proposalClass = classifyProposal({ proposal, task })
+      const inputTokens = proposal.usage?.promptTokens ?? 0
+      const outputTokens = proposal.usage?.completionTokens ?? 0
+      const costUsd = proposal.usage?.costUsd ?? 0
+      const v2Migration = nodeValue<{
+        resumeNodeId: string
+        consumed: boolean
+      }>(state, 'v2-accounting-migration')
+      const v1Migration = nodeValue<{
+        resumeNodeId: string
+        consumed: boolean
+      }>(state, 'v1-accounting-migration')
+      const migration = v2Migration && !v2Migration.consumed
+        ? { nodeId: 'v2-accounting-migration', value: v2Migration }
+        : v1Migration && !v1Migration.consumed
+          ? { nodeId: 'v1-accounting-migration', value: v1Migration }
+          : undefined
+      const migrationCommands = migration
+        ? [
+            {
+              type: 'set-node-data' as const,
+              nodeId: migration.nodeId,
+              value: { ...migration.value, consumed: true }
+            },
+            {
+              type: 'jump' as const,
+              nodeId: migration.value.resumeNodeId,
+              condition: 'next',
+              reason: 'resume migrated production graph after model accounting'
+            }
+          ]
+        : []
+      return {
+        condition: 'next',
+        commands: [
+          {
+            type: 'add-budget',
+            usageId: `model:${proposal.proposalId}`,
+            delta: { stepsUsed: 1, inputTokens, outputTokens, costUsd }
+          },
+          ...migrationCommands
+        ],
+        facts: {
+          proposalClass,
+          stopClass: proposal.stopClass,
+          ...(proposal.providerReason ? { providerReason: proposal.providerReason } : {}),
+          inputTokens,
+          outputTokens,
+          costUsd,
+          proposalHasText: proposal.text.trim().length > 0,
+          hadToolResult: task.toolLedger.length > 0
+        }
+      }
+    },
+
+    evaluate: async ({ identity, state }) => {
+      const task = requireNodeValue<TaskStateV1>(state, 'restore-task')
+      const proposal = ModelProposalSchema.parse(requireNodeValue(state, 'normalize-proposal'))
+      const proposalClass = classifyProposal({ proposal, task })
+      const migration = nodeValue<{
+        sourceNodeId: string
+        preparedCallIds: string[]
+        reconciled: boolean
+        abortFinishedAt: string
+      }>(state, 'v1-proposal-migration')
+      const migrationCommands = migration && !migration.reconciled
+        ? [{
+            type: 'set-node-data' as const,
+            nodeId: 'v1-proposal-migration',
+            value: { ...migration, reconciled: true }
+          }]
+        : []
+      if (migration && !migration.reconciled && proposalClass !== 'tool_intents') {
+        for (const callId of migration.preparedCallIds) {
+          await deps.turns.updateItemOnce(
+            identity.threadId,
+            `item_tool_${identity.turnId}_${callId}`,
+            { status: 'aborted', finishedAt: migration.abortFinishedAt }
+          )
+        }
+      }
       if (proposalClass === 'tool_intents') {
-        return { condition: 'tools', value: { proposalClass, action: 'tools' } }
+        return {
+          condition: 'tools',
+          value: { proposalClass, action: 'tools' },
+          commands: migrationCommands
+        }
       }
       if (
         proposalClass === 'context_discontinuity'
@@ -197,56 +322,65 @@ export function createKernelV3NodeHandlers(
           return {
             value: { proposalClass, action: 'degrade' },
             outcome: transition.outcome,
-            commands: [{ type: 'set-recovery', recovery: transition.recovery }]
+            commands: [
+              ...migrationCommands,
+              { type: 'set-recovery', recovery: transition.recovery } as const
+            ]
           }
         }
         return {
           condition: 'recover',
           value: { proposalClass, action: 'recover' },
-          commands: [{ type: 'set-recovery', recovery: transition.recovery }]
+          commands: [
+            ...migrationCommands,
+            { type: 'set-recovery', recovery: transition.recovery } as const
+          ]
         }
       }
       if (proposalClass === 'safety_or_refusal' || proposalClass === 'protocol_error') {
-        return { condition: 'fatal', value: { proposalClass, action: 'fatal' } }
+        return {
+          condition: 'fatal',
+          value: { proposalClass, action: 'fatal' },
+          commands: migrationCommands
+        }
       }
-      return { condition: 'final', value: { proposalClass, action: 'final' } }
+      return {
+        condition: 'final',
+        value: { proposalClass, action: 'final' },
+        commands: migrationCommands
+      }
     },
 
     'commit-assistant': async ({ identity, state }) => {
       const proposal = ModelProposalSchema.parse(requireNodeValue(state, 'normalize-proposal'))
-      if (proposal.reasoning.trim()) {
-        await deps.turns.applyItem(identity.threadId, makeAssistantReasoningItem({
-          id: `item_kernel_reasoning_${proposal.proposalId}`,
-          threadId: identity.threadId,
-          turnId: identity.turnId,
-          text: proposal.reasoning,
-          status: 'completed'
-        }))
-      }
-      if (proposal.text.trim()) {
-        await deps.turns.applyItem(identity.threadId, makeAssistantTextItem({
-          id: `item_kernel_text_${proposal.proposalId}`,
-          threadId: identity.threadId,
-          turnId: identity.turnId,
-          text: proposal.text,
-          status: 'completed'
-        }))
-      }
+      await materializeProposal(identity, proposal)
+      await emitProgress(deps, identity, {
+        phase: 'terminated', summary: 'Task response completed.', modelSteps: state.budgets.stepsUsed, toolCalls: state.budgets.toolCallsUsed,
+        reason: 'normal_stop'
+      })
       return {
         value: { proposalId: proposal.proposalId },
         outcome: { status: 'completed', reason: 'normal_stop', retryable: false }
       }
     },
 
+    'materialize-proposal': async ({ identity, state }) => {
+      const proposal = ModelProposalSchema.parse(requireNodeValue(state, 'normalize-proposal'))
+      await materializeProposal(identity, proposal)
+      return { condition: 'next', value: { proposalId: proposal.proposalId } }
+    },
+
     'prepare-tools': async ({ identity, state }) => {
       const proposal = ModelProposalSchema.parse(requireNodeValue(state, 'normalize-proposal'))
+      const task = requireNodeValue<TaskStateV1>(state, 'restore-task')
+      const ledgerCallIds = new Set(task.toolLedger.map((entry) => entry.callId))
       const calls: ToolCallLike[] = proposal.toolIntents.map((intent) => ({
         callId: intent.callId,
         toolName: intent.toolName,
         arguments: intent.arguments
       }))
       for (const call of calls) {
-        await deps.turns.applyItem(identity.threadId, makeToolCallItem({
+        await deps.turns.applyItemOnce(identity.threadId, makeToolCallItem({
           id: `item_tool_${identity.turnId}_${call.callId}`,
           threadId: identity.threadId,
           turnId: identity.turnId,
@@ -256,16 +390,33 @@ export function createKernelV3NodeHandlers(
           status: 'running'
         }))
       }
-      return { condition: 'next', value: { calls } }
+      const unledgeredCallIds = calls
+        .filter((call) => !ledgerCallIds.has(call.callId))
+        .map((call) => call.callId)
+      return {
+        condition: 'next',
+        value: { calls },
+        commands: unledgeredCallIds.length > 0
+          ? [{
+              type: 'add-budget' as const,
+              usageId: `tools:${digestValue({
+                proposalId: proposal.proposalId,
+                callIds: unledgeredCallIds
+              })}`,
+              delta: { toolCallsUsed: unledgeredCallIds.length }
+            }]
+          : []
+      }
     },
 
-    'commit-tools': async ({ identity, state }) => {
+    'commit-tools': async ({ identity, state, leaseFence }) => {
       const prepared = requireNodeValue<{ calls: ToolCallLike[] }>(state, 'prepare-tools')
       const built = requireNodeValue<{
         toolPolicies?: Record<string, ToolEffectPolicy | undefined>
       }>(state, 'build-context')
       let runtimeState = state
       const ledger: TaskToolLedgerEntry[] = []
+      const observations: ToolObservation[] = []
       const toolContext = await deps.createToolContext(identity, state)
       for (const call of prepared.calls) {
         const execution = await deps.toolRuntime.execute({
@@ -279,10 +430,12 @@ export function createKernelV3NodeHandlers(
             runtimeStateSink: (next) => { runtimeState = next }
           },
           policy: built.toolPolicies?.[call.toolName] ?? defaultEffectPolicy(call)
+          , leaseFence
         })
         runtimeState = execution.state
         if (execution.outcome) return { outcome: execution.outcome }
         if (!execution.result) return { outcome: failedOutcome(`tool result missing: ${call.callId}`) }
+        if (execution.observation) observations.push(execution.observation)
         await deps.turns.updateItem(identity.threadId, `item_tool_${identity.turnId}_${call.callId}`, {
           status: execution.result.item.kind === 'tool_result' && execution.result.item.isError
             ? 'failed'
@@ -310,7 +463,7 @@ export function createKernelV3NodeHandlers(
       await deps.taskStates.commit(revision)
       return {
         condition: 'tools_committed',
-        value: { callIds: ledger.map((entry) => entry.callId), taskRevision: nextTask.revision },
+        value: { callIds: ledger.map((entry) => entry.callId), taskRevision: nextTask.revision, observations },
         commands: [
           { type: 'set-task-revision', revision: nextTask.revision },
           { type: 'set-node-data', nodeId: 'restore-task', value: nextTask },
@@ -320,6 +473,71 @@ export function createKernelV3NodeHandlers(
             committedEffects: runtimeState.committedEffects
           }
         ]
+      }
+    },
+
+    'project-progress': async ({ identity, state }) => {
+      const task = requireNodeValue<TaskStateV1>(state, 'restore-task')
+      const commit = requireNodeValue<{ observations?: ToolObservation[] }>(state, 'commit-tools')
+      const thread = await deps.threadStore.get(identity.threadId)
+      const projection = projectTaskState(task, {
+        todos: thread?.todos?.items?.map((todo) => ({ id: todo.id, content: todo.content, status: todo.status })),
+        observations: commit.observations ?? [],
+        nowIso: deps.nowIso
+      })
+      await emitProgress(deps, identity, {
+        phase: 'executing',
+        summary: projection.digest.level === 'none' ? 'Executing the next task action.' : 'New evidence or task progress recorded.',
+        modelSteps: state.budgets.stepsUsed,
+        toolCalls: state.budgets.toolCallsUsed,
+        evidenceCount: projection.state.progress?.evidenceCount ?? 0,
+        artifactCount: projection.state.artifacts.length
+      })
+      if (projection.digest.level !== 'none') {
+        const prepared = await deps.taskStates.prepare(projection.state, task.revision)
+        try {
+          await deps.taskStates.commit(prepared)
+        } catch (error) {
+          await deps.taskStates.abort(prepared).catch(() => undefined)
+          throw error
+        }
+      }
+      return {
+        condition: 'next',
+        value: projection.state,
+        facts: {
+          observations: commit.observations ?? [],
+          progressLevel: projection.digest.level,
+          progressDigest: projection.digest.value,
+          evidenceCount: projection.state.progress?.evidenceCount ?? 0,
+          artifactCount: projection.state.artifacts.length
+        },
+        commands: projection.digest.level === 'none'
+          ? []
+          : [
+              { type: 'set-task-revision' as const, revision: projection.state.revision },
+              { type: 'set-node-data' as const, nodeId: 'restore-task', value: projection.state }
+            ]
+      }
+    },
+
+    'govern-progress': () => ({ condition: 'progress_checked', value: { checked: true } }),
+
+    'progress-checkpoint': async ({ identity, state }) => {
+      await emitProgress(deps, identity, {
+        phase: 'checkpoint',
+        summary: 'A progress checkpoint was reached; the next model step must summarize existing evidence or finish.',
+        modelSteps: state.budgets.stepsUsed,
+        toolCalls: state.budgets.toolCallsUsed,
+        reason: 'no_progress_window'
+      })
+      return {
+        condition: 'checkpointed',
+        value: {
+          taskRevision: requireNodeValue<TaskStateV1>(state, 'restore-task').revision,
+          message: 'Checkpointed after a no-progress window; summarize existing evidence before taking another action.'
+        },
+        facts: { checkpointCompleted: true }
       }
     },
 
@@ -399,4 +617,47 @@ function updateTaskLedger(
     toolLedger: [...byCall.values()],
     updatedAt
   }
+}
+
+async function emitProgress(
+  deps: KernelV3NodeDependencies,
+  identity: Parameters<RuntimeNodeHandler>[0]['identity'],
+  input: {
+    phase: 'preparing' | 'executing' | 'checkpoint' | 'summarizing' | 'terminated'
+    summary: string
+    modelSteps: number
+    toolCalls: number
+    evidenceCount?: number
+    artifactCount?: number
+    reason?: string
+  }
+): Promise<void> {
+  if (!deps.emitRuntimeProgress) return
+  const id = `item_kernel_progress_${identity.runId}`
+  await deps.turns.applyItemOnce(identity.threadId, {
+    id,
+    turnId: identity.turnId,
+    threadId: identity.threadId,
+    role: 'system',
+    status: 'running',
+    kind: 'runtime_progress',
+    createdAt: deps.nowIso(),
+    phase: input.phase,
+    summary: input.summary,
+    modelSteps: input.modelSteps,
+    toolCalls: input.toolCalls,
+    evidenceCount: input.evidenceCount ?? 0,
+    artifactCount: input.artifactCount ?? 0,
+    ...(input.reason ? { reason: input.reason } : {})
+  })
+  await deps.turns.updateItemOnce(identity.threadId, id, {
+    status: input.phase === 'terminated' ? 'completed' : 'running',
+    phase: input.phase,
+    summary: input.summary,
+    modelSteps: input.modelSteps,
+    toolCalls: input.toolCalls,
+    evidenceCount: input.evidenceCount ?? 0,
+    artifactCount: input.artifactCount ?? 0,
+    ...(input.reason ? { reason: input.reason } : {})
+  } as never)
 }

@@ -1,4 +1,5 @@
-import type { ThreadRecord, ThreadStatus } from '@qiongqi/contracts'
+import { createHash } from 'node:crypto'
+import type { ThreadRecord } from '@qiongqi/contracts'
 import type { CompactRequest, CompactResponse, StartTurnRequest, StartTurnResponse, Turn, TurnStatus } from '@qiongqi/contracts'
 import type { TurnItem } from '@qiongqi/contracts'
 import type { SessionStore } from '@qiongqi/ports'
@@ -10,6 +11,7 @@ import type { ContextCompactor } from '@qiongqi/loop'
 import { makeUserItem, makeErrorItem } from '@qiongqi/domain'
 import { appendTurnItem, createTurnRecord, finishTurn, replaceTurnItem, startTurn as startTurnRecord } from '@qiongqi/domain'
 import { touchThread } from '@qiongqi/domain'
+import { deriveThreadTitle, isDefaultThreadTitle } from '@qiongqi/domain'
 import type { RuntimeEventRecorder } from './runtime-event-recorder.js'
 
 export type TurnServiceDeps = {
@@ -33,6 +35,8 @@ export class TurnService {
   private readonly deps: TurnServiceDeps
   private readonly inflightTurns = new Map<string, AbortController>()
   private readonly threadMutationQueues = new Map<string, Promise<void>>()
+  private readonly itemCreationQueues = new Map<string, Promise<void>>()
+  private readonly itemUpdateQueues = new Map<string, Promise<void>>()
 
   constructor(deps: TurnServiceDeps) {
     this.deps = deps
@@ -45,6 +49,7 @@ export class TurnService {
     const thread = await this.deps.threadStore.get(input.threadId)
     if (!thread) throw new Error(`thread not found: ${input.threadId}`)
     const turnId = this.deps.ids.next('turn')
+    const workModeId = input.request.workModeId ?? thread.workModeId ?? 'office'
     const turn = createTurnRecord({
       id: turnId,
       threadId: input.threadId,
@@ -52,6 +57,7 @@ export class TurnService {
       model: input.request.model,
       reasoningEffort: input.request.reasoningEffort,
       attachmentIds: input.request.attachmentIds ?? [],
+      workModeId,
       guiPlan: input.request.guiPlan,
       mode: input.request.mode
     })
@@ -64,11 +70,27 @@ export class TurnService {
       attachmentIds: input.request.attachmentIds ?? []
     })
     const controller = new AbortController()
-    await this.upsertThread(input.threadId, (current) => ({
-      ...touchThread(current, this.deps.nowIso()),
-      status: 'running',
-      turns: [...current.turns, startTurnRecord(appendTurnItem(turn, userItem))]
-    }))
+    let titleUpdate: string | null = null
+    await this.upsertThread(input.threadId, (current) => {
+      const titlePatch = deriveFirstTurnTitlePatch(current, input.request.prompt)
+      if (titlePatch.title) titleUpdate = titlePatch.title
+      return {
+        ...touchThread(current, this.deps.nowIso()),
+        ...titlePatch,
+        ...(input.request.approvalPolicy ? { approvalPolicy: input.request.approvalPolicy } : {}),
+        ...(input.request.sandboxMode ? { sandboxMode: input.request.sandboxMode } : {}),
+        status: 'running',
+        turns: [...current.turns, startTurnRecord(appendTurnItem(turn, userItem))]
+      }
+    })
+    if (titleUpdate) {
+      await this.deps.events.record({
+        kind: 'thread_updated',
+        threadId: input.threadId,
+        title: titleUpdate,
+        status: 'running'
+      })
+    }
     await this.deps.sessionStore.appendItem(input.threadId, userItem)
     await this.deps.events.record({
       kind: 'turn_started',
@@ -285,6 +307,34 @@ export class TurnService {
     })
   }
 
+  /** Persist and announce a creation only when the stable item id is absent. */
+  async applyItemOnce(threadId: string, item: TurnItem): Promise<boolean> {
+    let createdInSession = false
+    const previous = this.itemCreationQueues.get(threadId) ?? Promise.resolve()
+    const run = previous.catch(() => undefined).then(async () => {
+      const persisted = await this.deps.sessionStore.appendItemOnce(threadId, item)
+      createdInSession = persisted.created
+      await this.projectItem(threadId, persisted.item)
+      await this.deps.events.recordOnce({
+        kind: 'item_created',
+        threadId,
+        turnId: persisted.item.turnId,
+        itemId: persisted.item.id,
+        item: persisted.item
+      }, (event) => event.kind === 'item_created' && event.itemId === persisted.item.id)
+    })
+    const guard = run.then(() => undefined, () => undefined)
+    this.itemCreationQueues.set(threadId, guard)
+    try {
+      await run
+      return createdInSession
+    } finally {
+      if (this.itemCreationQueues.get(threadId) === guard) {
+        this.itemCreationQueues.delete(threadId)
+      }
+    }
+  }
+
   async updateItem(
     threadId: string,
     itemId: string,
@@ -313,8 +363,51 @@ export class TurnService {
     return updated
   }
 
+  async updateItemOnce(
+    threadId: string,
+    itemId: string,
+    patch: Partial<TurnItem>
+  ): Promise<{ item: TurnItem; updated: boolean } | null> {
+    let outcome: { item: TurnItem; updated: boolean } | null | undefined
+    const previous = this.itemUpdateQueues.get(threadId) ?? Promise.resolve()
+    const run = previous.catch(() => undefined).then(async () => {
+      const persisted = await this.deps.sessionStore.updateItemOnce(threadId, itemId, patch)
+      if (!persisted) {
+        outcome = null
+        return
+      }
+      await this.projectItem(threadId, persisted.item)
+      const digest = canonicalItemDigest(persisted.item)
+      await this.deps.events.recordOnce({
+        kind: 'item_updated',
+        threadId,
+        turnId: persisted.item.turnId,
+        itemId: persisted.item.id,
+        item: persisted.item
+      }, (event) => event.kind === 'item_updated'
+        && event.itemId === persisted.item.id
+        && canonicalItemDigest(event.item) === digest)
+      outcome = persisted
+    })
+    const guard = run.then(() => undefined, () => undefined)
+    this.itemUpdateQueues.set(threadId, guard)
+    try {
+      await run
+      if (outcome === undefined) throw new Error('updateItemOnce completed without an outcome')
+      return outcome
+    } finally {
+      if (this.itemUpdateQueues.get(threadId) === guard) {
+        this.itemUpdateQueues.delete(threadId)
+      }
+    }
+  }
+
   private async appendItem(threadId: string, item: TurnItem): Promise<void> {
     await this.deps.sessionStore.appendItem(threadId, item)
+    await this.projectItem(threadId, item)
+  }
+
+  private async projectItem(threadId: string, item: TurnItem): Promise<void> {
     await this.upsertThread(threadId, (current) => {
       const turn = current.turns.find((t) => t.id === item.turnId)
       if (!turn) return current
@@ -391,4 +484,24 @@ export class TurnService {
   private isSystemOnly(item: TurnItem): boolean {
     return item.kind === 'compaction' || item.kind === 'error'
   }
+}
+
+function canonicalItemDigest(item: TurnItem): string {
+  return createHash('sha256').update(JSON.stringify(canonicalize(item))).digest('hex')
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(
+    Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => [key, canonicalize((value as Record<string, unknown>)[key])])
+  )
+}
+
+function deriveFirstTurnTitlePatch(thread: ThreadRecord, prompt: string): { title?: string } {
+  if (thread.turns.length > 0 || !isDefaultThreadTitle(thread.title)) return {}
+  const title = deriveThreadTitle(prompt)
+  return title !== thread.title ? { title } : {}
 }

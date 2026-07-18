@@ -40,6 +40,12 @@ export function createLsLocalTool(options: LsLocalToolOptions = {}): LocalTool {
       additionalProperties: false
     },
     policy: 'auto',
+    capabilityClass: 'file.list',
+    semantic: (args, context) => {
+      const rawPath = typeof args.path === 'string' && args.path.trim() ? args.path : '.'
+      const { absolutePath } = resolveWorkspacePath(rawPath, context)
+      return { capabilityClass: 'file.list', resourceKeys: [absolutePath] }
+    },
     execute: async (args, context) => withToolBoundary(async () => {
       const rawPath = typeof args.path === 'string' && args.path.trim() ? args.path : '.'
       const limit = normalizePositiveInteger(args.limit, options.defaultLimit ?? DEFAULT_LIST_LIMIT)
@@ -90,6 +96,12 @@ export function createFindLocalTool(options: FindLocalToolOptions = {}): LocalTo
       additionalProperties: false
     },
     policy: 'auto',
+    capabilityClass: 'file.search',
+    semantic: (args, context) => {
+      const rawPath = typeof args.path === 'string' && args.path.trim() ? args.path : '.'
+      const { absolutePath } = resolveWorkspacePath(rawPath, context)
+      return { capabilityClass: 'file.search', resourceKeys: [absolutePath] }
+    },
     execute: async (args, context) => withToolBoundary(async () => {
       const pattern = typeof args.pattern === 'string' ? args.pattern.trim() : ''
       if (!pattern) return { output: { error: 'pattern is required' }, isError: true }
@@ -197,6 +209,12 @@ export function createGrepLocalTool(options: GrepLocalToolOptions = {}): LocalTo
       additionalProperties: false
     },
     policy: 'auto',
+    capabilityClass: 'file.search',
+    semantic: (args, context) => {
+      const rawPath = typeof args.path === 'string' && args.path.trim() ? args.path : '.'
+      const { absolutePath } = resolveWorkspacePath(rawPath, context)
+      return { capabilityClass: 'file.search', resourceKeys: [absolutePath] }
+    },
     execute: async (args, context) => withToolBoundary(async () => {
       const pattern = typeof args.pattern === 'string' ? args.pattern : ''
       if (!pattern.trim()) return { output: { error: 'pattern is required' }, isError: true }

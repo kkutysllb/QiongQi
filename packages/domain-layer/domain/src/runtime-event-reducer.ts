@@ -356,6 +356,7 @@ function appendDelta(existing: TurnItem, delta: TurnItem): TurnItem {
     return {
       ...existing,
       text: `${existing.text}${delta.text}`,
+      ...(delta.kind === 'assistant_reasoning' && delta.signature ? { signature: delta.signature } : {}),
       status: delta.status,
       finishedAt: delta.finishedAt ?? existing.finishedAt
     }

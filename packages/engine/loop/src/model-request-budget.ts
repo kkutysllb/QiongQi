@@ -96,6 +96,8 @@ function clipItemForBudget(item: TurnItem, budgetTokens: number): TurnItem | nul
         reviewText: clipTextForBudget(item.reviewText ?? stringifyForBudget(item.output), safeBudget),
         output: undefined
       }
+    case 'runtime_progress':
+      return item
     case 'approval':
       return {
         ...item,

@@ -35,6 +35,7 @@ export type RuntimeEventRecorderOptions = {
  */
 export class RuntimeEventRecorder {
   private readonly options: RuntimeEventRecorderOptions
+  private readonly recordOnceQueues = new Map<string, Promise<void>>()
 
   constructor(options: RuntimeEventRecorderOptions) {
     this.options = options
@@ -54,6 +55,30 @@ export class RuntimeEventRecorder {
       await this.options.usageSink?.(event)
     }
     return event
+  }
+
+  async recordOnce(
+    draft: RuntimeEventDraft,
+    matches: (event: RuntimeEvent) => boolean
+  ): Promise<RuntimeEvent> {
+    let recorded: RuntimeEvent | undefined
+    const previous = this.recordOnceQueues.get(draft.threadId) ?? Promise.resolve()
+    const run = previous.catch(() => undefined).then(async () => {
+      const existing = (await this.options.sessionStore.loadEventsSince(draft.threadId, 0))
+        .find(matches)
+      recorded = existing ?? await this.record(draft)
+    })
+    const guard = run.then(() => undefined, () => undefined)
+    this.recordOnceQueues.set(draft.threadId, guard)
+    try {
+      await run
+      if (!recorded) throw new Error('recordOnce completed without an event')
+      return recorded
+    } finally {
+      if (this.recordOnceQueues.get(draft.threadId) === guard) {
+        this.recordOnceQueues.delete(draft.threadId)
+      }
+    }
   }
 
   async recordKernelEvent(event: RunEventEnvelope): Promise<RunEventEnvelope> {

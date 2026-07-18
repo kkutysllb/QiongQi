@@ -270,6 +270,8 @@ function routerTextForItem(item: TurnItem): string {
       return `[user input] ${item.prompt}`
     case 'review':
       return `[review] ${item.title} ${item.reviewText ?? ''}`
+    case 'runtime_progress':
+      return ''
     case 'error':
       return `[error] ${item.message}`
   }

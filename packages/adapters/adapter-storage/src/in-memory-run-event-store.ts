@@ -1,5 +1,5 @@
 import { RunEventEnvelopeSchema, encodeScopeKey, type RunEventEnvelope, type RunIdentity } from '@qiongqi/contracts'
-import type { RunEventStore } from '@qiongqi/ports'
+import type { LeaseFence, RunEventStore } from '@qiongqi/ports'
 
 function eventKey(event: RunEventEnvelope): string {
   return encodeScopeKey({
@@ -25,10 +25,16 @@ function identityKey(identity: RunIdentity): string {
 
 export class InMemoryRunEventStore implements RunEventStore {
   private readonly events = new Map<string, RunEventEnvelope[]>()
+  private readonly epochs = new Map<string, number>()
 
-  async append(input: RunEventEnvelope): Promise<RunEventEnvelope> {
+  async append(input: RunEventEnvelope, fence?: LeaseFence): Promise<RunEventEnvelope> {
     const event = RunEventEnvelopeSchema.parse(input)
     const key = eventKey(event)
+    if (fence) {
+      const knownEpoch = this.epochs.get(key)
+      if (knownEpoch !== undefined && fence.epoch < knownEpoch) throw new Error('runtime event write rejected by stale lease fence')
+      this.epochs.set(key, fence.epoch)
+    }
     const list = this.events.get(key) ?? []
     const existing = list.find((candidate) => candidate.eventId === event.eventId)
     if (existing) return structuredClone(existing)

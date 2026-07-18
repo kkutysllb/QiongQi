@@ -3,7 +3,6 @@ import { jsonResponse, type JsonResponse } from '../response.js'
 import { readJsonBody } from '../read-json-body.js'
 import { ERRORS } from './runtime-error.js'
 import type { UserInputGate } from '@qiongqi/ports'
-import type { RuntimeEventRecorder } from '@qiongqi/services'
 
 const UserInputAnswerSchema = z.object({
   id: z.string().min(1),
@@ -20,7 +19,6 @@ export async function resolveUserInput(input: {
   inputId: string
   request: Request
   gate: UserInputGate
-  events: RuntimeEventRecorder
 }): Promise<JsonResponse | Response> {
   const body = await readJsonBody(input.request)
   if (!body.ok) return body.response
@@ -39,15 +37,6 @@ export async function resolveUserInput(input: {
   if (!ok) {
     return ERRORS.conflict(`user input already resolved: ${input.inputId}`)
   }
-  await input.events.record({
-    kind: 'user_input_resolved',
-    threadId: pending.threadId,
-    turnId: pending.turnId,
-    itemId: pending.itemId,
-    inputId: pending.id,
-    status: resolution.status,
-    prompt: pending.prompt
-  })
   return jsonResponse({
     inputId: input.inputId,
     status: resolution.status,

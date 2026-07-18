@@ -63,16 +63,43 @@ export function resolveWorkspacePath(inputPath: string, context: ToolHostContext
   relativePath: string
 } {
   const root = workspaceRoot(context.workspace)
-  const absolutePath = isAbsolute(inputPath) ? resolve(inputPath) : resolve(root, inputPath)
+  // If the agent uses a well-known non-workspace path (/tmp, /mnt, etc.),
+  // redirect it into the workspace by taking just the basename. This is
+  // more user-friendly than throwing — the agent often picks /tmp/ because
+  // it doesn't know the workspace root, and the error confuses it.
+  const sanitized = sanitizePathForWorkspace(inputPath)
+  const absolutePath = isAbsolute(sanitized) ? resolve(sanitized) : resolve(root, sanitized)
   const relativePath = relative(root, absolutePath)
   if (relativePath === '..' || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
-    throw new Error(`path escapes the workspace root: ${inputPath}`)
+    // Last-resort fallback: place the file in the workspace root by basename.
+    const basename = sanitized.split(/[/\\]/).pop() || 'output.txt'
+    return {
+      workspaceRoot: root,
+      absolutePath: resolve(root, basename),
+      relativePath: basename
+    }
   }
   return {
     workspaceRoot: root,
     absolutePath,
     relativePath: relativePath || '.'
   }
+}
+
+/**
+ * If the path points to a well-known non-workspace directory (/tmp, /mnt,
+ * /var, etc.), strip the directory prefix and keep only the filename so the
+ * file lands inside the workspace root. This prevents 403 errors when the
+ * agent tries to read back a file it wrote outside the sandbox.
+ */
+function sanitizePathForWorkspace(inputPath: string): string {
+  const trimmed = inputPath.trim()
+  // Match /tmp/, /mnt/, /var/, /private/tmp/, etc.
+  if (/^\/(tmp|mnt|var|private\/tmp)\//.test(trimmed)) {
+    const basename = trimmed.split(/[/\\]/).pop()
+    if (basename) return basename
+  }
+  return trimmed
 }
 
 export function isBinaryBuffer(buffer: Buffer): boolean {

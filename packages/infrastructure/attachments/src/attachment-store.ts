@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { AttachmentsCapabilityConfig } from '@qiongqi/contracts'
 import type { AttachmentDiagnostics, AttachmentMetadata, AttachmentTextFallback } from '@qiongqi/contracts'
 import { AttachmentMetadata as AttachmentMetadataSchema } from '@qiongqi/contracts'
+import { defaultSharpImageTransform, isImageMimeType } from './image-transform.js'
+import type { ImageTransform } from './image-transform.js'
 
 export type AttachmentContent = AttachmentMetadata & {
   data: Buffer
@@ -24,6 +26,7 @@ export interface AttachmentStore {
     AttachmentsCapabilityConfig,
     'textFallbackMaxBase64Bytes' | 'textFallbackMaxImageDimension' | 'textFallbackPreferredMimeType'
   >
+  imageFallbackPolicy(): Pick<AttachmentsCapabilityConfig, 'textFallbackMaxImageDimension' | 'textFallbackPreferredMimeType'>
   diagnostics(): Promise<AttachmentDiagnostics>
 }
 
@@ -33,6 +36,7 @@ export class FileAttachmentStore implements AttachmentStore {
       rootDir: string
       config: AttachmentsCapabilityConfig
       nowIso?: () => string
+      imageTransform?: ImageTransform
     }
   ) {}
 
@@ -45,47 +49,114 @@ export class FileAttachmentStore implements AttachmentStore {
     workspace?: string
   }): Promise<AttachmentMetadata> {
     await mkdir(this.options.rootDir, { recursive: true })
-    const image = detectImage(input.data)
-    if (!image) throw new Error('unsupported image MIME type')
-    if (input.mimeType && input.mimeType !== image.mimeType) throw new Error('declared MIME type does not match image content')
-    if (!this.options.config.allowedMimeTypes.includes(image.mimeType)) throw new Error(`image MIME type is not allowed: ${image.mimeType}`)
-    if (input.data.byteLength > this.options.config.maxImageBytes) throw new Error(`image exceeds ${this.options.config.maxImageBytes} byte limit`)
-    const maxDimension = Math.max(image.width ?? 0, image.height ?? 0)
-    if (maxDimension > this.options.config.maxImageDimension) {
-      throw new Error(`image exceeds ${this.options.config.maxImageDimension}px dimension limit`)
+
+    // Resolve the declared MIME first. We trust magic bytes for images so that
+    // a mislabeled upload (e.g. a PNG with application/octet-stream) still gets
+    // the correct type; for everything else we trust the declared MIME or
+    // infer it from the filename.
+    const detected = detectImage(input.data)
+    const declaredMimeType = input.mimeType ?? mimeTypeFromName(input.name)
+
+    if (detected) {
+      // Genuine image bytes. Reconcile with the declared MIME: a JPEG labeled
+      // image/jpg (non-standard alias) is fine, but a PNG labeled image/jpeg
+      // means the bytes and metadata disagree.
+      if (declaredMimeType && isImageMimeType(declaredMimeType) && declaredMimeType !== detected.mimeType && !isImageAlias(declaredMimeType, detected.mimeType)) {
+        throw new Error(`declared MIME type ${declaredMimeType} does not match image content (${detected.mimeType})`)
+      }
+      const image = detected
+      if (!this.options.config.allowedMimeTypes.includes(image.mimeType)) throw new Error(`MIME type is not allowed: ${image.mimeType}`)
+      if (input.data.byteLength > this.options.config.maxImageBytes) throw new Error(`image exceeds ${this.options.config.maxImageBytes} byte limit`)
+      const maxDimension = Math.max(image.width ?? 0, image.height ?? 0)
+      if (maxDimension > this.options.config.maxImageDimension) {
+        throw new Error(`image exceeds ${this.options.config.maxImageDimension}px dimension limit`)
+      }
+      if (input.textFallback) validateTextFallback(input.textFallback, this.options.config)
+      const hash = createHash('sha256').update(input.data).digest('hex')
+      const id = `att_${hash.slice(0, 24)}`
+      // Check for an existing copy BEFORE generating a fallback: re-uploading
+      // the same image bytes should not re-run sharp. If the image already
+      // exists with a fallback, reuse it; otherwise generate one now.
+      const existing = await this.get(id)
+      const textFallback = input.textFallback
+        ?? existing?.textFallback
+        ?? await this.maybeGenerateImageFallback({ data: input.data, sourceMimeType: image.mimeType })
+      return this.persistAttachment({ id, hash, payload: input, mimeType: image.mimeType, image, textFallback })
     }
+
+    // Non-image (or an image format detectImage doesn't recognize, e.g. GIF/BMP
+    // or SVG). Trust the declared/inferred MIME and store as a generic file.
+    const mimeType = declaredMimeType || 'application/octet-stream'
+    if (!this.options.config.allowedMimeTypes.includes(mimeType)) throw new Error(`MIME type is not allowed: ${mimeType}`)
+    if (input.data.byteLength > this.options.config.maxImageBytes) throw new Error(`file exceeds ${this.options.config.maxImageBytes} byte limit`)
     if (input.textFallback) validateTextFallback(input.textFallback, this.options.config)
     const hash = createHash('sha256').update(input.data).digest('hex')
     const id = `att_${hash.slice(0, 24)}`
-    const contentPath = this.contentPath(id)
-    const metadataPath = this.metadataPath(id)
+    return this.persistAttachment({ id, hash, payload: input, mimeType, image: null, textFallback: input.textFallback })
+  }
+
+  private async maybeGenerateImageFallback(input: {
+    data: Buffer
+    sourceMimeType: string
+  }): Promise<AttachmentTextFallback | undefined> {
+    const transform = this.options.imageTransform ?? defaultSharpImageTransform
+    const policy = this.imageFallbackPolicy()
+    try {
+      const fallback = await transform.generateImageFallback({
+        data: input.data,
+        sourceMimeType: input.sourceMimeType,
+        policy
+      })
+      if (!fallback) return undefined
+      // Validate the generated fallback against the same policy that the
+      // consumer enforces — never trust the encoder blindly.
+      validateTextFallback(fallback, this.options.config)
+      return fallback
+    } catch {
+      // Sharp failed to decode/encode (corrupt bytes, unsupported codec, ...).
+      // We do not fail the upload over a fallback we can't generate: the
+      // consumer falls back to inlining the original bytes when they fit.
+      return undefined
+    }
+  }
+
+  private async persistAttachment(input: {
+    id: string
+    hash: string
+    mimeType: string
+    image: { mimeType: string; width?: number; height?: number } | null
+    textFallback?: AttachmentTextFallback
+    payload: { name: string; data: Buffer; threadId?: string; workspace?: string }
+  }): Promise<AttachmentMetadata> {
+    const contentPath = this.contentPath(input.id)
+    const metadataPath = this.metadataPath(input.id)
     const now = this.options.nowIso?.() ?? new Date().toISOString()
-    const existing = await this.get(id)
+    const existing = await this.get(input.id)
     if (existing) {
       const next = mergeScope({
         ...existing,
         ...(input.textFallback ? { textFallback: input.textFallback } : {}),
         updatedAt: now
-      }, input)
-      await writeFile(contentPath, input.data)
+      }, input.payload)
+      await writeFile(contentPath, input.payload.data)
       await writeFile(metadataPath, JSON.stringify(next, null, 2), 'utf8')
       return next
     }
     const metadata: AttachmentMetadata = AttachmentMetadataSchema.parse(mergeScope({
-      id,
-      name: input.name,
-      mimeType: image.mimeType,
-      byteSize: input.data.byteLength,
-      hash,
-      ...(image.width ? { width: image.width } : {}),
-      ...(image.height ? { height: image.height } : {}),
+      id: input.id,
+      name: input.payload.name,
+      mimeType: input.mimeType,
+      byteSize: input.payload.data.byteLength,
+      hash: input.hash,
+      ...(input.image?.width ? { width: input.image.width } : {}),
+      ...(input.image?.height ? { height: input.image.height } : {}),
       ...(input.textFallback ? { textFallback: input.textFallback } : {}),
       threadIds: [],
       workspaces: [],
       createdAt: now,
       updatedAt: now
-    }, input))
-    await writeFile(contentPath, input.data)
+    }, input.payload))
+    await writeFile(contentPath, input.payload.data)
     await writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8')
     return metadata
   }
@@ -133,6 +204,13 @@ export class FileAttachmentStore implements AttachmentStore {
   > {
     return {
       textFallbackMaxBase64Bytes: this.options.config.textFallbackMaxBase64Bytes,
+      textFallbackMaxImageDimension: this.options.config.textFallbackMaxImageDimension,
+      textFallbackPreferredMimeType: this.options.config.textFallbackPreferredMimeType
+    }
+  }
+
+  imageFallbackPolicy(): Pick<AttachmentsCapabilityConfig, 'textFallbackMaxImageDimension' | 'textFallbackPreferredMimeType'> {
+    return {
       textFallbackMaxImageDimension: this.options.config.textFallbackMaxImageDimension,
       textFallbackPreferredMimeType: this.options.config.textFallbackPreferredMimeType
     }
@@ -190,4 +268,45 @@ function detectImage(buffer: Buffer): { mimeType: string; width?: number; height
     return { mimeType: 'image/webp' }
   }
   return null
+}
+
+/**
+ * Map a filename extension to a MIME type for the common non-image attachments
+ * the store accepts. Falls back to `application/octet-stream`. Only used when
+ * the caller did not declare a MIME type (the browser usually does).
+ */
+export function mimeTypeFromName(name: string): string {
+  const ext = basename(name).split('.').pop()?.toLowerCase()
+  switch (ext) {
+    case 'png': return 'image/png'
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg'
+    case 'webp': return 'image/webp'
+    case 'gif': return 'image/gif'
+    case 'bmp': return 'image/bmp'
+    case 'svg': return 'image/svg+xml'
+    case 'txt': return 'text/plain'
+    case 'md': return 'text/markdown'
+    case 'csv': return 'text/csv'
+    case 'html': return 'text/html'
+    case 'json': return 'application/json'
+    case 'pdf': return 'application/pdf'
+    case 'zip': return 'application/zip'
+    case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    case 'xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    case 'pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    case 'doc': return 'application/msword'
+    case 'xls': return 'application/vnd.ms-excel'
+    case 'ppt': return 'application/vnd.ms-powerpoint'
+    default: return 'application/octet-stream'
+  }
+}
+
+/**
+ * Treat common non-standard / vendor image MIME aliases as compatible so a JPEG
+ * labeled `image/jpg` (or vice-versa) does not get rejected as a mismatch.
+ */
+function isImageAlias(declared: string, detected: string): boolean {
+  const normalize = (mime: string) => mime.toLowerCase().replace('image/jpg', 'image/jpeg')
+  return normalize(declared) === normalize(detected)
 }

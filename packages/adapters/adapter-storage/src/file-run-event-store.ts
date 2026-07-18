@@ -1,27 +1,51 @@
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { RunEventEnvelopeSchema, type RunEventEnvelope, type RunIdentity } from '@qiongqi/contracts'
-import type { RunEventStore } from '@qiongqi/ports'
+import type { LeaseFence, RunEventStore } from '@qiongqi/ports'
 import { runtimeScopeDigest } from './runtime-store-utils.js'
+import { withFileLock } from './file-lock.js'
+
+export type FileRunEventStoreOptions = { requireFence?: boolean }
 
 export class FileRunEventStore implements RunEventStore {
   public readonly rootDir: string
 
-  constructor(rootDir: string) {
+  constructor(rootDir: string, private readonly options: FileRunEventStoreOptions = {}) {
     this.rootDir = resolve(rootDir)
   }
 
-  async append(input: RunEventEnvelope): Promise<RunEventEnvelope> {
+  async append(input: RunEventEnvelope, fence?: LeaseFence): Promise<RunEventEnvelope> {
     const event = RunEventEnvelopeSchema.parse(input)
-    const existing = await this.readEvents(event)
-    const duplicate = existing.find((candidate) => candidate.eventId === event.eventId)
-    if (duplicate) return duplicate
-    if (existing.some((candidate) => candidate.seq === event.seq)) {
-      throw new Error(`duplicate run event sequence ${event.seq}`)
+    return this.withLock(event, async () => {
+      await this.assertFence(event, fence)
+      const existing = await this.readEvents(event)
+      const duplicate = existing.find((candidate) => candidate.eventId === event.eventId)
+      if (duplicate) return duplicate
+      if (existing.some((candidate) => candidate.seq === event.seq)) {
+        throw new Error(`duplicate run event sequence ${event.seq}`)
+      }
+      await mkdir(this.rootDir, { recursive: true })
+      await appendFile(this.eventPath(event), `${JSON.stringify(event)}\n`, 'utf8')
+      return event
+    })
+  }
+
+  private async assertFence(event: RunEventEnvelope, fence?: LeaseFence): Promise<void> {
+    if (!this.options.requireFence) return
+    if (!fence) throw new Error('runtime event write requires an active lease fence')
+    try {
+      const raw = await readFile(join(this.rootDir, 'leases', `${runtimeScopeDigest(event)}.json`), 'utf8')
+      const lease = JSON.parse(raw) as { holderId?: string; epoch?: number; token?: string; expiresAt?: string }
+      if (lease.holderId !== fence.holderId || lease.epoch !== fence.epoch || lease.token !== fence.token || !lease.expiresAt || Date.parse(lease.expiresAt) <= Date.now()) throw new Error('stale lease fence')
+    } catch (error) {
+      if (error instanceof Error && error.message === 'stale lease fence') throw new Error('runtime event write rejected by stale lease fence')
+      throw new Error('runtime event write rejected: active lease fence unavailable')
     }
-    await mkdir(this.rootDir, { recursive: true })
-    await appendFile(this.eventPath(event), `${JSON.stringify(event)}\n`, 'utf8')
-    return event
+  }
+
+  private async withLock<T>(identity: RunIdentity, operation: () => Promise<T>): Promise<T> {
+    const leasePath = join(this.rootDir, 'leases', `${runtimeScopeDigest(identity)}.json`)
+    return withFileLock(leasePath, operation)
   }
 
   async listAfter(identity: RunIdentity, seq: number): Promise<RunEventEnvelope[]> {

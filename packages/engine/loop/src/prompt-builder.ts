@@ -99,6 +99,7 @@ import {
   recordToolCatalogDrift
 } from './loop-events.js'
 import { CompactionTransaction } from './compaction-transaction.js'
+import { CompactionGovernor } from './compaction-governor.js'
 
 type ThreadRecord = Awaited<ReturnType<ThreadStore['get']>>
 type TurnRecord = Awaited<ReturnType<TurnService['getTurn']>>
@@ -228,6 +229,7 @@ export class PromptBuilder {
   private readonly autoModelRoutes = new Map<string, AutoModelRouteSelection>()
   private readonly promptTokenPressure = new Map<string, { model: string; promptTokens: number }>()
   private readonly toolCatalogSnapshots = new Map<string, ToolCatalogSnapshot>()
+  private readonly compactionGovernors = new Map<string, { governor: CompactionGovernor; step: number }>()
 
   constructor(private readonly deps: PromptBuilderDeps) {}
 
@@ -246,6 +248,7 @@ export class PromptBuilder {
       const scope = parsePromptScopeKey(key)
       if (scope?.threadId === threadId && scope.turnId === turnId) {
         this.autoModelRoutes.delete(key)
+        this.compactionGovernors.delete(key)
       }
     }
   }
@@ -814,6 +817,21 @@ export class PromptBuilder {
     const thresholdModel = pressure?.model || model
     const plan = this.deps.compactor.planCompaction(items, { model: thresholdModel, promptTokens: pressure?.promptTokens })
     if (!plan) return items
+    const key = promptScopeKey(context)
+    const governorState = this.compactionGovernors.get(key) ?? { governor: new CompactionGovernor(), step: 0 }
+    governorState.step += 1
+    this.compactionGovernors.set(key, governorState)
+    const compactableTokens = this.deps.compactor.estimate(items)
+    const summaryTokens = Math.max(64, Math.floor(compactableTokens * 0.25))
+    const decision = governorState.governor.decide({
+      step: governorState.step,
+      fixedTokens: Math.max((pressure?.promptTokens ?? 0) - compactableTokens, 0),
+      compactableTokens,
+      summaryTokens,
+      historyItems: items.length,
+      summaryOnly: items.length > 0 && items.every((item) => item.kind === 'compaction')
+    })
+    if (decision.action === 'skip') return items
     const threadId = context.threadId
     const turnId = context.turnId
     if (this.deps.taskStates) {
@@ -858,6 +876,7 @@ export class PromptBuilder {
         })
         if (signal.aborted) return items
         if (result.replacedTokens > 0) {
+          governorState.governor.commit({ step: governorState.step, summaryDigest: result.summaryItem.id })
           this.deps.toolHost.clearReadTracker?.(threadId)
           await this.recordCompactionCompleted(threadId, turnId, result)
         }
@@ -897,6 +916,7 @@ export class PromptBuilder {
       }
     }
     if (result.replacedTokens > 0) {
+      governorState.governor.commit({ step: governorState.step, summaryDigest: result.summaryItem.id })
       this.deps.toolHost.clearReadTracker?.(threadId)
       await this.deps.sessionStore.appendItem(threadId, result.summaryItem)
       await this.recordCompactionCompleted(threadId, turnId, result)

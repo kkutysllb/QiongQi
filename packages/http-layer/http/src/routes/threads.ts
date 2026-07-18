@@ -18,9 +18,11 @@ import { jsonResponse, type JsonResponse } from '../response.js'
 import { readJsonBody } from '../read-json-body.js'
 import type { ForkThreadOptions, ListThreadsOptions, ThreadService } from '@qiongqi/services'
 import type { RuntimeError } from './runtime-error.js'
+import type { ServerRuntime } from './server-runtime.js'
 import type { SessionStore } from '@qiongqi/ports'
 import type { Turn } from '@qiongqi/contracts'
 import type { TurnItem } from '@qiongqi/contracts'
+import { defaultThreadWorkspace } from './default-workspace.js'
 
 /**
  * Handlers for the thread CRUD endpoints. The handlers accept a
@@ -53,18 +55,22 @@ const ListThreadsQuery = z.object({
 
 export async function listThreads(
   service: ThreadService,
-  request: Request
+  request: Request,
+  ownerUserId?: string
 ): Promise<JsonResponse> {
   const parsed = parseListThreadsOptions(request)
   if (!parsed.ok) return parsed.response
-  const threads = await service.list(parsed.options)
+  const threads = await service.list({ ...parsed.options, ownerUserId })
   const payload: ListThreadsResponse = { threads }
   return jsonResponse(payload)
 }
 
 export async function createThread(
   service: ThreadService,
-  request: Request
+  request: Request,
+  ownerUserId?: string,
+  defaultModel?: string,
+  runtime?: ServerRuntime
 ): Promise<JsonResponse | Response> {
   const body = await readJsonBody(request)
   if (!body.ok) return body.response
@@ -72,16 +78,37 @@ export async function createThread(
   if (!parsed.success) {
     return validationError('invalid create thread body', parsed.error.issues)
   }
-  const thread = await service.create(parsed.data)
+  const { id, ...requestBody } = parsed.data
+  const model = requestBody.model ?? defaultModel
+  if (!model) {
+    return validationError('invalid create thread body', [{
+      code: 'custom',
+      path: ['model'],
+      message: 'model is required when no default model is configured'
+    }])
+  }
+  const requestedWorkspace = requestBody.workspace?.trim()
+  const workspace = requestedWorkspace && requestedWorkspace !== '.'
+    ? requestedWorkspace
+    : runtime ? defaultThreadWorkspace(runtime, requestBody.workModeId) : undefined
+  if (!workspace) {
+    return validationError('invalid create thread body', [{
+      code: 'custom',
+      path: ['workspace'],
+      message: 'workspace is required when no default workspace is configured'
+    }])
+  }
+  const thread = await service.create({ ...requestBody, workspace, model }, { ...(id ? { id } : {}), ownerUserId })
   return jsonResponse(ThreadSchema.parse(thread), 201)
 }
 
 export async function getThread(
   service: ThreadService,
   threadId: string,
-  sessionStore?: SessionStore
+  sessionStore?: SessionStore,
+  ownerUserId?: string
 ): Promise<JsonResponse> {
-  const thread = await service.get(threadId)
+  const thread = ownerUserId ? await service.getForOwner(threadId, ownerUserId) : await service.get(threadId)
   if (!thread) {
     return jsonResponse(
       { code: 'not_found', message: `thread not found: ${threadId}` },

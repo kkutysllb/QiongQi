@@ -35,12 +35,27 @@ export class HybridSessionStore implements SessionStore {
     await this.delegate.appendItem(threadId, item)
   }
 
+  async appendItemOnce(
+    threadId: string,
+    item: TurnItem
+  ): Promise<{ item: TurnItem; created: boolean }> {
+    return this.delegate.appendItemOnce(threadId, item)
+  }
+
   async rewriteItems(threadId: string, items: TurnItem[]): Promise<void> {
     await this.delegate.rewriteItems(threadId, items)
   }
 
   async updateItem(threadId: string, itemId: string, patch: Partial<TurnItem>): Promise<TurnItem | null> {
     return this.delegate.updateItem(threadId, itemId, patch)
+  }
+
+  async updateItemOnce(
+    threadId: string,
+    itemId: string,
+    patch: Partial<TurnItem>
+  ): Promise<{ item: TurnItem; updated: boolean } | null> {
+    return this.delegate.updateItemOnce(threadId, itemId, patch)
   }
 
   async loadEventsSince(threadId: string, sinceSeq: number): Promise<RuntimeEvent[]> {

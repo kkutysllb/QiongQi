@@ -10,7 +10,6 @@ import type { PipelineStage } from '@qiongqi/contracts'
 import type { RuntimeEventRecorder } from '@qiongqi/services'
 import type { TurnService } from '@qiongqi/services'
 import type { UsageService } from '@qiongqi/services'
-import { makeErrorItem } from '@qiongqi/domain'
 import { estimateDeepseekInputTokenCost } from '@qiongqi/adapter-model'
 
 export const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
@@ -90,14 +89,7 @@ export async function recordToolCatalogDrift(
     message: string
   }
 ): Promise<void> {
-  await turns.applyItem(input.threadId, makeErrorItem({
-    id: `item_${input.turnId}_tool_catalog_changed_${input.fingerprint}`,
-    threadId: input.threadId,
-    turnId: input.turnId,
-    message: input.message,
-    code: 'tool_catalog_changed',
-    severity: 'info'
-  }))
+  void turns
   await events.record({
     kind: 'tool_catalog_changed',
     threadId: input.threadId,

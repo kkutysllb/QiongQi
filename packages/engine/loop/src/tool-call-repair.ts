@@ -11,6 +11,11 @@ export type ToolCallArgumentRepairResult = {
   notes: string[]
 }
 
+export type ToolCallRepairResult = {
+  call: ToolCallLike
+  notes: string[]
+}
+
 const DEFAULT_MAX_STRING_BYTES = 512 * 1024
 const WRAPPER_KEYS = ['arguments', 'args', 'input', 'parameters', 'params', 'payload', '__raw']
 const TOOL_METADATA_KEYS = new Set([
@@ -23,6 +28,33 @@ const TOOL_METADATA_KEYS = new Set([
   'call_id',
   'type'
 ])
+const SAFE_BARE_SHELL_COMMANDS = new Set(['pwd'])
+
+export function repairDispatchToolCall(
+  raw: ToolCallLike,
+  options: ToolCallArgumentRepairOptions = {}
+): ToolCallRepairResult {
+  let call: ToolCallLike = { ...raw }
+  const notes: string[] = []
+  const bareShell = normalizeBareShellCommand(call)
+  if (bareShell) {
+    call = bareShell.call
+    notes.push(bareShell.note)
+  }
+
+  const repairedArgs = repairDispatchToolArguments(call.arguments, {
+    ...options,
+    toolName: call.toolName,
+    ...(call.toolKind ? { toolKind: call.toolKind } : {})
+  })
+  return {
+    call: {
+      ...call,
+      arguments: repairedArgs.arguments
+    },
+    notes: [...notes, ...repairedArgs.notes]
+  }
+}
 
 /**
  * Provider-neutral repair pass for already-parsed tool arguments.
@@ -60,6 +92,24 @@ export function repairDispatchToolArguments(
   }
 
   return { arguments: current, notes }
+}
+
+function normalizeBareShellCommand(
+  call: ToolCallLike
+): { call: ToolCallLike; note: string } | null {
+  const command = call.toolName.trim()
+  if (!SAFE_BARE_SHELL_COMMANDS.has(command)) return null
+  if (call.providerId) return null
+  if (Object.keys(call.arguments).length > 0) return null
+  return {
+    call: {
+      callId: call.callId,
+      toolName: 'bash',
+      toolKind: 'command_execution',
+      arguments: { command }
+    },
+    note: `normalized bare shell command tool name ${command} to bash`
+  }
 }
 
 function shallowCloneRecord(value: Record<string, unknown>): Record<string, unknown> {

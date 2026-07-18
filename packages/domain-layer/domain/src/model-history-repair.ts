@@ -103,6 +103,7 @@ export function isToolResultBridgeItem(
     case 'assistant_reasoning':
     case 'approval':
     case 'user_input':
+    case 'runtime_progress':
     case 'error':
       return true
     case 'assistant_text':

@@ -101,7 +101,15 @@ export class ToolCallCoordinator {
     const context = this.createToolContext({
       ...input,
       ...(runtimeIdentity ? { runtimeIdentity } : {}),
-      ...(runtimeState ? { runtimeState, runtimeStateSink: (next: RunStateV3) => this.runtimeStates.set(input.turnId, next) } : {})
+      ...(runtimeState
+        ? {
+          runtimeState,
+          runtimeStateSink: (next: RunStateV3) => {
+            const current = this.runtimeStates.get(input.turnId)
+            this.runtimeStates.set(input.turnId, current ? mergeRuntimeEffectState(current, next) : next)
+          }
+        }
+        : {})
     })
     let index = 0
 
@@ -281,7 +289,9 @@ export class ToolCallCoordinator {
               context: input.context,
               policy: input.call.effectPolicy ?? defaultEffectPolicy(input.call)
             })
-            input.context.runtimeStateSink?.(execution.state)
+            const mergedState = mergeRuntimeEffectState(input.context.runtimeState, execution.state)
+            input.context.runtimeState = mergedState
+            input.context.runtimeStateSink?.(mergedState)
             if (execution.outcome) throw new Error(`tool runtime suspended: ${execution.outcome.reason}`)
             if (execution.result) return execution.result
           }
@@ -522,6 +532,21 @@ export class ToolCallCoordinator {
     this.deps.userInputGate.resolve(input.id, { status: 'cancelled' })
     throw new Error('cancelled while awaiting user input')
   }
+}
+
+function mergeRuntimeEffectState(current: RunStateV3, next: RunStateV3): RunStateV3 {
+  const committedEffects = mergeEffectsByKey(current.committedEffects, next.committedEffects)
+  const committedKeys = new Set(committedEffects.map((effect) => effect.idempotencyKey))
+  const pendingEffects = mergeEffectsByKey(current.pendingEffects, next.pendingEffects)
+    .filter((effect) => !committedKeys.has(effect.idempotencyKey))
+  return { ...next, pendingEffects, committedEffects }
+}
+
+function mergeEffectsByKey<T extends { idempotencyKey: string }>(current: readonly T[], next: readonly T[]): T[] {
+  const merged = new Map<string, T>()
+  for (const effect of current) merged.set(effect.idempotencyKey, effect)
+  for (const effect of next) merged.set(effect.idempotencyKey, effect)
+  return [...merged.values()]
 }
 
 function defaultEffectPolicy(call: ToolCallLike): ToolEffectPolicy {

@@ -13,6 +13,7 @@ import type { ThreadGoal, ThreadTodoList } from '@qiongqi/contracts'
 import { CREATE_PLAN_TOOL_NAME } from '@qiongqi/adapter-tools'
 import { GET_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_NAME } from '@qiongqi/adapter-tools'
 import { TODO_LIST_TOOL_NAME, TODO_WRITE_TOOL_NAME } from '@qiongqi/adapter-tools'
+import { isImageMimeType } from '@qiongqi/attachments'
 import type { AttachmentContent } from '@qiongqi/attachments'
 import type {
   ModelInputAttachment,
@@ -43,6 +44,7 @@ export const PLAN_MODE_INSTRUCTION = [
   'When you understand the task well enough, call the `create_plan` tool to save a complete implementation plan as Markdown.',
   'Use `operation: "draft"` for the first plan, and `operation: "refine"` when revising an existing plan; you may call `create_plan` multiple times as the plan evolves.',
   'Write concrete, actionable steps (summary, implementation steps, tests, risks) rather than vague intentions.',
+  'Do not ask the user to switch modes, click GUI controls, or confirm mode transitions; do not explain GUI mode controls in the user-visible reply.',
   'After saving, give the user a short summary of the plan and what to review.'
 ].join('\n')
 
@@ -254,6 +256,22 @@ export function buildTextAttachmentFallback(
     }
   }
 
+  // Non-image files (PDF/ZIP/text/Office/...) are never inlined as base64:
+  // the raw bytes routinely exceed the fallback byte limit and base64-encoding
+  // a binary document only pollutes the prompt. The model is expected to read
+  // the file content on demand via tool calls / artifacts. We surface metadata
+  // only, with an empty dataBase64 so the formatter can omit the base64 block.
+  if (!isImageMimeType(attachment.mimeType)) {
+    return {
+      id: attachment.id,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      dataBase64: '',
+      byteSize: attachment.byteSize,
+      wasCompressed: false
+    }
+  }
+
   const originalBase64 = attachment.data.toString('base64')
   if (Buffer.byteLength(originalBase64, 'utf8') > maxBase64Bytes) {
     throw new Error(
@@ -355,6 +373,8 @@ function compactionPromptLine(item: TurnItem): string {
       return item.replacedTokens > 0 ? `[compaction] ${clipForPrompt(item.summary, 2_000)}` : ''
     case 'review':
       return `[review:${item.title}] ${clipForPrompt(item.reviewText || stringifyForPrompt(item.output), 2_000)}`
+    case 'runtime_progress':
+      return ''
     case 'error':
       return `[error${item.code ? `:${item.code}` : ''}] ${clipForPrompt(item.message, 1_200)}`
   }

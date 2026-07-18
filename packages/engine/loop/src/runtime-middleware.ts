@@ -1,4 +1,4 @@
-import type { EffectIntent, CommittedEffectRef, RecoveryState, RunIdentity, RunOutcome, RunStateV3 } from '@qiongqi/contracts'
+import type { BudgetState, EffectIntent, CommittedEffectRef, RecoveryState, RunIdentity, RunOutcome, RunStateV3 } from '@qiongqi/contracts'
 import type { RuntimeNode } from './execution-graph.js'
 
 export type RuntimeHook = 'beforeRun' | 'beforeNode' | 'afterNode' | 'afterRun' | 'onError' | (string & {})
@@ -6,6 +6,7 @@ export type RuntimeHook = 'beforeRun' | 'beforeNode' | 'afterNode' | 'afterRun' 
 export type MiddlewareCommand =
   | { type: 'set-middleware-state'; id: string; state: { version: number; data: unknown } }
   | { type: 'set-budget'; key: 'stepsUsed' | 'toolCallsUsed' | 'inputTokens' | 'outputTokens' | 'costUsd'; value: number }
+  | { type: 'add-budget'; delta: Partial<BudgetState>; usageId?: string }
   | { type: 'set-node-data'; nodeId: string; value: unknown }
   | { type: 'set-task-revision'; revision: number }
   | { type: 'set-recovery'; recovery: RecoveryState }

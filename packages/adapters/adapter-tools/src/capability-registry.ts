@@ -81,7 +81,27 @@ export class CapabilityRegistry {
   resolveTool(toolName: string, context: ToolHostContext, providerId?: string): CapabilityToolRecord {
     const record = this.tools.get(toolName)
     if (!record) {
-      throw new Error(`unknown tool: ${toolName}`)
+      // Provide a helpful message for common hallucinated tool names so the
+      // model can self-correct instead of repeating the same invalid call.
+      const known = [...this.tools.keys()].sort()
+      const hints: Record<string, string> = {
+        glob_match: 'Use `find` to locate files by pattern, or `grep` to search file contents.',
+        glob: 'Use `find` to locate files by pattern, or `ls` to list directory contents.',
+        read_file: 'Use `read` to read a file.',
+        write_file: 'Use `write` to create or overwrite a file.',
+        edit_file: 'Use `edit` to modify a file.',
+        create_file: 'Use `write` to create a new file.',
+        delete_file: 'Use `bash` with `rm` to delete a file.',
+        list_files: 'Use `ls` to list directory contents.',
+        run_command: 'Use `bash` to execute shell commands.',
+        execute_command: 'Use `bash` to execute shell commands.',
+        search: 'Use `grep` to search file contents, or `find` to locate files.',
+        cat: 'Use `read` to read file contents.',
+      }
+      const hint = hints[toolName]
+      throw new Error(
+        `unknown tool: ${toolName}. ${hint ?? `Available tools: ${known.join(', ')}.`}`
+      )
     }
     if (providerId && providerId !== record.provider.id) {
       throw new Error(`tool ${toolName} is not provided by ${providerId}`)
