@@ -62,6 +62,6 @@ export function defaultLoopPlan(): LoopPlan {
       { kind: 'evaluate', maxRetries: 1 },
       { kind: 'dispatch-tools' }
     ],
-    budget: { maxSteps: 200 }
+    budget: { maxSteps: 300 }
   }
 }

@@ -114,20 +114,55 @@ function isNonterminalActionText(text: string, task: TaskStateV1): boolean {
     '我会',
     '我先',
     '我现在',
+    '让我',
+    '让我来',
+    '马上开始',
+    '准备开始',
+    '开始执行',
+    '先读取',
+    '先检查',
+    '先分析',
+    '先查看',
+    '先搜索',
+    '先了解',
+    '先确认',
     '现在开始',
     '接下来',
     '下一步',
     '继续分析',
     '继续执行',
     '继续完成',
-    '立刻继续',
     '继续往下',
+    '接着往下',
+    '立刻继续',
     '往下推进',
+    '需要先',
     'letme',
+    'lets',
+    'im',
+    'imgoing',
+    'imabout',
+    'imstarting',
     'iwill',
     'ill',
+    'illbe',
+    'ineedto',
+    'ishould',
+    'ishall',
     'nexti',
-    'nowi'
+    'nowi',
+    'startby',
+    'firsti',
+    'firstlet',
+    'beginby',
+    'proceedto',
+    'goingto',
+    'aboutto',
+    'lookinto',
+    'lookatthe',
+    'movingon',
+    'myapproach',
+    'myplanis'
   ])
 }
 
@@ -136,7 +171,7 @@ function hasPendingWork(task: TaskStateV1): boolean {
 }
 
 function looksTerminal(normalized: string): boolean {
-  return /(?:分析完成|任务完成|已完成|修复完成|生成完成|处理完成|结论|总结|根因|最终答案|finalanswer|completed|done|result|summary)/i.test(normalized)
+  return /(?:分析完成|任务完成|已完成|修复完成|生成完成|处理完成|结论|总结|根因|最终答案|finalanswer|allcomplete|alltaskscomplete|taskcomplete|everythingdone|workcomplete|conclusion|inconclusion|tosummarize|resolved|fixed|nothingelse|nothingmore|nofurtheraction|completed|done|hereis|result|summary)/i.test(normalized)
 }
 
 function includesAny(text: string, candidates: readonly string[]): boolean {

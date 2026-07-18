@@ -122,7 +122,7 @@ type AwaitUserInputFn = (
   signal: AbortSignal
 ) => Promise<UserInputResolution>
 
-const DEFAULT_CLASSIC_LOOP_MAX_STEPS = 200
+const DEFAULT_CLASSIC_LOOP_MAX_STEPS = 300
 
 /**
  * Turn-scoped state machine. `runTurn(threadId, turnId)` advances a turn

@@ -31,7 +31,7 @@ import {
 export const DEFAULT_SERVE_PORT = 8899
 export const DEFAULT_SERVE_MODEL = DEFAULT_QIONGQI_MODEL
 export const DEFAULT_SERVE_RUNTIME_TUNING: RuntimeTuningConfig = {
-  modelStreamIdleTimeoutMs: 120_000,
+  modelStreamIdleTimeoutMs: 180_000,
   kernelRollout: {
     enabled: true,
     defaultMode: 'kernel_v3'

@@ -20,7 +20,40 @@ const LEAKED_PROTOCOL_MARKERS = [
   '</tool_call>',
   '(tool call)',
   '[tool call]',
-  '<|tool|>'
+  '<|tool|>',
+  // Model-native protocol markers observed leaking from various providers
+  // (OpenAI, Anthropic, vLLM, llama.cpp, GLM, MiniMax, Qwen, etc.)
+  '<function_call>',
+  '</function_call>',
+  '<function_calls>',
+  '</function_calls>',
+  '<|function_call|>',
+  '<|endoftext|>',
+  '<|im_start|>',
+  '<|im_end|>',
+  '<|observation|>',
+  '<|assistant|>',
+  '<|user|>',
+  '<|system|>',
+  // GLM/ChatGLM bracket-style markers
+  '[gMASK]',
+  '[MASK]',
+  '<|begin_of_sentence|>',
+  '<|end_of_sentence|>',
+  // Anthropic/Claude inline leaks
+  '<antml:function_calls>',
+  '</antml:function_calls>',
+  '<antml:invoke>',
+  '</antml:invoke>',
+  '<antml:parameter>',
+  '</antml:parameter>',
+  // Open-source model (llama.cpp/vLLM/Ollama) function-calling protocol
+  '<|python_tag|>',
+  '<function=',
+  '</function>',
+  '<|start_header_id|>',
+  '<|end_header_id|>',
+  '<|eot_id|>',
 ]
 
 function hasLeakedProtocolText(text: string): boolean {

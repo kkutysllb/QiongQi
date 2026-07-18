@@ -118,10 +118,19 @@ function shouldContinueAfterNonTerminalStop(
 
 function looksTerminal(text: string): boolean {
   const compact = text.replace(/\s+/g, '')
-  return /(?:分析完成|任务完成|已完成|修复完成|结论|总结|根因|最终答案|finalanswer|completed|done|hereis|result|summary)/i.test(compact)
+  return /(?:分析完成|任务完成|已完成|修复完成|生成完成|处理完成|结论|总结|根因|最终答案|finalanswer|allcomplete|alltaskscomplete|taskcomplete|everythingdone|workcomplete|conclusion|inconclusion|tosummarize|resolved|fixed|nothingelse|nothingmore|nofurtheraction|completed|done|hereis|result|summary)/i.test(compact)
 }
 
+/**
+ * Detect text that sounds like the model is about to take action but
+ * didn't produce tool calls (e.g. a preamble that was cut short, or a
+ * provider that stopped prematurely after describing its intent).
+ *
+ * Patterns are matched against the text with all whitespace removed.
+ * The regex uses the case-insensitive flag so both Chinese and English
+ * models are covered.
+ */
 function looksLikeActionPreamble(text: string): boolean {
   const compact = text.replace(/\s+/g, '')
-  return /(?:我将|我会|我先|我现在|先读取|先检查|先分析|现在开始|接下来|下一步|继续分析|继续执行|继续完成|立刻继续|继续往下|往下推进|需要先|让我|letme|i(?:'ll|will|needto|should)|nexti|nowi)/i.test(compact)
+  return /(?:我将|我会|我先|我现在|让我|让我来|马上开始|准备开始|开始执行|先读取|先检查|先分析|先查看|先搜索|先了解|先确认|现在开始|接下来|下一步|继续分析|继续执行|继续完成|继续往下|接着往下|立刻继续|往下推进|需要先|letme|let's|lets|i'mgoing|i'mabout|i'mstarting|i'm|startby|firsti|firstlet|beginby|proceedto|goingto|aboutto|lookinto|lookatthe|movingon|myapproach|myplanis|i(?:'ll|will|willbe|needto|should|shall)|nexti|nowi)/i.test(compact)
 }
