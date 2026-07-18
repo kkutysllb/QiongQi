@@ -99,7 +99,7 @@ import {
   recordToolCatalogDrift
 } from './loop-events.js'
 import { CompactionTransaction } from './compaction-transaction.js'
-import { CompactionGovernor } from './compaction-governor.js'
+import { CompactionGovernor, type CompactionGovernorState } from './compaction-governor.js'
 
 type ThreadRecord = Awaited<ReturnType<ThreadStore['get']>>
 type TurnRecord = Awaited<ReturnType<TurnService['getTurn']>>
@@ -146,6 +146,21 @@ function parsePromptScopeKey(key: string): PromptRuntimeScope | undefined {
   }
 }
 
+function parseCompactionGovernorState(value: unknown): CompactionGovernorState | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const candidate = value as Partial<CompactionGovernorState>
+  const step = candidate.step
+  const lastCompactionStep = candidate.lastCompactionStep
+  if (candidate.version !== 1 || typeof step !== 'number' || !Number.isSafeInteger(step) || step < 0) return undefined
+  if (typeof lastCompactionStep !== 'number' || !Number.isSafeInteger(lastCompactionStep)) return undefined
+  return {
+    version: 1,
+    step,
+    lastCompactionStep,
+    ...(typeof candidate.lastSummaryDigest === 'string' ? { lastSummaryDigest: candidate.lastSummaryDigest } : {})
+  }
+}
+
 const TOOL_OUTPUT_MAX_INLINE_BYTES = 64 * 1024
 const TOOL_OUTPUT_PREVIEW_HEAD_BYTES = 4 * 1024
 const TOOL_OUTPUT_PREVIEW_TAIL_BYTES = 4 * 1024
@@ -171,6 +186,7 @@ export type BuildContext = {
   toolKinds: Map<string, 'tool_call' | 'command_execution' | 'file_change' | undefined>
   toolCatalogDrift: ToolCatalogDrift
   attachments: { imageAttachments: ModelInputAttachment[]; textFallbacks: ModelTextAttachmentFallback[] }
+  compactionGovernorState: CompactionGovernorState
 }
 
 export type BuildResult =
@@ -229,7 +245,9 @@ export class PromptBuilder {
   private readonly autoModelRoutes = new Map<string, AutoModelRouteSelection>()
   private readonly promptTokenPressure = new Map<string, { model: string; promptTokens: number }>()
   private readonly toolCatalogSnapshots = new Map<string, ToolCatalogSnapshot>()
-  private readonly compactionGovernors = new Map<string, { governor: CompactionGovernor; step: number }>()
+  // Classic-loop callers do not have RunStateV3; retain their cooldown locally.
+  // Kernel v3 always supplies persisted middleware state and does not use this map.
+  private readonly classicCompactionGovernors = new Map<string, { governor: CompactionGovernor; step: number }>()
 
   constructor(private readonly deps: PromptBuilderDeps) {}
 
@@ -248,7 +266,7 @@ export class PromptBuilder {
       const scope = parsePromptScopeKey(key)
       if (scope?.threadId === threadId && scope.turnId === turnId) {
         this.autoModelRoutes.delete(key)
-        this.compactionGovernors.delete(key)
+        this.classicCompactionGovernors.delete(key)
       }
     }
   }
@@ -258,6 +276,7 @@ export class PromptBuilder {
     turnId: string
     signal: AbortSignal
     stepIndex: number
+    compactionGovernorState?: unknown
   }): Promise<BuildResult> {
     const { threadId, turnId, signal, stepIndex } = input
     if (shouldVerifyImmutablePrefix()) {
@@ -447,8 +466,9 @@ export class PromptBuilder {
       toolSpecs.some((tool) => tool.name === CREATE_PLAN_TOOL_NAME)
         ? CREATE_PLAN_TOOL_NAME
         : undefined
-    const history = await this.compactIfNeeded(items, model, signal, runtimeScope)
+    const compacted = await this.compactIfNeeded(items, model, signal, runtimeScope, input.compactionGovernorState)
     if (signal.aborted) return { kind: 'aborted' }
+    const history = compacted.items
     await recordPipelineStage(this.deps.events, {
       threadId,
       turnId,
@@ -554,7 +574,8 @@ export class PromptBuilder {
       toolProviderKinds: new Map(tools.map((tool) => [tool.name, tool.providerKind])),
       toolKinds,
       toolCatalogDrift,
-      attachments
+      attachments,
+      compactionGovernorState: compacted.state
     }
     return { kind: 'built', ctx }
   }
@@ -811,27 +832,32 @@ export class PromptBuilder {
     items: TurnItem[],
     model: string,
     signal: AbortSignal,
-    context: PromptRuntimeScope
-  ): Promise<TurnItem[]> {
+    context: PromptRuntimeScope,
+    persistedState?: unknown
+  ): Promise<{ items: TurnItem[]; state: CompactionGovernorState }> {
+    const restoredState = parseCompactionGovernorState(persistedState)
     const pressure = this.consumePromptPressure(context, model)
     const thresholdModel = pressure?.model || model
     const plan = this.deps.compactor.planCompaction(items, { model: thresholdModel, promptTokens: pressure?.promptTokens })
-    if (!plan) return items
+    if (!plan) return { items, state: restoredState ?? new CompactionGovernor().snapshot() }
     const key = promptScopeKey(context)
-    const governorState = this.compactionGovernors.get(key) ?? { governor: new CompactionGovernor(), step: 0 }
-    governorState.step += 1
-    this.compactionGovernors.set(key, governorState)
+    const local = persistedState === undefined
+      ? (this.classicCompactionGovernors.get(key) ?? { governor: new CompactionGovernor(), step: 0 })
+      : undefined
+    const governor = local?.governor ?? new CompactionGovernor({}, restoredState)
+    const step = local ? ++local.step : governor.nextStep()
+    if (local) this.classicCompactionGovernors.set(key, local)
     const compactableTokens = this.deps.compactor.estimate(items)
     const summaryTokens = Math.max(64, Math.floor(compactableTokens * 0.25))
-    const decision = governorState.governor.decide({
-      step: governorState.step,
+    const decision = governor.decide({
+      step,
       fixedTokens: Math.max((pressure?.promptTokens ?? 0) - compactableTokens, 0),
       compactableTokens,
       summaryTokens,
       historyItems: items.length,
       summaryOnly: items.length > 0 && items.every((item) => item.kind === 'compaction')
     })
-    if (decision.action === 'skip') return items
+    if (decision.action === 'skip') return { items, state: governor.snapshot() }
     const threadId = context.threadId
     const turnId = context.turnId
     if (this.deps.taskStates) {
@@ -874,13 +900,13 @@ export class PromptBuilder {
               }
             : {})
         })
-        if (signal.aborted) return items
+        if (signal.aborted) return { items, state: governor.snapshot() }
         if (result.replacedTokens > 0) {
-          governorState.governor.commit({ step: governorState.step, summaryDigest: result.summaryItem.id })
+          governor.commit({ step, summaryDigest: result.summaryItem.id })
           this.deps.toolHost.clearReadTracker?.(threadId)
           await this.recordCompactionCompleted(threadId, turnId, result)
         }
-        return result.next
+        return { items: result.next, state: governor.snapshot() }
       }
     }
     let result = this.deps.compactor.compact({
@@ -901,7 +927,7 @@ export class PromptBuilder {
         heuristicSummary: result.summaryItem.kind === 'compaction' ? result.summaryItem.summary : '',
         signal
       })
-      if (signal.aborted) return items
+      if (signal.aborted) return { items, state: governor.snapshot() }
       if (modelSummary) {
         result = this.deps.compactor.compact({
           threadId,
@@ -916,12 +942,12 @@ export class PromptBuilder {
       }
     }
     if (result.replacedTokens > 0) {
-      governorState.governor.commit({ step: governorState.step, summaryDigest: result.summaryItem.id })
+      governor.commit({ step, summaryDigest: result.summaryItem.id })
       this.deps.toolHost.clearReadTracker?.(threadId)
       await this.deps.sessionStore.appendItem(threadId, result.summaryItem)
       await this.recordCompactionCompleted(threadId, turnId, result)
     }
-    return result.next
+    return { items: result.next, state: governor.snapshot() }
   }
 
   private async recordCompactionCompleted(

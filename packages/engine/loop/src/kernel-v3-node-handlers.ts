@@ -162,7 +162,8 @@ export function createKernelV3NodeHandlers(
         threadId: identity.threadId,
         turnId: identity.turnId,
         signal,
-        stepIndex: state.cursor.stepIndex
+        stepIndex: state.cursor.stepIndex,
+        compactionGovernorState: state.middleware['compaction-governor']?.data
       })
       if (built.kind === 'aborted') {
         return { outcome: { status: 'aborted', reason: 'user_aborted', retryable: false } }
@@ -198,7 +199,14 @@ export function createKernelV3NodeHandlers(
             threadMode: built.ctx.effectiveMode,
             guiPlan: built.ctx.activePlanContext
           }
-        }
+        },
+        commands: built.ctx.compactionGovernorState
+          ? [{
+              type: 'set-middleware-state' as const,
+              id: 'compaction-governor',
+              state: { version: 1, data: built.ctx.compactionGovernorState }
+            }]
+          : []
       }
     },
 
@@ -209,6 +217,23 @@ export function createKernelV3NodeHandlers(
         return { outcome: { status: 'aborted', reason: 'user_aborted', retryable: false } }
       }
       const proposal = await deps.proposalRunner.run({ ...built.request, abortSignal: signal })
+      if (isContextCapacityProposal(proposal)) {
+        await emitProgress(deps, identity, {
+          phase: 'terminated',
+          summary: 'The model context capacity was reached; the run stopped after preserving the current task state.',
+          modelSteps: state.budgets.stepsUsed,
+          toolCalls: state.budgets.toolCallsUsed,
+          reason: 'context_capacity_exceeded'
+        })
+        return {
+          outcome: {
+            status: 'degraded',
+            reason: 'context_capacity_exceeded',
+            retryable: true,
+            details: { providerReason: proposal.providerReason }
+          }
+        }
+      }
       return { condition: 'next', value: proposal }
     },
 
@@ -588,6 +613,28 @@ function failedOutcome(message: string): RunOutcome {
     retryable: true,
     details: { message }
   }
+}
+
+function isContextCapacityProposal(proposal: ModelProposal): boolean {
+  if (proposal.stopClass !== 'transport_error' && proposal.stopClass !== 'protocol_error') return false
+  const metadata = proposal.rawMetadata
+  const metadataRecord = metadata && typeof metadata === 'object' ? metadata as Record<string, unknown> : undefined
+  const nestedError = metadataRecord?.error && typeof metadataRecord.error === 'object'
+    ? metadataRecord.error as Record<string, unknown>
+    : undefined
+  const codes = [
+    proposal.providerReason,
+    metadataRecord?.code,
+    metadataRecord?.type,
+    nestedError?.code,
+    nestedError?.type
+  ].filter((value): value is string => typeof value === 'string')
+  return codes.some((code) => [
+    'context_length_exceeded',
+    'max_context_length',
+    'context_window_exceeded',
+    'input_too_long'
+  ].includes(code.trim().toLowerCase()))
 }
 
 function isToolEffectPolicy(value: unknown): value is ToolEffectPolicy {

@@ -242,6 +242,37 @@ describe('Kernel v3 production node handlers', () => {
     expect(result?.facts).not.toHaveProperty('reasoning')
   })
 
+  it('persists compaction governor state in the kernel run snapshot', async () => {
+    const harness = await createHarness([proposal({ text: '完成。' })])
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+    const snapshot = await (harness as { snapshots?: InMemoryRunStateStore }).snapshots?.load(identity)
+    expect(snapshot?.middleware['compaction-governor']).toEqual({
+      version: 1,
+      data: { version: 1, step: 0, lastCompactionStep: -1 }
+    })
+  })
+
+  it('terminates a context-capacity model failure with a structured outcome and progress item', async () => {
+    const harness = await createHarness([
+      proposal({
+        stopClass: 'transport_error',
+        providerReason: 'context_length_exceeded',
+        text: ''
+      })
+    ], { emitRuntimeProgress: true })
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({
+      status: 'degraded',
+      reason: 'context_capacity_exceeded',
+      retryable: true
+    })
+    expect(harness.applied).toContainEqual(expect.objectContaining({
+      kind: 'runtime_progress',
+      phase: 'terminated',
+      reason: 'context_capacity_exceeded'
+    }))
+  })
+
   it('accounts each logical tool call absent from the persisted task ledger', async () => {
     const harness = await createHarness([])
     const restored = task()
@@ -310,7 +341,7 @@ describe('Kernel v3 production node handlers', () => {
   })
 })
 
-async function createHarness(proposals: ModelProposal[]) {
+async function createHarness(proposals: ModelProposal[], options: { emitRuntimeProgress?: boolean } = {}) {
   const snapshots = new InMemoryRunStateStore()
   const events = new InMemoryRunEventStore()
   const taskStates = new InMemoryTaskStateStore()
@@ -368,6 +399,11 @@ async function createHarness(proposals: ModelProposal[]) {
         return true
       },
       updateItem: async () => null
+      ,updateItemOnce: async (_threadId: string, _itemId: string, patch: Record<string, unknown>) => {
+        const existing = persistedItems.get(_itemId)
+        if (existing) Object.assign(existing, patch)
+        return Boolean(existing)
+      }
     } as never,
     promptBuilder: {
       build: async () => ({
@@ -386,7 +422,8 @@ async function createHarness(proposals: ModelProposal[]) {
               effectPolicy: { effect: 'read', replay: 'safe' }
             }],
             abortSignal: signal
-          }
+          },
+          compactionGovernorState: { version: 1, step: 0, lastCompactionStep: -1 }
         }
       })
     } as never,
@@ -428,7 +465,8 @@ async function createHarness(proposals: ModelProposal[]) {
       awaitApproval: async () => 'allow'
     }),
     ids: { next: (prefix: string) => `${prefix}-1` },
-    nowIso: () => '2026-07-15T00:00:00.000Z'
+    nowIso: () => '2026-07-15T00:00:00.000Z',
+    emitRuntimeProgress: options.emitRuntimeProgress
   })
   return {
     kernel: new RuntimeKernel({
@@ -440,6 +478,7 @@ async function createHarness(proposals: ModelProposal[]) {
       nodes: handlers
     }),
     events,
+    snapshots,
     handlers,
     taskStates,
     applied,
