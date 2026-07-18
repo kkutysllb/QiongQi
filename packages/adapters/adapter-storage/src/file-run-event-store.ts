@@ -2,10 +2,13 @@ import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { RunEventEnvelopeSchema, type RunEventEnvelope, type RunIdentity } from '@qiongqi/contracts'
 import type { LeaseFence, RunEventStore } from '@qiongqi/ports'
-import { runtimeScopeDigest } from './runtime-store-utils.js'
 import { withFileLock } from './file-lock.js'
 
 export type FileRunEventStoreOptions = { requireFence?: boolean }
+
+function runScopeDir(identity: RunIdentity): string {
+  return join(identity.threadId, identity.turnId, identity.runId)
+}
 
 export class FileRunEventStore implements RunEventStore {
   public readonly rootDir: string
@@ -24,7 +27,7 @@ export class FileRunEventStore implements RunEventStore {
       if (existing.some((candidate) => candidate.seq === event.seq)) {
         throw new Error(`duplicate run event sequence ${event.seq}`)
       }
-      await mkdir(this.rootDir, { recursive: true })
+      await mkdir(this.eventDir(event), { recursive: true })
       await appendFile(this.eventPath(event), `${JSON.stringify(event)}\n`, 'utf8')
       return event
     })
@@ -34,7 +37,7 @@ export class FileRunEventStore implements RunEventStore {
     if (!this.options.requireFence) return
     if (!fence) throw new Error('runtime event write requires an active lease fence')
     try {
-      const raw = await readFile(join(this.rootDir, 'leases', `${runtimeScopeDigest(event)}.json`), 'utf8')
+      const raw = await readFile(this.leasePath(event), 'utf8')
       const lease = JSON.parse(raw) as { holderId?: string; epoch?: number; token?: string; expiresAt?: string }
       if (lease.holderId !== fence.holderId || lease.epoch !== fence.epoch || lease.token !== fence.token || !lease.expiresAt || Date.parse(lease.expiresAt) <= Date.now()) throw new Error('stale lease fence')
     } catch (error) {
@@ -44,16 +47,23 @@ export class FileRunEventStore implements RunEventStore {
   }
 
   private async withLock<T>(identity: RunIdentity, operation: () => Promise<T>): Promise<T> {
-    const leasePath = join(this.rootDir, 'leases', `${runtimeScopeDigest(identity)}.json`)
-    return withFileLock(leasePath, operation)
+    return withFileLock(this.leasePath(identity), operation)
   }
 
   async listAfter(identity: RunIdentity, seq: number): Promise<RunEventEnvelope[]> {
     return (await this.readEvents(identity)).filter((event) => event.seq > seq)
   }
 
+  private eventDir(identity: RunIdentity | RunEventEnvelope): string {
+    return join(this.rootDir, runScopeDir(identity))
+  }
+
   private eventPath(identity: RunIdentity | RunEventEnvelope): string {
-    return join(this.rootDir, `${runtimeScopeDigest(identity)}.jsonl`)
+    return join(this.eventDir(identity), 'events.jsonl')
+  }
+
+  private leasePath(identity: RunIdentity | RunEventEnvelope): string {
+    return join(this.eventDir(identity), 'lease.json')
   }
 
   private async readEvents(identity: RunIdentity | RunEventEnvelope): Promise<RunEventEnvelope[]> {

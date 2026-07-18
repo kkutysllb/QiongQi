@@ -746,7 +746,7 @@ export async function createToolMatrix(
   const delegationRuntime = options.capabilities?.subagents.enabled
     ? new DelegationRuntime({
         config: options.capabilities.subagents,
-        store: new FileDelegationStore(join(options.dataDir, 'child-runs')),
+        store: new FileDelegationStore(join(options.dataDir, 'threads')),
         events: core.events,
         nowIso,
         ...(peerRegistry ? {
@@ -1465,7 +1465,7 @@ async function assembleRuntime(input: {
     ...(options.runtime ? { runtime: options.runtime } : {})
   })
   const orchestrationMode = orchestrationModeForRuntimeOptions(options)
-  const runtimeV3Root = join(options.dataDir, 'runtime-v3')
+  const runtimeV3Root = join(options.dataDir, 'threads')
   const runtimeV3Events = orchestrationMode === 'kernel_v3' ? new FileRunEventStore(runtimeV3Root, { requireFence: true }) : undefined
   const toolRuntime = runtimeV3Events
     ? new ToolRuntimeV3({ toolHost: tools.toolHost, effects: new EffectCommitCoordinator({ events: runtimeV3Events, results: new FileEffectResultStore(runtimeV3Root), nowIso: core.nowIso }) })
@@ -1509,7 +1509,7 @@ async function assembleRuntime(input: {
   const loop = orchestrationMode === 'evented_v2'
     ? new EventedTurnOrchestrator(
         orchOpts,
-        new FileTurnStateStore(join(options.dataDir, 'turn-states')),
+        new FileTurnStateStore(join(options.dataDir, 'threads')),
         new TurnEventBus(),
         defaultLoopPlan(),
         defaultLoopEvaluator

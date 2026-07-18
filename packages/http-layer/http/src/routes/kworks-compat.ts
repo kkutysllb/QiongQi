@@ -4007,7 +4007,10 @@ export async function kworksGetThread(runtime: ServerRuntime, threadId: string, 
 }
 
 export async function kworksDeleteThread(runtime: ServerRuntime, threadId: string): Promise<JsonResponse> {
-  await runtime.threadService.delete(threadId)
+  const ok = await runtime.threadService.delete(threadId)
+  if (!ok) {
+    return jsonResponse({ detail: `Thread ${threadId} not found` }, 404)
+  }
   return jsonResponse({ success: true, message: `Deleted local data for ${threadId}` })
 }
 

@@ -16,7 +16,6 @@ import type {
   TaskStateStore
 } from '@qiongqi/ports'
 import { atomicWriteFile } from './atomic-write.js'
-import { runtimeScopeDigest } from './runtime-store-utils.js'
 
 type ActivePointer = { revision: number; token: string }
 type PreparedPayload = { prepared: TaskStatePreparedRevision; state: TaskStateV1 }
@@ -24,6 +23,10 @@ type PreparedPayload = { prepared: TaskStatePreparedRevision; state: TaskStateV1
 const LOCK_ATTEMPTS = 100
 const LOCK_DELAY_MS = 10
 const LOCK_STALE_MS = 10_000
+
+function runScopeDir(identity: RunIdentity): string {
+  return join(identity.threadId, identity.turnId, identity.runId)
+}
 
 export class FileTaskStateStore implements TaskStateStore {
   public readonly rootDir: string
@@ -33,13 +36,13 @@ export class FileTaskStateStore implements TaskStateStore {
   }
 
   async load(identity: RunIdentity): Promise<TaskStateV1 | undefined> {
-    return this.loadByScopeDigest(runtimeScopeDigest(identity))
+    return this.loadByScope(runScopeDir(identity), identity)
   }
 
   async prepare(state: TaskStateV1, expectedRevision: number): Promise<TaskStatePreparedRevision> {
     const parsed = TaskStateV1Schema.parse(state)
-    const scopeDigest = runtimeScopeDigest(parsed.identity)
-    const activeRevision = (await this.readActive(scopeDigest))?.revision ?? 0
+    const scope = runScopeDir(parsed.identity)
+    const activeRevision = (await this.readActive(scope))?.revision ?? 0
     if (activeRevision !== expectedRevision || parsed.revision !== expectedRevision + 1) {
       throw revisionConflict(expectedRevision, activeRevision, parsed.revision)
     }
@@ -48,7 +51,7 @@ export class FileTaskStateStore implements TaskStateStore {
       revision: parsed.revision,
       expectedRevision,
       token: randomUUID(),
-      scopeDigest
+      scopeDigest: scope
     }
     const payload: PreparedPayload = { prepared, state: parsed }
     await atomicWriteFile(this.revisionPath(prepared), JSON.stringify(payload, null, 2))
@@ -84,20 +87,35 @@ export class FileTaskStateStore implements TaskStateStore {
   async listForThread(
     scope: Pick<RunIdentity, 'ownerUserId' | 'workspaceKey' | 'threadId'>
   ): Promise<TaskStateV1[]> {
-    let directories: string[]
+    const threadDir = join(this.taskRoot(), scope.threadId)
+    let turnDirs: string[]
     try {
-      directories = await readdir(this.taskRoot())
+      turnDirs = await readdir(threadDir, { withFileTypes: true })
+        .then(entries => entries.filter(e => e.isDirectory()).map(e => e.name))
     } catch (error) {
       if ((error as { code?: string }).code === 'ENOENT') return []
       throw error
     }
-    const states = await Promise.all(directories.map((digest) => this.loadByScopeDigest(digest)))
-    return states.filter((state): state is TaskStateV1 => Boolean(
-      state &&
-      state.identity.ownerUserId === scope.ownerUserId &&
-      state.identity.workspaceKey === scope.workspaceKey &&
-      state.identity.threadId === scope.threadId
-    ))
+    const states: TaskStateV1[] = []
+    for (const turnId of turnDirs) {
+      let runDirs: string[]
+      try {
+        runDirs = await readdir(join(threadDir, turnId), { withFileTypes: true })
+          .then(entries => entries.filter(e => e.isDirectory()).map(e => e.name))
+      } catch { continue }
+      for (const runId of runDirs) {
+        const identity: RunIdentity = {
+          ownerUserId: scope.ownerUserId,
+          workspaceKey: scope.workspaceKey,
+          threadId: scope.threadId,
+          turnId,
+          runId
+        }
+        const state = await this.load(identity)
+        if (state) states.push(state)
+      }
+    }
+    return states
   }
 
   async appendMigrationRecord(record: TaskStateMigrationRecord): Promise<void> {
@@ -105,27 +123,21 @@ export class FileTaskStateStore implements TaskStateStore {
     await appendFile(this.migrationsPath(), `${JSON.stringify(record)}\n`, 'utf8')
   }
 
-  private async loadByScopeDigest(scopeDigest: string): Promise<TaskStateV1 | undefined> {
-    const active = await this.readActive(scopeDigest)
+  private async loadByScope(scope: string, identity: RunIdentity): Promise<TaskStateV1 | undefined> {
+    const active = await this.readActive(scope)
     if (!active) return undefined
     const prepared: TaskStatePreparedRevision = {
-      identity: {
-        ownerUserId: 'unresolved',
-        workspaceKey: 'unresolved',
-        threadId: 'unresolved',
-        turnId: 'unresolved',
-        runId: 'unresolved'
-      },
+      identity,
       expectedRevision: active.revision - 1,
       revision: active.revision,
       token: active.token,
-      scopeDigest
+      scopeDigest: scope
     }
     try {
       const raw = await readFile(this.revisionPath(prepared), 'utf8')
       const value = JSON.parse(raw) as { state?: unknown }
       const state = TaskStateV1Schema.parse(value.state)
-      if (runtimeScopeDigest(state.identity) !== scopeDigest) {
+      if (runScopeDir(state.identity) !== scope) {
         throw new Error('task state identity does not match storage scope')
       }
       return state
@@ -143,7 +155,7 @@ export class FileTaskStateStore implements TaskStateStore {
       if (
         value.prepared?.token !== prepared.token ||
         value.prepared.revision !== prepared.revision ||
-        runtimeScopeDigest(state.identity) !== prepared.scopeDigest
+        runScopeDir(state.identity) !== prepared.scopeDigest
       ) {
         throw new Error('prepared task revision payload mismatch')
       }
@@ -156,9 +168,9 @@ export class FileTaskStateStore implements TaskStateStore {
     }
   }
 
-  private async readActive(scopeDigest: string): Promise<ActivePointer | undefined> {
+  private async readActive(scope: string): Promise<ActivePointer | undefined> {
     try {
-      const value = JSON.parse(await readFile(this.activePath(scopeDigest), 'utf8')) as Partial<ActivePointer>
+      const value = JSON.parse(await readFile(this.activePath(scope), 'utf8')) as Partial<ActivePointer>
       if (!Number.isInteger(value.revision) || (value.revision ?? 0) <= 0 || typeof value.token !== 'string' || !value.token) {
         throw new Error('invalid task state active pointer')
       }
@@ -170,14 +182,14 @@ export class FileTaskStateStore implements TaskStateStore {
   }
 
   private assertPreparedIdentity(prepared: TaskStatePreparedRevision): void {
-    if (runtimeScopeDigest(prepared.identity) !== prepared.scopeDigest) {
+    if (runScopeDir(prepared.identity) !== prepared.scopeDigest) {
       throw new Error('prepared task revision identity mismatch')
     }
   }
 
-  private async acquireScopeLock(scopeDigest: string): Promise<() => Promise<void>> {
-    const lockPath = join(this.scopeDir(scopeDigest), 'commit.lock')
-    await mkdir(this.scopeDir(scopeDigest), { recursive: true })
+  private async acquireScopeLock(scope: string): Promise<() => Promise<void>> {
+    const lockPath = join(this.scopeDir(scope), 'commit.lock')
+    await mkdir(this.scopeDir(scope), { recursive: true })
     for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
       try {
         const handle = await open(lockPath, 'wx')
@@ -203,12 +215,12 @@ export class FileTaskStateStore implements TaskStateStore {
     return join(this.rootDir, 'task-state')
   }
 
-  private scopeDir(scopeDigest: string): string {
-    return join(this.taskRoot(), scopeDigest)
+  private scopeDir(scope: string): string {
+    return join(this.taskRoot(), scope)
   }
 
-  private activePath(scopeDigest: string): string {
-    return join(this.scopeDir(scopeDigest), 'active.json')
+  private activePath(scope: string): string {
+    return join(this.scopeDir(scope), 'active.json')
   }
 
   private revisionPath(prepared: Pick<TaskStatePreparedRevision, 'scopeDigest' | 'revision' | 'token'>): string {

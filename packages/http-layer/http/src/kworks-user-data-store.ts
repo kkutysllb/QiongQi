@@ -4,7 +4,7 @@ import { atomicWriteFile } from '@qiongqi/adapter-storage'
 import type { ModelConfig } from '@qiongqi/contracts'
 import type { UsageSnapshot } from '@qiongqi/contracts'
 import type { AuthSnapshot, AuthStore } from './auth-store.js'
-import { kworksUserWorkspacePaths } from './kworks-workspace-paths.js'
+import { ensureKWorksUserWorkspace, kworksUserWorkspacePaths } from './kworks-workspace-paths.js'
 
 export type KWorksModelProfileRecord = NonNullable<NonNullable<ModelConfig['profiles']>[string]>
 
@@ -89,7 +89,7 @@ export class FileKWorksUserDataStore implements KWorksUserDataStore {
         }
       }
     })
-    await ensureUserSkeleton(dirname(dirname(this.path)), userId)
+    await ensureKWorksUserWorkspace(kworksUserWorkspacePaths(dirname(dirname(this.path)), userId))
   }
 
   async listModelProfiles(userId: string): Promise<{ activeModel?: string; profiles: Record<string, KWorksModelProfileRecord> }> {
@@ -120,7 +120,7 @@ export class FileKWorksUserDataStore implements KWorksUserDataStore {
         }
       }
     })
-    await ensureUserSkeleton(dirname(dirname(this.path)), userId)
+    await ensureKWorksUserWorkspace(kworksUserWorkspacePaths(dirname(dirname(this.path)), userId))
   }
 
   async deleteModelProfile(userId: string, name: string): Promise<void> {
@@ -177,7 +177,7 @@ export class FileKWorksUserDataStore implements KWorksUserDataStore {
       }
     })
     if (record.userId) {
-      await ensureUserSkeleton(dirname(dirname(this.path)), record.userId)
+      await ensureKWorksUserWorkspace(kworksUserWorkspacePaths(dirname(dirname(this.path)), record.userId))
     }
   }
 
@@ -221,26 +221,6 @@ export class KWorksUserDataAuthStore implements AuthStore {
   save(snapshot: AuthSnapshot): Promise<void> {
     return this.store.saveAuth(snapshot)
   }
-}
-
-async function ensureUserSkeleton(workspaceRoot: string, userId: string): Promise<void> {
-  const paths = kworksUserWorkspacePaths(workspaceRoot, userId)
-  await Promise.all([
-    mkdir(paths.data, { recursive: true }),
-    mkdir(paths.thread, { recursive: true }),
-    mkdir(paths.threads, { recursive: true }),
-    mkdir(paths.workspace, { recursive: true }),
-    mkdir(paths.memory, { recursive: true }),
-    mkdir(paths.secrets, { recursive: true }),
-    mkdir(paths.usage, { recursive: true }),
-    mkdir(paths.skills, { recursive: true }),
-    mkdir(paths.mcp, { recursive: true }),
-    mkdir(paths.tools, { recursive: true }),
-    mkdir(paths.automations, { recursive: true }),
-    mkdir(paths.artifacts, { recursive: true }),
-    mkdir(paths.attachments, { recursive: true }),
-    mkdir(paths.logs, { recursive: true })
-  ])
 }
 
 function normalizeSnapshot(value: Partial<KWorksUserDataSnapshot>): KWorksUserDataSnapshot {

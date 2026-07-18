@@ -4,10 +4,13 @@ import { join, resolve } from 'node:path'
 import { RunStateV3Schema, type RunIdentity, type RunStateV3 } from '@qiongqi/contracts'
 import type { LeaseFence, RunLeaseStore, RunSnapshotStore } from '@qiongqi/ports'
 import { atomicWriteFile } from './atomic-write.js'
-import { runtimeScopeDigest } from './runtime-store-utils.js'
 import { withFileLock } from './file-lock.js'
 
 type Lease = { holderId: string; expiresAt: string; epoch: number; token: string }
+
+function runScopeDir(identity: RunIdentity): string {
+  return join(identity.threadId, identity.turnId, identity.runId)
+}
 
 export type FileRunStateStoreOptions = { requireFence?: boolean }
 
@@ -92,10 +95,10 @@ export class FileRunStateStore implements RunSnapshotStore, RunLeaseStore {
   }
 
   private toFence(lease: Lease): LeaseFence { return { holderId: lease.holderId, epoch: lease.epoch, token: lease.token } }
-  private runDir(identity: RunIdentity): string { return join(this.rootDir, 'snapshots', runtimeScopeDigest(identity)) }
+  private runDir(identity: RunIdentity): string { return join(this.rootDir, runScopeDir(identity)) }
   private snapshotPath(identity: RunIdentity): string { return join(this.runDir(identity), 'snapshot.json') }
-  private leasePath(identity: RunIdentity): string { return join(this.rootDir, 'leases', `${runtimeScopeDigest(identity)}.json`) }
-  private epochPath(identity: RunIdentity): string { return join(this.rootDir, 'leases', `${runtimeScopeDigest(identity)}.epoch`) }
+  private leasePath(identity: RunIdentity): string { return join(this.runDir(identity), 'lease.json') }
+  private epochPath(identity: RunIdentity): string { return join(this.runDir(identity), 'epoch.json') }
 
   private async readEpoch(identity: RunIdentity): Promise<number> {
     try { return Number.parseInt(await readFile(this.epochPath(identity), 'utf8'), 10) || 0 } catch { return 0 }

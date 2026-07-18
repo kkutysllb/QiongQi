@@ -5,7 +5,10 @@ import type { RunIdentity } from '@qiongqi/contracts'
 import type { EffectResultStore, StoredEffectResult } from '@qiongqi/ports'
 import { atomicWriteFile } from './atomic-write.js'
 import { effectResultDigest } from './effect-result-digest.js'
-import { runtimeScopeDigest } from './runtime-store-utils.js'
+
+function runScopeDir(identity: RunIdentity): string {
+  return join(identity.threadId, identity.turnId, identity.runId)
+}
 
 export class FileEffectResultStore implements EffectResultStore {
   public readonly rootDir: string
@@ -50,7 +53,7 @@ export class FileEffectResultStore implements EffectResultStore {
     return join(
       this.rootDir,
       'effect-results',
-      runtimeScopeDigest(identity),
+      runScopeDir(identity),
       `${createHash('sha256').update(idempotencyKey).digest('hex')}.json`
     )
   }

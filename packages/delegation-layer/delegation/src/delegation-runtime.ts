@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
 import type { SubagentsCapabilityConfig, AgentCard } from '@qiongqi/contracts'
@@ -74,23 +74,45 @@ export type ChildRunAggregate = {
 export class FileDelegationStore {
   constructor(private readonly rootDir: string) {}
 
+  private childRunDir(parentThreadId: string): string {
+    return join(this.rootDir, parentThreadId, 'child-runs')
+  }
+
   async upsert(record: ChildRunRecord): Promise<void> {
-    await mkdir(this.rootDir, { recursive: true })
-    await writeFile(join(this.rootDir, `${record.id}.json`), JSON.stringify(record, null, 2), 'utf8')
+    const dir = this.childRunDir(record.parentThreadId)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, `${record.id}.json`), JSON.stringify(record, null, 2), 'utf8')
   }
 
   async list(parentThreadId?: string): Promise<ChildRunRecord[]> {
-    await mkdir(this.rootDir, { recursive: true })
-    const entries = await readdir(this.rootDir).catch(() => [])
+    if (!parentThreadId) {
+      // List all threads: scan top-level thread directories
+      const threadDirs = await readdir(this.rootDir).catch(() => [])
+      const all: ChildRunRecord[] = []
+      for (const dir of threadDirs) {
+        const records = await this.listForDir(dir)
+        all.push(...records)
+      }
+      return all.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    }
+    return this.listForDir(parentThreadId)
+  }
+
+  private async listForDir(threadId: string): Promise<ChildRunRecord[]> {
+    const dir = this.childRunDir(threadId)
+    const entries = await readdir(dir).catch(() => [] as string[])
     const records = await Promise.all(entries
       .filter((entry) => entry.endsWith('.json'))
-      .map((entry) => readFile(join(this.rootDir, entry), 'utf8')
+      .map((entry) => readFile(join(dir, entry), 'utf8')
         .then((text) => ChildRunRecord.parse(JSON.parse(text)))
         .catch(() => null)))
     return records
       .filter((record): record is ChildRunRecord => Boolean(record))
-      .filter((record) => !parentThreadId || record.parentThreadId === parentThreadId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
+  async deleteByThread(threadId: string): Promise<void> {
+    await rm(this.childRunDir(threadId), { recursive: true, force: true })
   }
 }
 

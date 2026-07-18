@@ -55,20 +55,12 @@ export function kworksUserWorkspacePaths(root: string, userId: string): KWorksUs
 
 export async function ensureKWorksUserWorkspace(paths: KWorksUserWorkspacePaths): Promise<void> {
   await Promise.all([
-    mkdir(paths.data, { recursive: true }),
-    mkdir(paths.thread, { recursive: true }),
     mkdir(paths.threads, { recursive: true }),
     mkdir(paths.workspace, { recursive: true }),
     mkdir(paths.memory, { recursive: true }),
-    mkdir(paths.secrets, { recursive: true }),
-    mkdir(paths.usage, { recursive: true }),
-    mkdir(paths.skills, { recursive: true }),
     mkdir(paths.mcp, { recursive: true }),
-    mkdir(paths.tools, { recursive: true }),
-    mkdir(paths.automations, { recursive: true }),
     mkdir(paths.artifacts, { recursive: true }),
-    mkdir(paths.attachments, { recursive: true }),
-    mkdir(paths.logs, { recursive: true })
+    mkdir(paths.attachments, { recursive: true })
   ])
 }
 
