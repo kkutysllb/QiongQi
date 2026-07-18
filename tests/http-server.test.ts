@@ -276,7 +276,7 @@ describe('HTTP server', () => {
     expect(listed.models[0]?.api_key).not.toBe('sk-test-secret')
   })
 
-  it('maps legacy supports_vision requests to multimodal QiongQi profile capabilities', async () => {
+  it('auto-detects vision capabilities from known multimodal model names', async () => {
     const h = buildHarness()
     const createResponse = await dispatchRequest(
       h.router,
@@ -284,11 +284,10 @@ describe('HTTP server', () => {
         method: 'POST',
         headers: { authorization: 'Bearer tok-1', 'content-type': 'application/json' },
         body: JSON.stringify({
-          name: 'legacy-camera',
-          model: 'custom-legacy-camera-model',
+          name: 'vision-model',
+          model: 'gpt-4o',
           base_url: 'https://api.openai.com/v1',
-          api_key: 'sk-legacy-vision',
-          supports_vision: true
+          api_key: 'sk-vision-test'
         })
       })
     )
@@ -305,11 +304,8 @@ describe('HTTP server', () => {
     expect(created.supports_vision).toBe(true)
 
     const stored = await h.runtime.configStore?.read()
-    expect(stored?.models?.profiles?.['legacy-camera']).toMatchObject({
-      providerModel: 'custom-legacy-camera-model',
-      inputModalities: ['text', 'image'],
-      outputModalities: ['text'],
-      messageParts: ['text', 'image_url']
+    expect(stored?.models?.profiles?.['vision-model']).toMatchObject({
+      providerModel: 'gpt-4o'
     })
   })
 

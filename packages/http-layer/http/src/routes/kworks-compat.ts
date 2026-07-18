@@ -29,7 +29,6 @@ import { bearerToken } from '../auth.js'
 import { AuthError, authSessionBody, type AuthActor, type AuthSession } from '../auth-service.js'
 import { deriveThreadTitle, isDefaultThreadTitle } from '@qiongqi/domain'
 import {
-  VISION_MODEL_CAPABILITY_DEFAULTS,
   inferModelCapabilityDefaults
 } from '@qiongqi/loop'
 import { compatibilityProfileForModel } from '@qiongqi/adapter-model'
@@ -2869,21 +2868,18 @@ async function upsertModelProfile(
   const outputModalities = stringList(value.outputModalities) ?? stringList(value.output_modalities)
   const messageParts = stringList(value.messageParts) ?? stringList(value.message_parts)
   const supportsToolCalling = booleanValue(value.supportsToolCalling) ?? booleanValue(value.supports_tool_calling)
-  const supportsVision = booleanValue(value.supportsVision) ?? booleanValue(value.supports_vision)
   const contextWindowTokens = numberValue(value.contextWindowTokens) ?? numberValue(value.context_window_tokens)
-  const inferred = supportsVision
-    ? VISION_MODEL_CAPABILITY_DEFAULTS
-    : inferModelCapabilityDefaults(modelId, [name])
+  const inferred = inferModelCapabilityDefaults(modelId, [name])
   const profile = {
     ...existing,
     ...(stringList(value.aliases) ? { aliases: stringList(value.aliases) } : {}),
     ...(contextWindowTokens ? { contextWindowTokens } : {}),
     ...(isObject(value.contextCompaction) ? { contextCompaction: value.contextCompaction } : {}),
     ...(isObject(value.context_compaction) ? { contextCompaction: value.context_compaction } : {}),
-    ...(inputModalities ? { inputModalities } : supportsVision ? { inputModalities: inferred.inputModalities } : {}),
-    ...(outputModalities ? { outputModalities } : supportsVision ? { outputModalities: inferred.outputModalities } : {}),
+    ...(inputModalities ? { inputModalities } : { inputModalities: inferred.inputModalities }),
+    ...(outputModalities ? { outputModalities } : { outputModalities: inferred.outputModalities }),
     ...(supportsToolCalling !== undefined ? { supportsToolCalling } : {}),
-    ...(messageParts ? { messageParts } : supportsVision ? { messageParts: inferred.messageParts } : {}),
+    ...(messageParts ? { messageParts } : { messageParts: inferred.messageParts }),
     providerModel: modelId,
     ...(typeof value.baseUrl === 'string' || typeof value.base_url === 'string'
       ? { baseUrl: stringValue(value.baseUrl) ?? stringValue(value.base_url) }
