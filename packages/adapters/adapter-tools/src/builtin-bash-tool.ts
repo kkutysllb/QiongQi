@@ -378,7 +378,25 @@ function extractResultFilePaths(command: string): string[] {
   const teePattern = /(?:^|[\s;|&])tee(?:\s+-a)?\s+(?:"([^"]+)"|'([^']+)'|([^\s'";|&<>]+))/g
   collectShellPathMatches(command, redirectPattern, paths)
   collectShellPathMatches(command, teePattern, paths)
+  collectScriptWritePaths(command, paths)
   return paths.filter(hasResultFileExtension)
+}
+
+/**
+ * Reports written from a short Python/Node script do not pass through a shell
+ * redirect. Recognize only explicit write APIs and temporary output roots so
+ * ordinary input paths are not promoted to deliverables.
+ */
+function collectScriptWritePaths(command: string, paths: string[]): void {
+  if (!/\b(?:open|write_text|write_bytes|writeFile|writeFileSync)\s*\(/i.test(command)) {
+    return
+  }
+  const temporaryPathPattern = /(?:\/tmp\/|\/private\/tmp\/|\/var\/tmp\/|\/var\/folders\/)[^\s'"`;|&<>\\]+/gi
+  let match: RegExpExecArray | null
+  while ((match = temporaryPathPattern.exec(command)) !== null) {
+    const path = match[0].replace(/[),.:]+$/, '')
+    if (path) paths.push(path)
+  }
 }
 
 function collectShellPathMatches(command: string, pattern: RegExp, paths: string[]): void {

@@ -402,6 +402,28 @@ describe('Qiongqi built-in tools', () => {
     }
   })
 
+  it('materializes report files written by common Python APIs', async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), 'kun-bash-script-result-'))
+    const outsidePath = join(outsideDir, 'linkage_weekly.md')
+    try {
+      const output = await executeTool(host, workspace, 'bash', {
+        command: `python3 -c ${JSON.stringify(`from pathlib import Path; Path(${JSON.stringify(outsidePath)}).write_text('report', encoding='utf-8')`)}`
+      })
+
+      expect(output.exit_code).toBe(0)
+      expect(output.result_files).toEqual([
+        {
+          path: join(workspace, 'linkage_weekly.md'),
+          relative_path: 'linkage_weekly.md',
+          source_path: outsidePath
+        }
+      ])
+      expect(await readFile(join(workspace, 'linkage_weekly.md'), 'utf8')).toBe('report')
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true })
+    }
+  })
+
   it('finishes bash commands after the shell exits even when a background child keeps stdio open', async () => {
     const startedAt = Date.now()
     const output = await executeTool(host, workspace, 'bash', {
