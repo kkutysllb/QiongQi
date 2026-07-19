@@ -18,6 +18,7 @@ import {
   QiongqiErrorBody,
   QiongqiCapabilitiesConfig,
   RuntimeCapabilityManifest,
+  TurnSchema,
   buildRuntimeCapabilityManifest,
   emptyUsageSnapshot,
   type RuntimeEvent as RuntimeEventType
@@ -35,6 +36,19 @@ import {
 } from '@qiongqi/cli'
 
 describe('contracts', () => {
+  it('defaults explicit skill activations for legacy turn records', () => {
+    const turn = TurnSchema.parse({
+      id: 'turn_legacy',
+      threadId: 'thread_legacy',
+      status: 'completed',
+      prompt: 'legacy',
+      createdAt: '2026-07-19T00:00:00.000Z'
+    })
+
+    expect(turn.activeSkillIds).toEqual([])
+    expect(turn.explicitSkillIds).toEqual([])
+  })
+
   it('round-trips a thread creation payload through zod', () => {
     const parsed = CreateThreadRequest.parse({
       id: 'kworks-thread-1',

@@ -59,6 +59,10 @@ export type SkillPluginHostContext = {
   effectiveSkillIds?: readonly string[]
 }
 
+export type ActivatableSkillResolution =
+  | { ok: true; skill: LoadedSkillPlugin }
+  | { ok: false; code: 'unknown_skill' | 'skill_disabled' | 'skill_out_of_mode' }
+
 export type SkillPluginHostOptions = {
   activeLimit?: number
   instructionBudgetBytes?: number
@@ -138,6 +142,23 @@ export class SkillPluginHost {
     }
   }
 
+  resolveActivatableSkill(
+    skillId: string,
+    context: SkillPluginHostContext = {}
+  ): ActivatableSkillResolution {
+    const skill = this.plugins.find((plugin) => plugin.id === skillId)
+    if (!skill) return { ok: false, code: 'unknown_skill' }
+    const effectiveSkillIds = context.effectiveSkillIds
+      ?? (context.workModeId ? this.effectiveSkillIds(context.workModeId) : undefined)
+    if (effectiveSkillIds && !effectiveSkillIds.includes(skill.id)) {
+      return { ok: false, code: 'skill_out_of_mode' }
+    }
+    if (!this.isEnabled(skill, { ...context, effectiveSkillIds })) {
+      return { ok: false, code: 'skill_disabled' }
+    }
+    return { ok: true, skill }
+  }
+
   diagnostics(): SkillPluginDiagnostics {
     return {
       enabled: this.config.enabled,
@@ -176,6 +197,7 @@ export class SkillPluginHost {
     ownerUserId?: string
     workModeId?: string
     effectiveSkillIds?: readonly string[]
+    forcedSkillIds?: readonly string[]
   }): SkillTurnResolution {
     if (!this.config.enabled) return emptyResolution()
     const effectiveSkillIds = input.effectiveSkillIds ?? (input.workModeId ? this.effectiveSkillIds(input.workModeId) : undefined)
@@ -188,7 +210,19 @@ export class SkillPluginHost {
     }
     const available = this.plugins.filter((skill) => this.isEnabled(skill, context))
     const matches = this.matchSkills({ ...input, effectiveSkillIds })
-    const active = matches.slice(0, this.options.activeLimit)
+    const forced = uniqueStrings(input.forcedSkillIds ?? [])
+      .sort()
+      .flatMap((skillId) => {
+        const resolved = this.resolveActivatableSkill(skillId, context)
+        return resolved.ok
+          ? [{ skill: resolved.skill, skillId, reason: 'explicit-activation', score: 2_000 }]
+          : []
+      })
+    const forcedIds = new Set(forced.map((match) => match.skillId))
+    const active = [
+      ...forced,
+      ...matches.filter((match) => !forcedIds.has(match.skillId))
+    ].slice(0, this.options.activeLimit)
     const catalog = buildAvailableSkillsInstruction(
       available,
       input.workModeId,

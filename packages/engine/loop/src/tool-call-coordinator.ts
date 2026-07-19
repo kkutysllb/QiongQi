@@ -36,6 +36,7 @@ import {
   MAX_PARALLEL_TOOL_CALLS
 } from './loop-helpers.js'
 import type { ToolRuntimeV3 } from './tool-runtime-v3.js'
+import { isRecoverableToolDispatchError } from './tool-dispatch-errors.js'
 
 const TOOL_OUTPUT_MAX_INLINE_BYTES = 64 * 1024
 const TOOL_OUTPUT_PREVIEW_HEAD_BYTES = 4 * 1024
@@ -343,13 +344,7 @@ export class ToolCallCoordinator {
   }
 
   isRecoverableToolDispatchError(error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error)
-    return (
-      message.startsWith('unknown tool:') ||
-      message.includes(' is not provided by ') ||
-      message.includes(' is not advertised') ||
-      message.includes(' is disabled by policy')
-    )
+    return isRecoverableToolDispatchError(error)
   }
 
   async persistToolCallResult(

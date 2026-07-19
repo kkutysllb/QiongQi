@@ -66,6 +66,7 @@ export const TurnSchema = z.object({
   attachmentIds: z.array(z.string().min(1)).default([]),
   workModeId: z.string().min(1).optional(),
   activeSkillIds: z.array(z.string().min(1)).default([]),
+  explicitSkillIds: z.array(z.string().min(1)).default([]),
   injectedMemoryIds: z.array(z.string().min(1)).default([]),
   skillInjectionBytes: z.number().int().nonnegative().optional(),
   toolCatalogFingerprint: z.string().optional(),

@@ -354,13 +354,15 @@ export class PromptBuilder {
       this.deps.skillPluginHost?.workModeInfo(workModeId) ?? fallbackWorkModeInfo(workModeId)
     )
     const effectiveSkillIds = this.deps.skillPluginHost?.effectiveSkillIds(workModeId)
+    const explicitSkillIds = turn?.explicitSkillIds ?? []
     const skillResolution = this.deps.skillPluginHost?.resolveTurn({
       prompt: turn?.prompt ?? '',
       workspace: thread?.workspace ?? '',
       threadId,
       ownerUserId: thread?.ownerUserId,
       workModeId,
-      effectiveSkillIds
+      effectiveSkillIds,
+      forcedSkillIds: explicitSkillIds
     }) ?? this.deps.skillRuntime?.resolveTurn({
       prompt: turn?.prompt ?? '',
       workspace: thread?.workspace ?? ''

@@ -28,6 +28,7 @@ export function createTurnRecord(input: {
     items: [],
     attachmentIds: [...(input.attachmentIds ?? [])],
     activeSkillIds: [],
+    explicitSkillIds: [],
     injectedMemoryIds: [],
     ...(input.workModeId ? { workModeId: input.workModeId } : {}),
     ...(model ? { model } : {}),

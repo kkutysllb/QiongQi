@@ -76,6 +76,26 @@ describe('SkillPluginHost.resolveTurn', () => {
     expect(res.instructions.length).toBeGreaterThan(0)
   })
 
+  it('exposes the latest activations through diagnostics', async () => {
+    const host = await SkillPluginHost.create(cfg({ roots: [root] }), {})
+
+    host.resolveTurn({ prompt: '/skill:tdd now', workspace: '' })
+
+    expect(host.diagnostics().lastActivations).toEqual([
+      expect.objectContaining({ skillId: 'tdd' })
+    ])
+  })
+
+  it('injects the resolved skill package root for bundled skill resources', async () => {
+    const host = await SkillPluginHost.create(cfg({ roots: [root] }), {})
+    const res = host.resolveTurn({ prompt: '/skill:tdd now', workspace: '/workspace/project' })
+
+    const joined = res.instructions.join('\n')
+    expect(joined).toContain(`Skill package root: ${join(root, 'tdd')}`)
+    expect(joined).toContain(`Skill entry file: ${join(root, 'tdd', 'SKILL.md')}`)
+    expect(joined).toContain('Resolve relative skill resource paths from this skill package root')
+  })
+
   it('respects enabledSkills=false to exclude a skill', async () => {
     const host = await SkillPluginHost.create(
       cfg({ roots: [root] }),
@@ -85,6 +105,97 @@ describe('SkillPluginHost.resolveTurn', () => {
     expect(res.activeSkillIds).not.toContain('tdd')
   })
 
+  it('injects forced skills without a prompt match and deduplicates them', async () => {
+    const host = await SkillPluginHost.create(cfg({ roots: [root] }), {})
+
+    const res = host.resolveTurn({
+      prompt: 'ordinary request',
+      workspace: '',
+      effectiveSkillIds: ['tdd'],
+      forcedSkillIds: ['tdd', 'tdd']
+    })
+
+    expect(res.activeSkillIds).toEqual(['tdd'])
+    expect(res.instructions.join('\n')).toContain('Write tests first.')
+    expect(res.activations).toContainEqual(expect.objectContaining({
+      skillId: 'tdd',
+      reason: 'explicit-activation'
+    }))
+  })
+
+  it('validates activatable skills against loading, enablement, and work mode', async () => {
+    const host = await SkillPluginHost.create(cfg({ roots: [root] }), {})
+
+    expect(host.resolveActivatableSkill('tdd', {
+      workspace: '',
+      effectiveSkillIds: ['tdd']
+    })).toMatchObject({ ok: true, skill: { id: 'tdd' } })
+    expect(host.resolveActivatableSkill('missing', {
+      workspace: '',
+      effectiveSkillIds: ['missing']
+    })).toEqual({ ok: false, code: 'unknown_skill' })
+    expect(host.resolveActivatableSkill('tdd', {
+      workspace: '',
+      effectiveSkillIds: ['legacy']
+    })).toEqual({ ok: false, code: 'skill_out_of_mode' })
+
+    const disabled = await SkillPluginHost.create(
+      cfg({ roots: [root] }),
+      { enabledSkills: { tdd: false } }
+    )
+    expect(disabled.resolveActivatableSkill('tdd', {
+      workspace: '',
+      effectiveSkillIds: ['tdd']
+    })).toEqual({ ok: false, code: 'skill_disabled' })
+  })
+
+  it('reads enabledSkills from a dynamic provider for hot user-scoped changes', async () => {
+    let enabledSkills: Record<string, boolean> = { tdd: false }
+    const host = await SkillPluginHost.create(
+      cfg({ roots: [root] }),
+      { enabledSkillsProvider: () => enabledSkills }
+    )
+
+    expect(host.resolveTurn({ prompt: '/skill:tdd', workspace: '' }).activeSkillIds).not.toContain('tdd')
+
+    enabledSkills = { tdd: true }
+
+    expect(host.resolveTurn({ prompt: '/skill:tdd', workspace: '' }).activeSkillIds).toContain('tdd')
+  })
+
+  it('reloads work mode definitions on the same host instance', async () => {
+    const host = await SkillPluginHost.create(cfg({ roots: [root] }), {})
+
+    expect(host.workModeInfo('finance-market')?.id).toBe('office')
+
+    await host.reload(cfg({
+      roots: [root],
+      workModes: {
+        defaultModeId: 'office',
+        modes: {
+          task: {
+            id: 'office',
+            name: 'Task',
+            defaultSkillIds: []
+          },
+          'finance-market': {
+            id: 'finance-market',
+            name: '金融市场',
+            description: '分析市场数据、公告和交易机会',
+            defaultSkillIds: ['tdd']
+          }
+        }
+      }
+    }))
+
+    expect(host.workModeInfo('finance-market')).toMatchObject({
+      id: 'finance-market',
+      name: '金融市场',
+      description: '分析市场数据、公告和交易机会'
+    })
+    expect(host.effectiveSkillIds('finance-market')).toContain('tdd')
+  })
+
   it('respects activeLimit', async () => {
     const host = await SkillPluginHost.create(
       cfg({ roots: [root] }),
@@ -92,6 +203,71 @@ describe('SkillPluginHost.resolveTurn', () => {
     )
     const res = host.resolveTurn({ prompt: '/skill:tdd /skill:legacy', workspace: '' })
     expect(res.activeSkillIds.length).toBeLessThanOrEqual(1)
+  })
+
+  it('advertises enabled skills even when none activate for the prompt', async () => {
+    const host = await SkillPluginHost.create(cfg({ roots: [root] }), {})
+
+    const res = host.resolveTurn({
+      prompt: 'what skills can you use?',
+      workspace: '',
+      effectiveSkillIds: ['tdd']
+    })
+
+    const joined = res.instructions.join('\n')
+    expect(res.activeSkillIds).toEqual([])
+    expect(joined).toContain('Available Skills')
+    expect(joined).toContain('TDD (tdd)')
+    expect(joined).not.toContain('Legacy (legacy)')
+    expect(joined).toContain('not direct tool calls')
+    expect(joined).toContain('available, or usable skills')
+  })
+
+  it('explains configured work mode skill IDs even when their instruction packages are not loaded', async () => {
+    const host = await SkillPluginHost.create(cfg({
+      roots: [root],
+      workModes: {
+        defaultModeId: 'empty-mode',
+        modes: {
+          'empty-mode': {
+            id: 'empty-mode',
+            name: 'Empty Mode',
+            builtin: false,
+            editable: true,
+            defaultSkillIds: ['missing-skill']
+          }
+        }
+      },
+      lockedSkillIds: []
+    }), {})
+
+    const res = host.resolveTurn({
+      prompt: '有哪些技能可以调用？',
+      workspace: '',
+      workModeId: 'empty-mode'
+    })
+
+    const joined = res.instructions.join('\n')
+    expect(res.activeSkillIds).toEqual([])
+    expect(joined).toContain('Available Skills for work mode "empty-mode"')
+    expect(joined).toContain('Configured skill IDs without loaded instruction packages')
+    expect(joined).toContain('missing-skill')
+    expect(joined).toContain('Do not list built-in tools')
+  })
+
+  it('tells the model to discover installed skills from configured skill roots, not the workspace', async () => {
+    const host = await SkillPluginHost.create(cfg({ roots: [root] }), {})
+
+    const res = host.resolveTurn({
+      prompt: '我刚创建的新技能能识别吗？',
+      workspace: '/workspace/project',
+      effectiveSkillIds: ['tdd']
+    })
+
+    const joined = res.instructions.join('\n')
+    expect(joined).toContain('Available Skills')
+    expect(joined).toContain('TDD (tdd)')
+    expect(joined).toContain('answer from this list')
   })
 
   it('does not restrict the turn tool catalog even when a skill declares workspace:read', async () => {

@@ -267,6 +267,7 @@ export class TurnService {
     patch: Pick<
       Partial<Turn>,
       | 'activeSkillIds'
+      | 'explicitSkillIds'
       | 'injectedMemoryIds'
       | 'skillInjectionBytes'
       | 'toolCatalogFingerprint'
@@ -281,6 +282,7 @@ export class TurnService {
           ? {
               ...turn,
               ...(patch.activeSkillIds ? { activeSkillIds: [...patch.activeSkillIds] } : {}),
+              ...(patch.explicitSkillIds ? { explicitSkillIds: [...patch.explicitSkillIds] } : {}),
               ...(patch.injectedMemoryIds ? { injectedMemoryIds: [...patch.injectedMemoryIds] } : {}),
               ...(patch.skillInjectionBytes !== undefined ? { skillInjectionBytes: patch.skillInjectionBytes } : {}),
               ...(patch.toolCatalogFingerprint ? { toolCatalogFingerprint: patch.toolCatalogFingerprint } : {}),

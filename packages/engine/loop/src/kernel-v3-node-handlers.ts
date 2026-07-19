@@ -8,7 +8,7 @@ import type {
   TurnItem
 } from '@qiongqi/contracts'
 import { ModelProposalSchema } from '@qiongqi/contracts'
-import { makeAssistantReasoningItem, makeAssistantTextItem, makeToolCallItem } from '@qiongqi/domain'
+import { makeAssistantReasoningItem, makeAssistantTextItem, makeToolCallItem, makeToolResultItem } from '@qiongqi/domain'
 import type {
   IdGenerator,
   SessionStore,
@@ -28,6 +28,8 @@ import { renderRecoveryContinuationEntry, transitionContextRecovery } from './co
 import { migrateLegacyTaskState } from './legacy-task-state-migrator.js'
 import { digestValue } from './effect-commit.js'
 import { projectTaskState } from './task-progress-projector.js'
+import { isRecoverableToolDispatchError } from './tool-dispatch-errors.js'
+import { observeTool } from './tool-observation.js'
 
 export type KernelV3NodeDependencies = {
   threadStore: ThreadStore
@@ -446,19 +448,61 @@ export function createKernelV3NodeHandlers(
       const observations: ToolObservation[] = []
       const toolContext = await deps.createToolContext(identity, state)
       for (const call of prepared.calls) {
-        const execution = await deps.toolRuntime.execute({
-          identity,
-          state: runtimeState,
-          call,
-          context: {
-            ...toolContext,
-            runtimeIdentity: identity,
-            runtimeState,
-            runtimeStateSink: (next) => { runtimeState = next }
-          },
-          policy: built.toolPolicies?.[call.toolName] ?? defaultEffectPolicy(call)
-          , leaseFence
-        })
+        let execution: Awaited<ReturnType<ToolRuntimeV3['execute']>>
+        try {
+          execution = await deps.toolRuntime.execute({
+            identity,
+            state: runtimeState,
+            call,
+            context: {
+              ...toolContext,
+              runtimeIdentity: identity,
+              runtimeState,
+              runtimeStateSink: (next) => { runtimeState = next }
+            },
+            policy: built.toolPolicies?.[call.toolName] ?? defaultEffectPolicy(call),
+            leaseFence
+          })
+        } catch (error) {
+          if (!isRecoverableToolDispatchError(error)) throw error
+          const message = error instanceof Error ? error.message : String(error)
+          const policy = built.toolPolicies?.[call.toolName] ?? defaultEffectPolicy(call)
+          const item = makeToolResultItem({
+            id: `item_${call.callId}`,
+            turnId: identity.turnId,
+            threadId: identity.threadId,
+            callId: call.callId,
+            toolName: call.toolName,
+            toolKind: call.toolKind,
+            output: {
+              code: 'tool_dispatch_rejected',
+              error: message,
+              guidance: 'Use only tools advertised in the current turn context.'
+            },
+            isError: true,
+            status: 'failed',
+            finishedAt: deps.nowIso()
+          })
+          await deps.turns.updateItem(identity.threadId, `item_tool_${identity.turnId}_${call.callId}`, {
+            status: 'failed',
+            finishedAt: deps.nowIso()
+          } as Partial<TurnItem>)
+          await deps.turns.applyItem(identity.threadId, item)
+          observations.push(observeTool({
+            call,
+            result: { item, approved: false },
+            context: toolContext,
+            policy,
+            replayed: false
+          }))
+          ledger.push({
+            callId: call.callId,
+            toolName: call.toolName,
+            status: 'failed',
+            resultDigest: digestValue(item.kind === 'tool_result' ? item.output : item)
+          })
+          continue
+        }
         runtimeState = execution.state
         if (execution.outcome) return { outcome: execution.outcome }
         if (!execution.result) return { outcome: failedOutcome(`tool result missing: ${call.callId}`) }

@@ -62,9 +62,11 @@ describe('domain.thread', () => {
       id: 'thr_1',
       title: 'demo',
       workspace: '/tmp',
-      model: 'deepseek-chat'
+      model: 'deepseek-chat',
+      workModeId: 'coding'
     })
     const summary = toThreadSummary(thread)
+    expect(summary.workModeId).toBe('coding')
     expect(summary).not.toHaveProperty('turns')
   })
 })
@@ -74,6 +76,12 @@ describe('domain.turn', () => {
     id: 'turn_1',
     threadId: 'thr_1',
     prompt: 'hi'
+  })
+
+  it('creates independent resolved and explicit skill state', () => {
+    expect(baseTurn.activeSkillIds).toEqual([])
+    expect(baseTurn.explicitSkillIds).toEqual([])
+    expect(baseTurn.explicitSkillIds).not.toBe(baseTurn.activeSkillIds)
   })
 
   it('appends items without duplicates', () => {

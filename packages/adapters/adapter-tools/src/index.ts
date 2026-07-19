@@ -39,6 +39,7 @@ export * from './mcp-tool-provider.js'
 export * from './mcp-tool-search.js'
 export * from './memory-tool-provider.js'
 export * from './read.js'
+export * from './skill-activation-tool.js'
 export * from './web-tool-provider.js'
 export * from './write.js'
 export {

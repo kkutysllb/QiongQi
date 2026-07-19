@@ -169,6 +169,58 @@ describe('Kernel v3 production node handlers', () => {
     ])
   })
 
+  it('recovers from an unknown tool after preserving earlier committed calls', async () => {
+    const harness = await createHarness([
+      proposal({
+        stopClass: 'tool_calls',
+        toolIntents: [
+          { callId: 'call-valid', toolName: 'read_data', arguments: { path: 'data.json' } },
+          { callId: 'call-invalid', toolName: 'skill-manage', arguments: { action: 'enable' } }
+        ],
+        text: ''
+      }),
+      proposal({ proposalId: 'proposal-after-rejection', text: '报告已完成。' })
+    ], { throwForTool: 'skill-manage', throwMessage: 'unknown tool: skill-manage' })
+
+    await expect(harness.kernel.run(identity)).resolves.toEqual({
+      status: 'completed',
+      reason: 'normal_stop',
+      retryable: false
+    })
+
+    expect(harness.toolExecutions).toBe(2)
+    expect(harness.applied).toContainEqual(expect.objectContaining({
+      kind: 'tool_result',
+      callId: 'call-invalid',
+      toolName: 'skill-manage',
+      isError: true
+    }))
+    await expect(harness.taskStates.load(identity)).resolves.toMatchObject({
+      toolLedger: [
+        expect.objectContaining({ callId: 'call-valid', status: 'committed' }),
+        expect.objectContaining({ callId: 'call-invalid', status: 'failed' })
+      ]
+    })
+    expect(harness.requests).toHaveLength(2)
+  })
+
+  it('keeps non-recoverable tool failures terminal', async () => {
+    const harness = await createHarness([
+      proposal({
+        stopClass: 'tool_calls',
+        toolIntents: [{ callId: 'call-fatal', toolName: 'read_data', arguments: {} }],
+        text: ''
+      }),
+      proposal({ text: '不应执行到这里。' })
+    ], { throwForTool: 'read_data', throwMessage: 'database write failed' })
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({
+      status: 'failed',
+      reason: 'runtime_error'
+    })
+    expect(harness.requests).toHaveLength(1)
+  })
+
   it('materializes tool proposal reasoning and text before the tool call', async () => {
     const harness = await createHarness([
       proposal({
@@ -367,7 +419,14 @@ describe('Kernel v3 production node handlers', () => {
   })
 })
 
-async function createHarness(proposals: ModelProposal[], options: { emitRuntimeProgress?: boolean } = {}) {
+async function createHarness(
+  proposals: ModelProposal[],
+  options: {
+    emitRuntimeProgress?: boolean
+    throwForTool?: string
+    throwMessage?: string
+  } = {}
+) {
   const snapshots = new InMemoryRunStateStore()
   const events = new InMemoryRunEventStore()
   const taskStates = new InMemoryTaskStateStore()
@@ -464,6 +523,9 @@ async function createHarness(proposals: ModelProposal[], options: { emitRuntimeP
     toolRuntime: {
       execute: async (input: { state: unknown; call: { callId: string; toolName: string } }) => {
         toolExecutions += 1
+        if (options.throwForTool === input.call.toolName) {
+          throw new Error(options.throwMessage ?? `unknown tool: ${input.call.toolName}`)
+        }
         return {
           state: input.state,
           replayed: false,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { buildSkillToolProvider, type ActiveSkillsLookup } from '@qiongqi/skills'
 import type { LoadedSkillPlugin } from '@qiongqi/skills'
 import type { ToolHostContext } from '@qiongqi/ports'
+import { createActivateSkillTool } from '@qiongqi/adapter-tools'
 
 function plugin(id: string, declName: string): LoadedSkillPlugin {
   return {
@@ -66,5 +67,63 @@ describe('buildSkillToolProvider', () => {
     const result = await provider.tools[0].execute({}, ctx(['tdd']) as never)
     expect(typeof result.output).toBe('string')
     expect(result.output).toContain('run_tests')
+  })
+})
+
+describe('createActivateSkillTool', () => {
+  const activationContext = ctx([])
+
+  it('activates an enabled skill and is idempotent', async () => {
+    const activated: string[] = []
+    const tool = createActivateSkillTool({
+      resolveSkill: (skillId) => skillId === 'chart-visualization'
+        ? { ok: true, skill: { id: skillId } }
+        : { ok: false, code: 'unknown_skill' },
+      activateTurnSkill: async ({ skillId }) => { activated.push(skillId) }
+    })
+
+    expect(await tool.execute({ skill_id: 'chart-visualization' }, activationContext)).toEqual({
+      output: { code: 'skill_activated', skill_id: 'chart-visualization' }
+    })
+    expect(await tool.execute({ skill_id: 'chart-visualization' }, activationContext)).toEqual({
+      output: { code: 'skill_activated', skill_id: 'chart-visualization' }
+    })
+    expect(activated).toEqual(['chart-visualization', 'chart-visualization'])
+  })
+
+  it.each(['unknown_skill', 'skill_disabled', 'skill_out_of_mode'] as const)(
+    'returns a structured rejection for %s without activating',
+    async (code) => {
+      let activated = false
+      const tool = createActivateSkillTool({
+        resolveSkill: () => ({ ok: false, code }),
+        activateTurnSkill: async () => { activated = true }
+      })
+
+      const result = await tool.execute({ skill_id: 'chart-visualization' }, activationContext)
+
+      expect(result).toEqual({
+        output: { code: 'skill_activation_rejected', reason: code },
+        isError: true
+      })
+      expect(activated).toBe(false)
+    }
+  )
+
+  it('rejects malformed skill ids before calling the resolver', async () => {
+    let resolved = false
+    const tool = createActivateSkillTool({
+      resolveSkill: () => {
+        resolved = true
+        return { ok: false, code: 'unknown_skill' }
+      },
+      activateTurnSkill: async () => undefined
+    })
+
+    const result = await tool.execute({ skill_id: '  ' }, activationContext)
+
+    expect(result.isError).toBe(true)
+    expect(result.output).toEqual({ code: 'skill_activation_rejected', reason: 'invalid_skill_id' })
+    expect(resolved).toBe(false)
   })
 })

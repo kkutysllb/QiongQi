@@ -101,6 +101,7 @@ function resolveTurn(
     items: [],
     attachmentIds: [],
     activeSkillIds: [],
+    explicitSkillIds: [],
     injectedMemoryIds: [],
     createdAt: currentUser?.createdAt ?? 'legacy'
   }

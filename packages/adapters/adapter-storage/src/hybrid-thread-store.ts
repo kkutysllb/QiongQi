@@ -679,6 +679,7 @@ function turnFromItems(threadId: string, turnId: string, items: TurnItem[], fall
     steering: [],
     attachmentIds: attachmentIdsFromItems(items),
     activeSkillIds: [],
+    explicitSkillIds: [],
     injectedMemoryIds: [],
     createdAt,
     finishedAt: hasOpenItem ? undefined : items[items.length - 1]?.finishedAt ?? fallbackTime,
