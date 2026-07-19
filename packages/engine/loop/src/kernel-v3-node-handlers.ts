@@ -165,7 +165,8 @@ export function createKernelV3NodeHandlers(
         turnId: identity.turnId,
         signal,
         stepIndex: state.cursor.stepIndex,
-        compactionGovernorState: state.middleware['compaction-governor']?.data
+        compactionGovernorState: state.middleware['compaction-governor']?.data,
+        forceCompaction: nodeValue<boolean>(state, 'force-context-compaction') === true
       })
       if (built.kind === 'aborted') {
         return { outcome: { status: 'aborted', reason: 'user_aborted', retryable: false } }
@@ -203,13 +204,18 @@ export function createKernelV3NodeHandlers(
             guiPlan: built.ctx.activePlanContext
           }
         },
-        commands: built.ctx.compactionGovernorState
-          ? [{
-              type: 'set-middleware-state' as const,
-              id: 'compaction-governor',
-              state: { version: 1, data: built.ctx.compactionGovernorState }
-            }]
-          : []
+        commands: [
+          ...(built.ctx.compactionGovernorState
+            ? [{
+                type: 'set-middleware-state' as const,
+                id: 'compaction-governor',
+                state: { version: 1, data: built.ctx.compactionGovernorState }
+              }]
+            : []),
+          ...(nodeValue<boolean>(state, 'force-context-compaction') === true
+            ? [{ type: 'set-node-data' as const, nodeId: 'force-context-compaction', value: false }]
+            : [])
+        ]
       }
     },
 
@@ -219,8 +225,51 @@ export function createKernelV3NodeHandlers(
       if (!signal || signal.aborted) {
         return { outcome: { status: 'aborted', reason: 'user_aborted', retryable: false } }
       }
-      const proposal = await deps.proposalRunner.run({ ...built.request, abortSignal: signal })
+      let proposal: ModelProposal
+      try {
+        proposal = await deps.proposalRunner.run({ ...built.request, abortSignal: signal })
+      } catch (error) {
+        if (signal.aborted) {
+          return { outcome: { status: 'aborted', reason: 'user_aborted', retryable: false } }
+        }
+        if (state.recovery.attempts < state.recovery.maxAttempts) {
+          return {
+            condition: 'recover',
+            commands: [{
+              type: 'set-recovery',
+              recovery: {
+                ...state.recovery,
+                attempts: state.recovery.attempts + 1,
+                lastReason: 'model_stream_error'
+              }
+            }]
+          }
+        }
+        return {
+          outcome: failedOutcome(
+            `model invocation failed: ${error instanceof Error ? error.message : String(error)}`
+          )
+        }
+      }
       if (isContextCapacityProposal(proposal)) {
+        if (state.recovery.attempts < state.recovery.maxAttempts) {
+          return {
+            condition: 'recover',
+            value: proposal,
+            commands: [{
+              type: 'set-recovery',
+              recovery: {
+                ...state.recovery,
+                attempts: state.recovery.attempts + 1,
+                lastReason: 'context_capacity_exceeded'
+              }
+            }, {
+              type: 'set-node-data',
+              nodeId: 'force-context-compaction',
+              value: true
+            }]
+          }
+        }
         await emitProgress(deps, identity, {
           phase: 'terminated',
           summary: 'The model context capacity was reached; the run stopped after preserving the current task state.',
@@ -341,6 +390,7 @@ export function createKernelV3NodeHandlers(
         || proposalClass === 'nonterminal_action'
         || proposalClass === 'empty'
         || proposalClass === 'length_limited'
+        || proposalClass === 'protocol_error'
       ) {
         const transition = transitionContextRecovery({
           task,
@@ -366,7 +416,7 @@ export function createKernelV3NodeHandlers(
           ]
         }
       }
-      if (proposalClass === 'safety_or_refusal' || proposalClass === 'protocol_error') {
+      if (proposalClass === 'safety_or_refusal') {
         return {
           condition: 'fatal',
           value: { proposalClass, action: 'fatal' },
@@ -675,12 +725,16 @@ function isContextCapacityProposal(proposal: ModelProposal): boolean {
     nestedError?.code,
     nestedError?.type
   ].filter((value): value is string => typeof value === 'string')
-  return codes.some((code) => [
-    'context_length_exceeded',
-    'max_context_length',
-    'context_window_exceeded',
-    'input_too_long'
-  ].includes(code.trim().toLowerCase()))
+  return codes.some((code) => {
+    const normalized = code.trim().toLowerCase().replace(/[\s_-]+/g, '_')
+    if ([
+      'context_length_exceeded',
+      'max_context_length',
+      'context_window_exceeded',
+      'input_too_long'
+    ].includes(normalized)) return true
+    return /(?:context|prompt|input).*(?:length|window|token|limit|long|exceed)|(?:maximum|max|exceed|too_long).*(?:context|prompt|input|token)/i.test(normalized)
+  })
 }
 
 function isToolEffectPolicy(value: unknown): value is ToolEffectPolicy {

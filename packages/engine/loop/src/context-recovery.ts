@@ -53,7 +53,11 @@ export function transitionContextRecovery(input: {
 }
 
 function isRecoverableProposalClass(proposalClass: ProposalClass): boolean {
-  return proposalClass === 'context_discontinuity' || proposalClass === 'nonterminal_action'
+  return proposalClass === 'context_discontinuity'
+    || proposalClass === 'nonterminal_action'
+    || proposalClass === 'empty'
+    || proposalClass === 'length_limited'
+    || proposalClass === 'protocol_error'
 }
 
 export function renderRecoveryContinuationEntry(task: TaskStateV1): string {

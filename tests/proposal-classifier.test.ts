@@ -17,6 +17,22 @@ describe('classifyProposal', () => {
     })).toBe('protocol_error')
   })
 
+  it('keeps valid native tool intents when protocol markers leaked in the text channel', () => {
+    expect(classifyProposal({
+      proposal: proposal({
+        stopClass: 'tool_calls',
+        text: '(tool call) bash',
+        integrity: {
+          leakedProtocolText: true,
+          malformedToolCall: false,
+          completeToolCalls: true
+        },
+        toolIntents: [{ callId: 'c1', toolName: 'bash', arguments: { command: 'pwd' } }]
+      }),
+      task
+    })).toBe('tool_intents')
+  })
+
   it.each([
     '对话内容已经不在我的可见范围，请重新描述你要我完成的工作。',
     '我现在无法接续之前的任务。请告诉我下一步应该做什么。',

@@ -6,6 +6,7 @@ import {
   RuntimeKernel,
   createKernelV3NodeHandlers,
   digestValue,
+  defaultKernelV3Middleware,
   productionKernelV3Graph
 } from '@qiongqi/loop'
 
@@ -169,6 +170,29 @@ describe('Kernel v3 production node handlers', () => {
     ])
   })
 
+  it('executes valid native tools when the provider leaked protocol markers in text', async () => {
+    const harness = await createHarness([
+      proposal({
+        stopClass: 'tool_calls',
+        text: '(tool call) read_data',
+        integrity: {
+          leakedProtocolText: true,
+          malformedToolCall: false,
+          completeToolCalls: true
+        },
+        toolIntents: [{ callId: 'call-leaked-text', toolName: 'read_data', arguments: { path: 'data.json' } }]
+      }),
+      proposal({ text: '报告已完成。' })
+    ])
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+    expect(harness.toolExecutions).toBe(1)
+    expect(harness.applied).not.toContainEqual(expect.objectContaining({
+      kind: 'assistant_text',
+      text: '(tool call) read_data'
+    }))
+  })
+
   it('recovers from an unknown tool after preserving earlier committed calls', async () => {
     const harness = await createHarness([
       proposal({
@@ -330,25 +354,70 @@ describe('Kernel v3 production node handlers', () => {
     })
   })
 
-  it('terminates a context-capacity model failure with a structured outcome and progress item', async () => {
+  it('recovers from a context-capacity model failure before terminating the turn', async () => {
     const harness = await createHarness([
       proposal({
         stopClass: 'transport_error',
         providerReason: 'context_length_exceeded',
         text: ''
-      })
+      }),
+      proposal({ proposalId: 'proposal-after-context-recovery', text: '恢复后完成。' })
     ], { emitRuntimeProgress: true })
 
-    await expect(harness.kernel.run(identity)).resolves.toMatchObject({
-      status: 'degraded',
-      reason: 'context_capacity_exceeded',
-      retryable: true
-    })
-    expect(harness.applied).toContainEqual(expect.objectContaining({
-      kind: 'runtime_progress',
-      phase: 'terminated',
-      reason: 'context_capacity_exceeded'
-    }))
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+    expect(harness.requests).toHaveLength(2)
+    expect(harness.forceCompactions).toEqual([false, true])
+    expect(harness.requests[1]?.contextInstructions).toContainEqual(
+      expect.stringContaining('Authoritative task recovery entry')
+    )
+  })
+
+  it('recognizes provider-specific context overflow messages', async () => {
+    const harness = await createHarness([
+      proposal({
+        stopClass: 'transport_error',
+        providerReason: 'maximum context length is 131072 tokens',
+        text: ''
+      }),
+      proposal({ text: '报告已完成。' })
+    ])
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+    expect(harness.requests).toHaveLength(2)
+    expect(harness.forceCompactions).toEqual([false, true])
+  })
+
+  it('retries a malformed provider proposal before failing the turn', async () => {
+    const harness = await createHarness([
+      proposal({
+        stopClass: 'protocol_error',
+        text: '',
+        integrity: {
+          leakedProtocolText: false,
+          malformedToolCall: true,
+          completeToolCalls: false
+        }
+      }),
+      proposal({ proposalId: 'proposal-after-protocol-recovery', text: '报告已完成。' })
+    ])
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+    expect(harness.requests).toHaveLength(2)
+    expect(harness.requests[1]?.contextInstructions).toContainEqual(
+      expect.stringContaining('Authoritative task recovery entry')
+    )
+  })
+
+  it('retries a transient model stream exception before failing the turn', async () => {
+    const harness = await createHarness([
+      proposal({ proposalId: 'proposal-after-stream-retry', text: '报告已完成。' })
+    ], { throwForProposal: true })
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+    expect(harness.requests).toHaveLength(2)
+    expect(harness.requests[1]?.contextInstructions).toContainEqual(
+      expect.stringContaining('Authoritative task recovery entry')
+    )
   })
 
   it('accounts each logical tool call absent from the persisted task ledger', async () => {
@@ -425,6 +494,7 @@ async function createHarness(
     emitRuntimeProgress?: boolean
     throwForTool?: string
     throwMessage?: string
+    throwForProposal?: boolean
   } = {}
 ) {
   const snapshots = new InMemoryRunStateStore()
@@ -435,6 +505,7 @@ async function createHarness(
   const applied: Array<Record<string, unknown>> = []
   const persistedItems = new Map<string, Record<string, unknown>>()
   const requests: Array<Record<string, unknown>> = []
+  const forceCompactions: boolean[] = []
   let toolExecutions = 0
   const queue = [...proposals]
   const signal = new AbortController().signal
@@ -491,7 +562,9 @@ async function createHarness(
       }
     } as never,
     promptBuilder: {
-      build: async () => ({
+      build: async (input: { forceCompaction?: boolean }) => {
+        forceCompactions.push(input.forceCompaction === true)
+        return {
         kind: 'built',
         ctx: {
           request: {
@@ -510,11 +583,15 @@ async function createHarness(
           },
           compactionGovernorState: { version: 1, step: 0, lastCompactionStep: -1 }
         }
-      })
+        }
+      }
     } as never,
     proposalRunner: {
       run: async (request: Record<string, unknown>) => {
         requests.push(request)
+        if (options.throwForProposal && requests.length === 1) {
+          throw new Error('upstream connection reset')
+        }
         const next = queue.shift()
         if (!next) throw new Error('proposal queue exhausted')
         return next
@@ -563,6 +640,7 @@ async function createHarness(
       events,
       leases: snapshots,
       holderId: 'test',
+      middleware: defaultKernelV3Middleware(),
       nodes: handlers
     }),
     events,
@@ -572,6 +650,7 @@ async function createHarness(
     applied,
     persistedItems,
     requests,
+    forceCompactions,
     get toolExecutions() { return toolExecutions }
   }
 }

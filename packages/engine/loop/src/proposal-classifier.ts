@@ -17,7 +17,7 @@ export function classifyProposal(input: {
 }): ProposalClass {
   const { proposal } = input
   if (
-    proposal.integrity.leakedProtocolText
+    (proposal.integrity.leakedProtocolText && proposal.toolIntents.length === 0)
     || proposal.integrity.malformedToolCall
     || !proposal.integrity.completeToolCalls
     || proposal.stopClass === 'protocol_error'

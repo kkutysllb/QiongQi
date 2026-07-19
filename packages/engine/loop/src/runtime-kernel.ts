@@ -563,9 +563,6 @@ export class RuntimeKernel {
         if (event.eventType === 'node.completed') {
           const completed = parseCompletedNodePayload(event.payload)
           pending = { node: this.nodeFor(completed.nodeId), completed }
-        } else if (event.eventType === 'node.after_middleware') {
-          const after = parseAfterMiddlewarePayload(event.payload)
-          this.applyCommands(state, after.commands)
         }
         continue
       }
@@ -600,7 +597,6 @@ export class RuntimeKernel {
         if (!pending) throw new Error('node.after_middleware has no matching completion')
         const after = parseAfterMiddlewarePayload(event.payload)
         assertAfterMiddlewareMatches(pending.completed, after)
-        this.applyCommands(state, after.commands)
         state = this.reduceAfterMiddleware(state, after, event.seq)
         pending = undefined
       }
@@ -676,6 +672,20 @@ export class RuntimeKernel {
       const outcome = payload.outcome ?? this.commandOutcome(payload.commands)
       if (outcome) next = this.withOutcome(next, outcome)
     }
+    if (!isTerminal(next)) {
+      const control = this.middlewareControlTarget(payload.commands, next.cursor.nodeId)
+      if (control) {
+        this.nodeFor(control.nodeId)
+        next = {
+          ...next,
+          cursor: {
+            ...next.cursor,
+            nodeId: control.nodeId,
+            attempt: next.cursor.attempt + 1
+          }
+        }
+      }
+    }
     return {
       ...next,
       cursor: {
@@ -684,6 +694,27 @@ export class RuntimeKernel {
       },
       updatedAt: this.options.nowIso()
     }
+  }
+
+  private middlewareControlTarget(
+    commands: readonly MiddlewareCommand[],
+    defaultNodeId: string
+  ): { nodeId: string; reason: string } | undefined {
+    const jump = [...commands].reverse().find(
+      (command): command is Extract<MiddlewareCommand, { type: 'jump' }> => command.type === 'jump'
+    )
+    if (jump) return { nodeId: jump.nodeId, reason: jump.reason }
+
+    const retry = [...commands].reverse().find(
+      (command): command is Extract<MiddlewareCommand, { type: 'retry' }> => command.type === 'retry'
+    )
+    if (!retry) return undefined
+
+    // A middleware retry is a LangGraph-style re-entry into the model path.
+    // Production Kernel v3 names that boundary `build-context`; small custom
+    // graphs without it retry the completed node itself.
+    const promptNode = this.options.graph.nodes.find((node) => node.id === 'build-context')
+    return { nodeId: promptNode?.id ?? defaultNodeId, reason: retry.reason }
   }
 
   private reduceCompletedNode(

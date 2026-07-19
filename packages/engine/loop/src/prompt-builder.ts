@@ -278,8 +278,9 @@ export class PromptBuilder {
     signal: AbortSignal
     stepIndex: number
     compactionGovernorState?: unknown
+    forceCompaction?: boolean
   }): Promise<BuildResult> {
-    const { threadId, turnId, signal, stepIndex } = input
+    const { threadId, turnId, signal, stepIndex, forceCompaction = false } = input
     if (shouldVerifyImmutablePrefix()) {
       verifyImmutablePrefix(this.deps.prefix)
     }
@@ -470,7 +471,14 @@ export class PromptBuilder {
       toolSpecs.some((tool) => tool.name === CREATE_PLAN_TOOL_NAME)
         ? CREATE_PLAN_TOOL_NAME
         : undefined
-    const compacted = await this.compactIfNeeded(items, model, signal, runtimeScope, input.compactionGovernorState)
+    const compacted = await this.compactIfNeeded(
+      items,
+      model,
+      signal,
+      runtimeScope,
+      input.compactionGovernorState,
+      forceCompaction
+    )
     if (signal.aborted) return { kind: 'aborted' }
     const history = compacted.items
     await recordPipelineStage(this.deps.events, {
@@ -838,12 +846,19 @@ export class PromptBuilder {
     model: string,
     signal: AbortSignal,
     context: PromptRuntimeScope,
-    persistedState?: unknown
+    persistedState?: unknown,
+    forceCompaction = false
   ): Promise<{ items: TurnItem[]; state: CompactionGovernorState }> {
     const restoredState = parseCompactionGovernorState(persistedState)
     const pressure = this.consumePromptPressure(context, model)
     const thresholdModel = pressure?.model || model
-    const plan = this.deps.compactor.planCompaction(items, { model: thresholdModel, promptTokens: pressure?.promptTokens })
+    const plan = forceCompaction
+      ? {
+          mode: 'force' as const,
+          keepRecent: 1,
+          reason: 'provider context capacity exceeded; forced history compaction'
+        }
+      : this.deps.compactor.planCompaction(items, { model: thresholdModel, promptTokens: pressure?.promptTokens })
     if (!plan) return { items, state: restoredState ?? new CompactionGovernor().snapshot() }
     const key = promptScopeKey(context)
     const local = persistedState === undefined

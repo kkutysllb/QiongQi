@@ -39,6 +39,7 @@ export function productionKernelV3Graph(): ExecutionGraph {
       { from: 'prepare-turn', to: 'restore-task', when: 'next' },
       { from: 'restore-task', to: 'build-context', when: 'next' },
       { from: 'build-context', to: 'invoke-model', when: 'next' },
+      { from: 'invoke-model', to: 'recover-context', when: 'recover' },
       { from: 'invoke-model', to: 'normalize-proposal', when: 'next' },
       { from: 'normalize-proposal', to: 'account-model', when: 'next' },
       { from: 'account-model', to: 'evaluate', when: 'next' },

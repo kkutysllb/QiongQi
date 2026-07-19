@@ -1,8 +1,25 @@
 import { describe, expect, it } from 'vitest'
 import type { RecoveryState, TaskStateV1 } from '@qiongqi/contracts'
-import { renderRecoveryContinuationEntry, transitionContextRecovery } from '@qiongqi/loop'
+import { contextRecoveryMiddleware, renderRecoveryContinuationEntry, transitionContextRecovery } from '@qiongqi/loop'
 
 describe('task context recovery', () => {
+  it('lets the production evaluator own structured context recovery routing', async () => {
+    const middleware = contextRecoveryMiddleware()
+    const result = await middleware.handle(
+      {
+        identity: task.identity,
+        state: {} as never,
+        node: { id: 'account-model', kind: 'account_model', effect: 'state' },
+        hook: 'afterNode',
+        facts: { proposalClass: 'context_discontinuity' },
+        commands: []
+      },
+      async () => ({ value: 'next' })
+    )
+
+    expect(result).toMatchObject({ value: 'next' })
+  })
+
   it('never commits repeated context discontinuity as final text', () => {
     const first = transitionContextRecovery({
       task,

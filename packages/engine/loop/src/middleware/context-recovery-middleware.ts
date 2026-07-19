@@ -5,9 +5,6 @@ export function contextRecoveryMiddleware(): RuntimeMiddleware {
   return {
     id: 'context-recovery', version: 1, hooks: ['afterNode'],
     handle: async (context, next) => {
-      if (context.facts?.proposalClass === 'context_discontinuity') {
-        return { commands: [{ type: 'retry', reason: 'structured context discontinuity' }] }
-      }
       const text = typeof context.facts?.proposalText === 'string' ? context.facts.proposalText : ''
       const buildContext = context.facts?.buildContext
       const recoverable = context.facts?.recoverable === true || context.facts?.hasRecoverableState === true ||
