@@ -61,6 +61,32 @@ function hasLeakedProtocolText(text: string): boolean {
   return LEAKED_PROTOCOL_MARKERS.some((marker) => lower.includes(marker))
 }
 
+/**
+ * Strip protocol markers from the accumulated text. This is a last-resort
+ * sanitization that mirrors what {@link sanitizeModelText} does at the
+ * per-chunk level. It runs in {@link normalizeModelCompletion} to ensure
+ * that text accumulated across chunks is clean before the
+ * {@link hasLeakedProtocolText} check.
+ *
+ * We do NOT import `sanitizeModelText` from `@qiongqi/adapter-model`
+ * because this package (engine/loop) deliberately avoids a dependency on
+ * the adapter layer.
+ */
+function stripProtocolMarkers(text: string): string {
+  let out = text
+  for (const marker of LEAKED_PROTOCOL_MARKERS) {
+    // Split on the marker and rejoin; this handles both the marker and
+    // its case-insensitive variants (the marker list is already lowercase).
+    const parts = out.split(marker)
+    if (parts.length > 1) out = parts.join('')
+  }
+  // Also strip `<action>`-style tags generically: any `<tagname>` or
+  // `</tagname>` that matches a known protocol pattern.
+  out = out.replace(/<\/?(?:action|tool_call|function_calls?|invoke|parameter|antml:[a-z_]+|python_tag)>/gi, '')
+  out = out.replace(/<\|[^|>]*\|>/g, '')
+  return out
+}
+
 function stopClassFor(chunk: Extract<ModelStreamChunk, { kind: 'completed' }>): NormalizedModelCompletion['stopClass'] {
   if (chunk.stopClass) return chunk.stopClass
   if (chunk.stopReason === 'tool_calls') return 'tool_calls'
@@ -131,6 +157,12 @@ export async function normalizeModelCompletion(
   }
   const stop = completed ?? { kind: 'completed' as const, stopReason: 'stop' as const }
   const leakedProtocolText = hasLeakedProtocolText(text)
+  // Strip protocol markers from the visible text so downstream consumers
+  // (classifier, renderer, evaluator) see clean output. Only discard tool
+  // intents when the tool calls themselves are structurally malformed;
+  // leaked protocol text in the content channel is a cosmetic / rendering
+  // issue and does not invalidate properly-parsed tool calls.
+  const cleanText = leakedProtocolText ? stripProtocolMarkers(text) : text
   const integrity = {
     leakedProtocolText,
     malformedToolCall,
@@ -143,9 +175,9 @@ export async function normalizeModelCompletion(
     provider: stop.provider ?? options.provider,
     rawMetadata,
     integrity,
-    text,
+    text: cleanText,
     reasoning,
-    toolIntents: leakedProtocolText || malformedToolCall ? [] : [...intents.values()]
+    toolIntents: malformedToolCall ? [] : [...intents.values()]
   })
   return normalized
 }

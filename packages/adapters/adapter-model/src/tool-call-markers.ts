@@ -23,7 +23,7 @@
 const MINIMAX_DELIMITER_RE = /<\]minimax\[>/g
 
 /** Paired MiniMax tool-invocation wrapper and its argument sub-tags. */
-const MINIMAX_INVOKE_TAGS = ['invoke', 'command', 'parameter', 'tool_call', 'function_calls'] as const
+const MINIMAX_INVOKE_TAGS = ['invoke', 'command', 'parameter', 'tool_call', 'function_calls', 'action'] as const
 const PAIRED_INVOKE_RE = new RegExp(
   `<(?:${MINIMAX_INVOKE_TAGS.join('|')})(?:\\s[^>]*)?>[\\s\\S]*?<\\/(?:${MINIMAX_INVOKE_TAGS.join('|')})>`,
   'gi',
@@ -116,7 +116,7 @@ const ANTHROPIC_TO_UNCLOSED_RE = /\(\s*to\s+name="[^"]*">\][\s\S]*$/gi
 const PROSE_TOOL_CALL_RE = /\(tool call\s*\[Tool call:[^\]]*\][\s\S]*?\)\s*/gi
 
 /** Fast-path test: any tool-call marker present at all? */
-const HAS_MARKER_RE = /<\]minimax\[>|<\/?(?:invoke|command|parameter|tool_call|function_calls)\b|\(\s*(?:tool\s*call|to\s+name=)|<function_calls>|\[<(?:invoke|parameter|function_calls|path|command|content)|\]\[|\[<\/(?:path|invoke|parameter|command|content|function_calls|antml)|^\]|(?<=\n)\]/i
+const HAS_MARKER_RE = /<\]minimax\[>|<\/?(?:invoke|command|parameter|tool_call|function_calls|action)\b|\(\s*(?:tool\s*call|to\s+name=)|<function_calls>|\[<(?:invoke|parameter|function_calls|path|command|content)|\]\[|\[<\/(?:path|invoke|parameter|command|content|function_calls|antml|action)|^\]|(?<=\n)\]/i
 
 /**
  * Remove inline tool/function-call markers and their inner content from `text`.

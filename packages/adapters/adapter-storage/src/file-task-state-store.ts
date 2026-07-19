@@ -87,7 +87,7 @@ export class FileTaskStateStore implements TaskStateStore {
   async listForThread(
     scope: Pick<RunIdentity, 'ownerUserId' | 'workspaceKey' | 'threadId'>
   ): Promise<TaskStateV1[]> {
-    const threadDir = join(this.taskRoot(), scope.threadId)
+    const threadDir = join(this.rootDir, scope.threadId)
     let turnDirs: string[]
     try {
       turnDirs = await readdir(threadDir, { withFileTypes: true })
@@ -211,12 +211,8 @@ export class FileTaskStateStore implements TaskStateStore {
     throw new Error('task state commit lock unavailable')
   }
 
-  private taskRoot(): string {
-    return join(this.rootDir, 'task-state')
-  }
-
   private scopeDir(scope: string): string {
-    return join(this.taskRoot(), scope)
+    return join(this.rootDir, scope, 'task-state')
   }
 
   private activePath(scope: string): string {

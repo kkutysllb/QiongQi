@@ -52,8 +52,8 @@ export class FileEffectResultStore implements EffectResultStore {
   resultPath(identity: RunIdentity, idempotencyKey: string): string {
     return join(
       this.rootDir,
-      'effect-results',
       runScopeDir(identity),
+      'effect-results',
       `${createHash('sha256').update(idempotencyKey).digest('hex')}.json`
     )
   }
