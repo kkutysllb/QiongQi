@@ -420,6 +420,24 @@ describe('Kernel v3 production node handlers', () => {
     )
   })
 
+  it('routes an empty post-tool response through durable task recovery', async () => {
+    const harness = await createHarness([
+      proposal({
+        stopClass: 'tool_calls',
+        text: '',
+        toolIntents: [{ callId: 'call-before-empty', toolName: 'read_data', arguments: { path: 'data.json' } }]
+      }),
+      proposal({ proposalId: 'proposal-empty-post-tool', text: '' }),
+      proposal({ proposalId: 'proposal-after-empty-recovery', text: '报告已完成。' })
+    ])
+
+    await expect(harness.kernel.run(identity)).resolves.toMatchObject({ status: 'completed' })
+    expect(harness.requests).toHaveLength(3)
+    expect(harness.requests[2]?.contextInstructions).toContainEqual(
+      expect.stringContaining('Authoritative task recovery entry')
+    )
+  })
+
   it('accounts each logical tool call absent from the persisted task ledger', async () => {
     const harness = await createHarness([])
     const restored = task()
