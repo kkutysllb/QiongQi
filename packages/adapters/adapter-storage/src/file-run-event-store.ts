@@ -3,12 +3,9 @@ import { join, resolve } from 'node:path'
 import { RunEventEnvelopeSchema, type RunEventEnvelope, type RunIdentity } from '@qiongqi/contracts'
 import type { LeaseFence, RunEventStore } from '@qiongqi/ports'
 import { withFileLock } from './file-lock.js'
+import { runtimeScopeDigest } from './runtime-store-utils.js'
 
 export type FileRunEventStoreOptions = { requireFence?: boolean }
-
-function runScopeDir(identity: RunIdentity): string {
-  return join(identity.threadId, identity.turnId, identity.runId)
-}
 
 export class FileRunEventStore implements RunEventStore {
   public readonly rootDir: string
@@ -27,7 +24,7 @@ export class FileRunEventStore implements RunEventStore {
       if (existing.some((candidate) => candidate.seq === event.seq)) {
         throw new Error(`duplicate run event sequence ${event.seq}`)
       }
-      await mkdir(this.eventDir(event), { recursive: true })
+      await mkdir(this.eventDir(), { recursive: true })
       await appendFile(this.eventPath(event), `${JSON.stringify(event)}\n`, 'utf8')
       return event
     })
@@ -54,16 +51,16 @@ export class FileRunEventStore implements RunEventStore {
     return (await this.readEvents(identity)).filter((event) => event.seq > seq)
   }
 
-  private eventDir(identity: RunIdentity | RunEventEnvelope): string {
-    return join(this.rootDir, runScopeDir(identity))
+  private eventDir(): string {
+    return join(this.rootDir, 'events')
   }
 
   private eventPath(identity: RunIdentity | RunEventEnvelope): string {
-    return join(this.eventDir(identity), 'events.jsonl')
+    return join(this.eventDir(), `${runtimeScopeDigest(identity)}.jsonl`)
   }
 
   private leasePath(identity: RunIdentity | RunEventEnvelope): string {
-    return join(this.eventDir(identity), 'lease.json')
+    return join(this.rootDir, 'leases', `${runtimeScopeDigest(identity)}.json`)
   }
 
   private async readEvents(identity: RunIdentity | RunEventEnvelope): Promise<RunEventEnvelope[]> {

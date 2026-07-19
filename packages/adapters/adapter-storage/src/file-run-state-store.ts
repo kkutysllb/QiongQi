@@ -1,16 +1,13 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { RunStateV3Schema, type RunIdentity, type RunStateV3 } from '@qiongqi/contracts'
 import type { LeaseFence, RunLeaseStore, RunSnapshotStore } from '@qiongqi/ports'
 import { atomicWriteFile } from './atomic-write.js'
 import { withFileLock } from './file-lock.js'
+import { runtimeScopeDigest } from './runtime-store-utils.js'
 
 type Lease = { holderId: string; expiresAt: string; epoch: number; token: string }
-
-function runScopeDir(identity: RunIdentity): string {
-  return join(identity.threadId, identity.turnId, identity.runId)
-}
 
 export type FileRunStateStoreOptions = { requireFence?: boolean }
 
@@ -41,8 +38,9 @@ export class FileRunStateStore implements RunSnapshotStore, RunLeaseStore {
   }
 
   async writeRawSnapshot(identity: RunIdentity, contents: string): Promise<void> {
-    await mkdir(this.runDir(identity), { recursive: true })
-    await writeFile(this.snapshotPath(identity), contents, 'utf8')
+    const path = this.snapshotPath(identity)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, contents, 'utf8')
   }
 
   async acquire(identity: RunIdentity, holderId: string, ttlMs: number): Promise<{ acquired: boolean; expiresAt?: string; fence?: LeaseFence }> {
@@ -95,10 +93,10 @@ export class FileRunStateStore implements RunSnapshotStore, RunLeaseStore {
   }
 
   private toFence(lease: Lease): LeaseFence { return { holderId: lease.holderId, epoch: lease.epoch, token: lease.token } }
-  private runDir(identity: RunIdentity): string { return join(this.rootDir, runScopeDir(identity)) }
-  private snapshotPath(identity: RunIdentity): string { return join(this.runDir(identity), 'snapshot.json') }
-  private leasePath(identity: RunIdentity): string { return join(this.runDir(identity), 'lease.json') }
-  private epochPath(identity: RunIdentity): string { return join(this.runDir(identity), 'epoch.json') }
+  private scopeDigest(identity: RunIdentity): string { return runtimeScopeDigest(identity) }
+  private snapshotPath(identity: RunIdentity): string { return join(this.rootDir, 'snapshots', `${this.scopeDigest(identity)}.json`) }
+  private leasePath(identity: RunIdentity): string { return join(this.rootDir, 'leases', `${this.scopeDigest(identity)}.json`) }
+  private epochPath(identity: RunIdentity): string { return join(this.rootDir, 'epochs', `${this.scopeDigest(identity)}.json`) }
 
   private async readEpoch(identity: RunIdentity): Promise<number> {
     try { return Number.parseInt(await readFile(this.epochPath(identity), 'utf8'), 10) || 0 } catch { return 0 }

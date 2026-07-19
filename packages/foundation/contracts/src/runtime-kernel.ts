@@ -73,7 +73,7 @@ export type BudgetState = z.infer<typeof BudgetStateSchema>
 
 export const RecoveryStateSchema = z.object({
   attempts: z.number().int().nonnegative().default(0),
-  maxAttempts: z.number().int().nonnegative().default(1),
+  maxAttempts: z.number().int().nonnegative().default(3),
   lastReason: z.string().optional()
 }).strict()
 export type RecoveryState = z.infer<typeof RecoveryStateSchema>

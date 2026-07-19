@@ -177,7 +177,6 @@ export function qiongqiRuntimeStartupInfo({
     port,
     configPath: info.configPath,
     dataDir: info.dataDir,
-    defaultModel: info.model,
     approvalPolicy: info.approvalPolicy,
     insecure: info.insecure,
     startedAt: info.startedAt,

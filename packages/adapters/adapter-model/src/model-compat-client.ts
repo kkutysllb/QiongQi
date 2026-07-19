@@ -895,6 +895,23 @@ export class ModelCompatClient implements ModelClient {
       reasoningAccumulator += flushed.reasoning
       yield { kind: 'assistant_reasoning_delta', text: flushed.reasoning }
     }
+    // Safety net: finalize any tool calls still pending after stream end.
+    // This handles models that never send an explicit finish_reason or
+    // close the stream without a [DONE] sentinel.
+    if (pendingArguments.size > 0) {
+      for (const [callId, value] of pendingArguments) {
+        if (!value.name) continue
+        const args = this.parseToolArguments(value.arguments)
+        yield {
+          kind: 'tool_call_complete',
+          callId,
+          toolName: value.name,
+          arguments: args
+        }
+      }
+      pendingArguments.clear()
+      finishReason = 'tool_calls'
+    }
     if (usage) yield { kind: 'usage', usage }
     stopReason = ((): ModelStopReason => {
       switch (finishReason) {
@@ -1035,7 +1052,11 @@ export class ModelCompatClient implements ModelClient {
     if (usagePayload) {
       usage = this.mapUsage(usagePayload)
     }
-    if (finishReason === 'tool_calls' && pendingArguments.size > 0) {
+    // Finalize pending tool calls whenever a finish_reason is received.
+    // Many models (Qwen, GLM, MiMo, open-source via vLLM/Ollama) send
+    // finish_reason='stop' even when tool calls are present. Waiting for
+    // an explicit 'tool_calls' finish_reason loses those calls.
+    if (finishReason && pendingArguments.size > 0) {
       for (const [callId, value] of pendingArguments) {
         if (!value.name) continue
         const args = this.parseToolArguments(value.arguments)
@@ -1047,6 +1068,9 @@ export class ModelCompatClient implements ModelClient {
         })
       }
       pendingArguments.clear()
+      // Ensure downstream sees the correct finish reason when tool calls
+      // were actually present, regardless of what the provider reported.
+      finishReason = 'tool_calls'
     }
     return { chunks, text, reasoning, finishReason, usage }
   }
@@ -1315,8 +1339,9 @@ export class ModelCompatClient implements ModelClient {
       const cleaned = sanitizeModelText(text)
       if (cleaned) yield { kind: 'assistant_text_delta', text: cleaned }
     }
-    if (Array.isArray(choice.message?.tool_calls)) {
-      for (const call of choice.message.tool_calls) {
+    const hasToolCalls = Array.isArray(choice.message?.tool_calls) && choice.message.tool_calls.length > 0
+    if (hasToolCalls) {
+      for (const call of choice.message!.tool_calls!) {
         const args = this.parseToolArguments(call.function?.arguments ?? '{}')
         yield {
           kind: 'tool_call_complete',
@@ -1329,8 +1354,10 @@ export class ModelCompatClient implements ModelClient {
     if (payload.usage) {
       yield { kind: 'usage', usage: this.mapUsage(payload.usage) }
     }
+    // Derive stop reason: when tool calls are present, always report
+    // 'tool_calls' regardless of the provider's finish_reason value.
     let stopReason: 'stop' | 'tool_calls' | 'length' | 'error' = 'stop'
-    if (choice.finish_reason === 'tool_calls') stopReason = 'tool_calls'
+    if (hasToolCalls || choice.finish_reason === 'tool_calls') stopReason = 'tool_calls'
     else if (choice.finish_reason === 'length') stopReason = 'length'
     else if (choice.finish_reason === 'error') stopReason = 'error'
     yield { kind: 'completed', stopReason }

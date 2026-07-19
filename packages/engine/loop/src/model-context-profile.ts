@@ -94,16 +94,31 @@ const KNOWN_MODEL_CONTEXT_WINDOWS: ReadonlyArray<{
   pattern: RegExp
   contextWindowTokens: number
 }> = [
+  // OpenAI
   { pattern: /\bgpt-4o\b/, contextWindowTokens: 128_000 },
   { pattern: /\bgpt-4\.1\b/, contextWindowTokens: 1_000_000 },
   { pattern: /\bo3\b/, contextWindowTokens: 200_000 },
   { pattern: /\bo4\b/, contextWindowTokens: 200_000 },
+  // Anthropic
   { pattern: /\bclaude-3\b/, contextWindowTokens: 200_000 },
+  { pattern: /\bclaude-4\b/, contextWindowTokens: 200_000 },
+  // Google
   { pattern: /\bgemini-1\.5\b/, contextWindowTokens: 1_000_000 },
   { pattern: /\bgemini-2\b/, contextWindowTokens: 1_000_000 },
-  { pattern: /\bglm-4\b/, contextWindowTokens: 128_000 },
+  // Zhipu GLM (specific before generic)
+  { pattern: /\bglm-5\.2\b/, contextWindowTokens: 1_000_000 },
   { pattern: /\bglm-5\b/, contextWindowTokens: 128_000 },
-  { pattern: /\bqwen\b/, contextWindowTokens: 128_000 }
+  { pattern: /\bglm-4\b/, contextWindowTokens: 128_000 },
+  // MiniMax
+  { pattern: /\bminimax-m3\b/, contextWindowTokens: 1_000_000 },
+  { pattern: /\bminimax-01\b/, contextWindowTokens: 4_000_000 },
+  // Xiaomi MiMo
+  { pattern: /\bmimo-2\.5\b/, contextWindowTokens: 1_000_000 },
+  // Alibaba Qwen (Qwen3 / QwQ support 1M)
+  { pattern: /\bqwen3\b/, contextWindowTokens: 1_000_000 },
+  { pattern: /\bqwq\b/, contextWindowTokens: 1_000_000 },
+  { pattern: /\bqwen2\.5\b/, contextWindowTokens: 1_000_000 },
+  { pattern: /\bqwen\b/, contextWindowTokens: 1_000_000 }
 ]
 const VISION_MODEL_ID_PATTERNS: readonly RegExp[] = [
   /\bgpt-4o\b/,
@@ -112,9 +127,15 @@ const VISION_MODEL_ID_PATTERNS: readonly RegExp[] = [
   /\bclaude-3\b/,
   /\bclaude-3[-.]5\b/,
   /\bclaude-3[-.]7\b/,
+  /\bclaude-4\b/,
   /\bgemini\b/,
   /\bglm-4v\b/,
   /\bglm-4\.5v\b/,
+  /\bglm-5\.2\b/,
+  /\bminimax-m3\b/,
+  /\bmimo-2\.5\b/,
+  /\bqwen-vl\b/,
+  /\bqwen2\.5-vl\b/,
   /\bvision\b/,
   /\bvl\b/
 ]
@@ -155,11 +176,25 @@ export function contextThresholdsForModel(
   profiles: readonly ModelContextProfile[] = MODEL_CONTEXT_PROFILES
 ): ModelContextThresholds {
   const profile = resolveModelContextProfile(model, profiles)
-  if (!profile) return fallback
-  return {
-    softThreshold: profile.softThreshold,
-    hardThreshold: profile.hardThreshold
+  if (profile) {
+    return {
+      softThreshold: profile.softThreshold,
+      hardThreshold: profile.hardThreshold
+    }
   }
+  // Infer thresholds from the known context window registry so that
+  // models without an explicit profile still avoid the tiny 16K/24K defaults.
+  const normalized = normalizeModelId(model)
+  if (normalized) {
+    const known = KNOWN_MODEL_CONTEXT_WINDOWS.find((entry) => entry.pattern.test(normalized))
+    if (known) {
+      return {
+        softThreshold: Math.floor(known.contextWindowTokens * DEFAULT_CONTEXT_WINDOW_SOFT_THRESHOLD_RATIO),
+        hardThreshold: Math.floor(known.contextWindowTokens * DEFAULT_CONTEXT_WINDOW_HARD_THRESHOLD_RATIO)
+      }
+    }
+  }
+  return fallback
 }
 
 export function modelCapabilitiesForModel(
@@ -167,13 +202,27 @@ export function modelCapabilitiesForModel(
   profiles: readonly ModelContextProfile[] = MODEL_CONTEXT_PROFILES
 ): ModelCapabilityMetadata {
   const profile = resolveModelContextProfile(model, profiles)
+  if (profile) {
+    return {
+      id: model?.trim() || profile.canonicalModel || 'auto',
+      inputModalities: [...profile.inputModalities],
+      outputModalities: [...profile.outputModalities],
+      supportsToolCalling: profile.supportsToolCalling,
+      contextWindowTokens: profile.contextWindowTokens,
+      messageParts: [...profile.messageParts]
+    }
+  }
+  // Infer capabilities from the known model registries so that models
+  // without an explicit profile still get proper context window and
+  // vision support metadata.
+  const inferred = inferModelCapabilityDefaults(model?.trim() || 'auto')
   return {
-    id: model?.trim() || profile?.canonicalModel || 'auto',
-    inputModalities: [...(profile?.inputModalities ?? DEFAULT_MODEL_INPUT_MODALITIES)],
-    outputModalities: [...(profile?.outputModalities ?? DEFAULT_MODEL_OUTPUT_MODALITIES)],
-    supportsToolCalling: profile?.supportsToolCalling ?? true,
-    contextWindowTokens: profile?.contextWindowTokens,
-    messageParts: [...(profile?.messageParts ?? DEFAULT_MODEL_MESSAGE_PARTS)]
+    id: model?.trim() || 'auto',
+    inputModalities: [...inferred.inputModalities],
+    outputModalities: [...inferred.outputModalities],
+    supportsToolCalling: true,
+    contextWindowTokens: inferred.contextWindowTokens,
+    messageParts: [...inferred.messageParts]
   }
 }
 

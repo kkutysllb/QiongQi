@@ -254,7 +254,7 @@ function buildCompactionSummary(input: {
   )
   lines.push('Conversation and work summary:')
   const summaryLines = fitLinesToBudget(
-    selectSummaryLines(input.history.map(summarizeItem).filter((line) => line.length > 0)),
+    selectSummaryLines(buildSummaryLinesWithRecentTools(input.history, input.head)),
     contentBudget
   )
   if (summaryLines.length === 0) {
@@ -383,6 +383,56 @@ function extractSkillPins(history: TurnItem[]): string[] {
 function summaryCharBudget(budgetTokens: number | undefined): number {
   if (budgetTokens === undefined) return 4_000
   return Math.max(1_200, Math.min(12_000, budgetTokens * 4))
+}
+
+/**
+ * Number of most-recent tool call/result pairs whose output is preserved
+ * at full fidelity (up to RECENT_TOOL_RESULT_MAX_CHARS) in the compaction
+ * summary, so the model retains actionable context after compaction.
+ */
+const RECENT_TOOL_RESULTS_KEEP = 3
+const RECENT_TOOL_RESULT_MAX_CHARS = 2_000
+
+/**
+ * Build summary lines from history, preserving the most recent N tool
+ * results at higher fidelity than older items.
+ */
+function buildSummaryLinesWithRecentTools(history: TurnItem[], head: TurnItem[]): string[] {
+  // Identify the indices of the last N tool_result items in the head
+  // (the portion being compacted). These get expanded summaries.
+  const recentToolResultIds = new Set<string>()
+  let found = 0
+  for (let i = head.length - 1; i >= 0 && found < RECENT_TOOL_RESULTS_KEEP; i -= 1) {
+    const item = head[i]
+    if (item.kind === 'tool_result') {
+      recentToolResultIds.add(item.id)
+      found += 1
+    }
+  }
+  // Also include the tool_call immediately preceding each preserved result.
+  const recentToolCallIds = new Set<string>()
+  for (let i = 0; i < head.length; i += 1) {
+    const item = head[i]
+    if (item.kind === 'tool_call' && i + 1 < head.length) {
+      const next = head[i + 1]
+      if (next.kind === 'tool_result' && recentToolResultIds.has(next.id)) {
+        recentToolCallIds.add(item.id)
+      }
+    }
+  }
+  return history
+    .map((item) => {
+      if (recentToolResultIds.has(item.id) && item.kind === 'tool_result') {
+        const output = stringifyCompact(item.output)
+        return `- Tool result ${item.toolName}${item.isError ? ' error' : ''}: ${clipText(output, RECENT_TOOL_RESULT_MAX_CHARS)}`
+      }
+      if (recentToolCallIds.has(item.id) && item.kind === 'tool_call') {
+        const args = item.summary || stringifyCompact(item.arguments)
+        return `- Tool call ${item.toolName}: ${clipText(args, RECENT_TOOL_RESULT_MAX_CHARS)}`
+      }
+      return summarizeItem(item)
+    })
+    .filter((line) => line.length > 0)
 }
 
 function summarizeItem(item: TurnItem): string {

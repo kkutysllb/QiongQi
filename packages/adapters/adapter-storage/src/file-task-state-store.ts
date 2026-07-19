@@ -16,6 +16,7 @@ import type {
   TaskStateStore
 } from '@qiongqi/ports'
 import { atomicWriteFile } from './atomic-write.js'
+import { runtimeScopeDigest } from './runtime-store-utils.js'
 
 type ActivePointer = { revision: number; token: string }
 type PreparedPayload = { prepared: TaskStatePreparedRevision; state: TaskStateV1 }
@@ -23,10 +24,6 @@ type PreparedPayload = { prepared: TaskStatePreparedRevision; state: TaskStateV1
 const LOCK_ATTEMPTS = 100
 const LOCK_DELAY_MS = 10
 const LOCK_STALE_MS = 10_000
-
-function runScopeDir(identity: RunIdentity): string {
-  return join(identity.threadId, identity.turnId, identity.runId)
-}
 
 export class FileTaskStateStore implements TaskStateStore {
   public readonly rootDir: string
@@ -36,12 +33,12 @@ export class FileTaskStateStore implements TaskStateStore {
   }
 
   async load(identity: RunIdentity): Promise<TaskStateV1 | undefined> {
-    return this.loadByScope(runScopeDir(identity), identity)
+    return this.loadByScope(runtimeScopeDigest(identity), identity)
   }
 
   async prepare(state: TaskStateV1, expectedRevision: number): Promise<TaskStatePreparedRevision> {
     const parsed = TaskStateV1Schema.parse(state)
-    const scope = runScopeDir(parsed.identity)
+    const scope = runtimeScopeDigest(parsed.identity)
     const activeRevision = (await this.readActive(scope))?.revision ?? 0
     if (activeRevision !== expectedRevision || parsed.revision !== expectedRevision + 1) {
       throw revisionConflict(expectedRevision, activeRevision, parsed.revision)
@@ -87,32 +84,39 @@ export class FileTaskStateStore implements TaskStateStore {
   async listForThread(
     scope: Pick<RunIdentity, 'ownerUserId' | 'workspaceKey' | 'threadId'>
   ): Promise<TaskStateV1[]> {
-    const threadDir = join(this.rootDir, scope.threadId)
-    let turnDirs: string[]
+    const taskStateDir = join(this.rootDir, 'task-state')
+    let scopeDirs: string[]
     try {
-      turnDirs = await readdir(threadDir, { withFileTypes: true })
+      scopeDirs = await readdir(taskStateDir, { withFileTypes: true })
         .then(entries => entries.filter(e => e.isDirectory()).map(e => e.name))
     } catch (error) {
       if ((error as { code?: string }).code === 'ENOENT') return []
       throw error
     }
     const states: TaskStateV1[] = []
-    for (const turnId of turnDirs) {
-      let runDirs: string[]
+    for (const scopeDigest of scopeDirs) {
+      const active = await this.readActive(scopeDigest)
+      if (!active) continue
+      const prepared: Pick<TaskStatePreparedRevision, 'scopeDigest' | 'revision' | 'token'> = {
+        scopeDigest,
+        revision: active.revision,
+        token: active.token
+      }
       try {
-        runDirs = await readdir(join(threadDir, turnId), { withFileTypes: true })
-          .then(entries => entries.filter(e => e.isDirectory()).map(e => e.name))
-      } catch { continue }
-      for (const runId of runDirs) {
-        const identity: RunIdentity = {
-          ownerUserId: scope.ownerUserId,
-          workspaceKey: scope.workspaceKey,
-          threadId: scope.threadId,
-          turnId,
-          runId
+        const raw = await readFile(this.revisionPath(prepared), 'utf8')
+        const value = JSON.parse(raw) as { state?: unknown }
+        const state = TaskStateV1Schema.parse(value.state)
+        if (
+          state.identity.ownerUserId === scope.ownerUserId &&
+          state.identity.workspaceKey === scope.workspaceKey &&
+          state.identity.threadId === scope.threadId &&
+          runtimeScopeDigest(state.identity) === scopeDigest
+        ) {
+          states.push(state)
         }
-        const state = await this.load(identity)
-        if (state) states.push(state)
+      } catch (error) {
+        if ((error as { code?: string }).code === 'ENOENT') continue
+        throw error
       }
     }
     return states
@@ -137,7 +141,7 @@ export class FileTaskStateStore implements TaskStateStore {
       const raw = await readFile(this.revisionPath(prepared), 'utf8')
       const value = JSON.parse(raw) as { state?: unknown }
       const state = TaskStateV1Schema.parse(value.state)
-      if (runScopeDir(state.identity) !== scope) {
+      if (runtimeScopeDigest(state.identity) !== scope) {
         throw new Error('task state identity does not match storage scope')
       }
       return state
@@ -155,7 +159,7 @@ export class FileTaskStateStore implements TaskStateStore {
       if (
         value.prepared?.token !== prepared.token ||
         value.prepared.revision !== prepared.revision ||
-        runScopeDir(state.identity) !== prepared.scopeDigest
+        runtimeScopeDigest(state.identity) !== prepared.scopeDigest
       ) {
         throw new Error('prepared task revision payload mismatch')
       }
@@ -182,7 +186,7 @@ export class FileTaskStateStore implements TaskStateStore {
   }
 
   private assertPreparedIdentity(prepared: TaskStatePreparedRevision): void {
-    if (runScopeDir(prepared.identity) !== prepared.scopeDigest) {
+    if (runtimeScopeDigest(prepared.identity) !== prepared.scopeDigest) {
       throw new Error('prepared task revision identity mismatch')
     }
   }
@@ -212,7 +216,7 @@ export class FileTaskStateStore implements TaskStateStore {
   }
 
   private scopeDir(scope: string): string {
-    return join(this.rootDir, scope, 'task-state')
+    return join(this.rootDir, 'task-state', scope)
   }
 
   private activePath(scope: string): string {

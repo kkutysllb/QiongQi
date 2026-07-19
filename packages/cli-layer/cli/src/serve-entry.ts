@@ -70,7 +70,6 @@ async function serveMain(argv: readonly string[]): Promise<number> {
     info
   })
   process.stdout.write(`${QIONGQI_READY_PREFIX}${JSON.stringify(startupInfo)}\n`)
-  process.stdout.write(JSON.stringify(startupInfo, null, 2) + '\n')
   await new Promise<void>((resolve) => {
     const stop = () => {
       void handle.close().finally(resolve)

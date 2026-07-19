@@ -34,7 +34,16 @@ export function classifyProposal(input: {
   if (proposal.toolIntents.length > 0) return 'tool_intents'
   if (proposal.stopClass === 'length') return 'length_limited'
   if (!proposal.text.trim() && !proposal.reasoning.trim()) return 'empty'
-  if (signals.some((text) => isNonterminalActionText(text, input.task))) return 'nonterminal_action'
+  // Only classify as nonterminal_action when the response is a short planning
+  // stub with no tool calls. Substantial narrative responses are treated as
+  // final_text to avoid false-positive recovery loops on models that naturally
+  // include planning language in their output.
+  if (
+    proposal.text.trim().length < NONTERMINAL_MAX_TEXT_LENGTH
+    && signals.some((text) => isNonterminalActionText(text, input.task))
+  ) {
+    return 'nonterminal_action'
+  }
   return 'final_text'
 }
 
@@ -102,6 +111,13 @@ function isContextDiscontinuityText(text: string): boolean {
     || normalized === '我应该继续什么'
 }
 
+/**
+ * Maximum visible text length for a response to be considered a
+ * nonterminal planning stub. Responses longer than this are assumed
+ * to be substantive output even if they contain planning keywords.
+ */
+const NONTERMINAL_MAX_TEXT_LENGTH = 300
+
 function isNonterminalActionText(text: string, task: TaskStateV1): boolean {
   if (!hasPendingWork(task)) return false
   const normalized = text
@@ -109,6 +125,8 @@ function isNonterminalActionText(text: string, task: TaskStateV1): boolean {
     .toLowerCase()
     .replace(/[\s\p{P}\p{S}]+/gu, '')
   if (!normalized || looksTerminal(normalized)) return false
+  // A very long normalized text is likely a full explanation, not a stub.
+  if (normalized.length > 200) return false
   return includesAny(normalized, [
     '我将',
     '我会',
