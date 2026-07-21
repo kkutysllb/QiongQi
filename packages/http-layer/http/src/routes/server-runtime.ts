@@ -24,7 +24,7 @@ import type { MemoryStore } from '@qiongqi/memory'
 import type { ReviewTarget } from '@qiongqi/contracts'
 import type { AuthService } from '../auth-service.js'
 import type { QiongqiConfig } from '@qiongqi/contracts'
-import type { KWorksUserDataStore } from '../kworks-user-data-store.js'
+import type { UserDataStore } from '../user-data-store.js'
 
 export type RuntimeToolDiagnostics = {
   providers: ToolProviderPolicy[]
@@ -74,7 +74,7 @@ export type ServerRuntime = {
   attachmentStore?: AttachmentStore
   memoryStore?: MemoryStore
   authService?: AuthService
-  kworksUserDataStore?: KWorksUserDataStore
+  userDataStore?: UserDataStore
   runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> | void
   cancelA2ATaskTurn?(input: { threadId: string; turnId: string }): Promise<void> | void
   runReview?(input: {

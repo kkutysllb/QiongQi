@@ -32,7 +32,7 @@ import {
   parseServeOptions,
   validateServeOptions,
   SERVE_USAGE,
-  defaultKWorksRuntimeDataDir
+  defaultQiongqiRuntimeDataDir
 } from '@qiongqi/cli'
 
 describe('contracts', () => {
@@ -51,12 +51,12 @@ describe('contracts', () => {
 
   it('round-trips a thread creation payload through zod', () => {
     const parsed = CreateThreadRequest.parse({
-      id: 'kworks-thread-1',
+      id: 'thread-1',
       title: 'demo',
       workspace: '/tmp/ws',
       model: 'deepseek-chat'
     })
-    expect(parsed.id).toBe('kworks-thread-1')
+    expect(parsed.id).toBe('thread-1')
     expect(parsed.title).toBe('demo')
     expect(parsed.mode).toBe('agent')
   })
@@ -346,79 +346,22 @@ describe('cli', () => {
     expect(parsed.storage.backend).toBe('file')
   })
 
-  it('enables KWorks skill roots from KWorks_SKILLS_PATH without migrating data', () => {
+  it('enables skill roots from QIONGQI_SKILLS_PATH', () => {
     const parsed = parseServeOptions([
       '--api-key=test-key',
       '--base-url=https://example.invalid/v1'
     ], {
-      KWorks_SKILLS_PATH: '/Users/tester/.kworks-workspace/skills'
+      QIONGQI_SKILLS_PATH: '/Users/tester/.qiongqi/skills/core:/Users/tester/.qiongqi/skills/custom'
     })
 
     expect(parsed.capabilities.skills).toMatchObject({
       enabled: true,
       legacySkillMd: true,
       roots: [
-        '/Users/tester/.kworks-workspace/skills/builtin/core',
-        '/Users/tester/.kworks-workspace/skills/builtin/task',
-        '/Users/tester/.kworks-workspace/skills/builtin/coding',
-        '/Users/tester/.kworks-workspace/skills/builtin/finance',
-        '/Users/tester/.kworks-workspace/skills/custom/shared'
+        '/Users/tester/.qiongqi/skills/core',
+        '/Users/tester/.qiongqi/skills/custom'
       ]
     })
-  })
-
-  it('retains KWorks public skills when unified skill roots also exist', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'kworks-skills-'))
-    try {
-      await mkdir(join(dir, 'builtin', 'core'), { recursive: true })
-      await mkdir(join(dir, 'public', 'deep-research'), { recursive: true })
-      await writeFile(join(dir, 'public', 'deep-research', 'SKILL.md'), '---\nname: deep-research\n---\n')
-
-      const parsed = parseServeOptions([
-        '--api-key=test-key',
-        '--base-url=https://example.invalid/v1'
-      ], {
-        KWorks_SKILLS_PATH: dir
-      })
-
-      expect(parsed.capabilities.skills.roots).toEqual([
-        join(dir, 'builtin', 'core'),
-        join(dir, 'builtin', 'task'),
-        join(dir, 'builtin', 'coding'),
-        join(dir, 'builtin', 'finance'),
-        join(dir, 'custom', 'shared'),
-        join(dir, 'public', 'deep-research')
-      ])
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('does not duplicate KWorks public skills already migrated into unified roots', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'kworks-skills-'))
-    try {
-      await mkdir(join(dir, 'builtin', 'task', 'deep-research'), { recursive: true })
-      await writeFile(join(dir, 'builtin', 'task', 'deep-research', 'SKILL.md'), '---\nname: deep-research\n---\n')
-      await mkdir(join(dir, 'public', 'deep-research'), { recursive: true })
-      await writeFile(join(dir, 'public', 'deep-research', 'SKILL.md'), '---\nname: deep-research\n---\n')
-
-      const parsed = parseServeOptions([
-        '--api-key=test-key',
-        '--base-url=https://example.invalid/v1'
-      ], {
-        KWorks_SKILLS_PATH: dir
-      })
-
-      expect(parsed.capabilities.skills.roots).toEqual([
-        join(dir, 'builtin', 'core'),
-        join(dir, 'builtin', 'task'),
-        join(dir, 'builtin', 'coding'),
-        join(dir, 'builtin', 'finance'),
-        join(dir, 'custom', 'shared')
-      ])
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
   })
 
   it('loads serve and context compaction settings from an explicit config file', async () => {
@@ -834,7 +777,7 @@ describe('cli', () => {
     }
   })
 
-  it('defaults serve data-dir to the KWorks per-user web workspace', () => {
+  it('defaults serve data-dir to the Qiongqi per-user workspace', () => {
     const result = parseServeOptionsSafe([
       '--host',
       '127.0.0.1',
@@ -844,8 +787,8 @@ describe('cli', () => {
     ], { HOME: '/Users/tester' })
     expect(result.ok).toBe(true)
     if (result.ok) {
-      expect(result.options.dataDir).toBe('/Users/tester/.kworks-workspace-web/users/runtime')
-      expect(result.options.dataDir).toBe(defaultKWorksRuntimeDataDir({ HOME: '/Users/tester' }))
+      expect(result.options.dataDir).toBe('/Users/tester/.qiongqi/users/runtime')
+      expect(result.options.dataDir).toBe(defaultQiongqiRuntimeDataDir({ HOME: '/Users/tester' }))
     }
   })
 

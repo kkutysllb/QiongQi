@@ -120,17 +120,16 @@ import {
   qiongqiConfigFromRuntimeOptions
 } from './qiongqi-config-store.js'
 import {
-  ensureKWorksUserWorkspace,
-  kworksUserWorkspacePaths
-} from './kworks-workspace-paths.js'
+  ensureUserWorkspace,
+  userWorkspacePaths
+} from './user-workspace-paths.js'
 import {
-  KWorksUserDataAuthStore,
-  FileKWorksUserDataStore,
-  type KWorksUserDataStore
-} from './kworks-user-data-store.js'
-import { SqliteKWorksUserDataStore } from './kworks-sqlite-user-data-store.js'
+  UserDataAuthStore,
+  FileUserDataStore,
+  type UserDataStore
+} from './user-data-store.js'
+import { SqliteUserDataStore } from './sqlite-user-data-store.js'
 import { UserScopedModelClient } from './user-scoped-model-client.js'
-import { loadFinanceDataSource } from './finance-credentials.js'
 
 // ---------------------------------------------------------------------------
 // Options
@@ -256,7 +255,7 @@ export interface CoreRuntime {
   workspaceInspector: LocalWorkspaceInspector
   usageService: UsageService
   authService: AuthService
-  kworksUserDataStore: KWorksUserDataStore
+  userDataStore: UserDataStore
   inflight: InflightTracker
   steering: SteeringQueue
   compactor: ContextCompactor
@@ -305,7 +304,7 @@ export async function createCore(
 ): Promise<CoreRuntime> {
   await mkdir(options.dataDir, { recursive: true })
   const workspaceRoot = workspaceRootFromRuntimeDataDir(options.dataDir)
-  await ensureKWorksUserWorkspace(kworksUserWorkspacePaths(workspaceRoot, workspaceUserIdFromRuntimeDataDir(options.dataDir)))
+  await ensureUserWorkspace(userWorkspacePaths(workspaceRoot, workspaceUserIdFromRuntimeDataDir(options.dataDir)))
   const eventBus = new InMemoryEventBus()
   const stores = await createPersistentStores({
     dataDir: options.dataDir,
@@ -316,18 +315,18 @@ export async function createCore(
   const userInputGate = new InMemoryUserInputGate()
   const workspaceInspector = new LocalWorkspaceInspector()
   const usageService = new UsageService()
-  let kworksUserDataStore: KWorksUserDataStore
+  let userDataStore: UserDataStore
   try {
-    const sqliteStore = new SqliteKWorksUserDataStore({ workspaceRoot })
+    const sqliteStore = new SqliteUserDataStore({ workspaceRoot })
     await sqliteStore.ready()
-    kworksUserDataStore = sqliteStore
+    userDataStore = sqliteStore
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.warn(`[qiongqi] user-data sqlite unavailable; using file fallback: ${message}`)
-    kworksUserDataStore = new FileKWorksUserDataStore({ workspaceRoot })
+    userDataStore = new FileUserDataStore({ workspaceRoot })
   }
   const authService = new AuthService({
-    store: new KWorksUserDataAuthStore(kworksUserDataStore),
+    store: new UserDataAuthStore(userDataStore),
     now: () => new Date()
   })
   const inflight = new InflightTracker()
@@ -346,7 +345,7 @@ export async function createCore(
     nowIso,
     usageSink: async (event) => {
       const thread = await stores.threadStore.get(event.threadId)
-      await kworksUserDataStore.appendUsageEvent?.({
+      await userDataStore.appendUsageEvent?.({
         ...(thread?.ownerUserId ? { userId: thread.ownerUserId } : {}),
         threadId: event.threadId,
         seq: event.seq,
@@ -388,7 +387,7 @@ export async function createCore(
     workspaceInspector,
     usageService,
     authService,
-    kworksUserDataStore,
+    userDataStore,
     inflight,
     steering,
     compactor,
@@ -401,8 +400,8 @@ export async function createCore(
     storageDiagnostics: stores.diagnostics,
     storesShutdown: stores.shutdown,
     userDataShutdown: () => {
-      if ('close' in kworksUserDataStore && typeof kworksUserDataStore.close === 'function') {
-        kworksUserDataStore.close()
+      if ('close' in userDataStore && typeof userDataStore.close === 'function') {
+        userDataStore.close()
       }
     }
   }
@@ -521,8 +520,12 @@ function runtimeConfigSnapshot(configStore: QiongqiConfigStore): ReturnType<NonN
   return snapshot
 }
 
-function skillEnabledMapFromCompatSetting(value: unknown): Record<string, boolean> | undefined {
+function skillEnabledMapFromUserSetting(value: unknown): Record<string, boolean> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const enabledSkills = (value as Record<string, unknown>).enabledSkills
+  if (enabledSkills && typeof enabledSkills === 'object' && !Array.isArray(enabledSkills)) {
+    return skillEnabledMapFromUserSetting(enabledSkills)
+  }
   const out: Record<string, boolean> = {}
   for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
     if (typeof raw === 'boolean') {
@@ -687,7 +690,7 @@ export async function createToolMatrix(
       ? (context) => {
           const owner = context?.ownerUserId
           const userEnabledSkills = owner
-            ? skillEnabledMapFromCompatSetting(core.kworksUserDataStore.getUserSettingSync?.(owner, 'capabilities.skills.compat'))
+            ? skillEnabledMapFromUserSetting(core.userDataStore.getUserSettingSync?.(owner, 'capabilities.skills'))
             : undefined
           return userEnabledSkills ?? runtimeConfigSnapshot(configStore).capabilities?.skills?.enabledSkills
         }
@@ -727,26 +730,14 @@ export async function createToolMatrix(
     ...buildMemoryToolProviders(memoryStore)
   ]
   const pythonPathEnv = computePythonPathForSkillRoots([...builtinSkillRoots, ...runtimeMountedSkillRoots])
-  const enrichFinanceContext = async (context: ToolHostContext): Promise<ToolHostContext> => {
-    if (!context.ownerUserId) {
-      return pythonPathEnv
-        ? { ...context, environment: { ...(context.environment ?? {}), PYTHONPATH: pythonPathEnv } }
-        : context
-    }
-    const resolved = await loadFinanceDataSource(core.kworksUserDataStore, context.ownerUserId)
-    return {
-      ...context,
-      environment: {
-        ...(context.environment ?? {}),
-        ...(pythonPathEnv ? { PYTHONPATH: pythonPathEnv } : {}),
-        ...resolved.environment
-      }
-    }
-  }
+  const enrichToolContext = async (context: ToolHostContext): Promise<ToolHostContext> =>
+    pythonPathEnv
+      ? { ...context, environment: { ...(context.environment ?? {}), PYTHONPATH: pythonPathEnv } }
+      : context
   const childRegistry = new CapabilityRegistry(baseToolProviders())
   const childToolHost: ToolHost = new RefreshableToolHost(
     new LocalToolHost({ registry: childRegistry, readTracker: true }),
-    enrichFinanceContext
+    enrichToolContext
   )
   const tokenEconomy = tokenEconomyConfigForOptions(options)
   const delegationRuntime = options.capabilities?.subagents.enabled
@@ -834,7 +825,7 @@ export async function createToolMatrix(
   let registry = buildMainRegistry()
   const toolHost = new RefreshableToolHost(
     new LocalToolHost({ registry, readTracker: true }),
-    enrichFinanceContext
+    enrichToolContext
   )
   const refreshRuntimeTools = async () => {
     if (!configStore) return
@@ -1031,8 +1022,8 @@ function withRuntimeMountedSkillRoots(
   runtimeMountedSkillRoots: readonly string[]
 ): QiongqiCapabilitiesConfig | undefined {
   if (!capabilities?.skills || runtimeMountedSkillRoots.length === 0) return capabilities
-  // When the KWorks desktop app mounts skill roots at startup (via
-  // KWorks_SKILLS_PATH), skills are a core capability that must stay enabled.
+  // When an embedder mounts skill roots at startup, skills are a core
+  // capability that must stay enabled.
   // Per-section/per-user config writes can flip enabled=false; force-retain it
   // here so the live SkillPluginHost never sees a disabled state.
   return {
@@ -1056,7 +1047,7 @@ function uniqueStrings(values: readonly string[]): string[] {
  * Rename a legacy `task` work-mode entry to `office` in a skills config.
  * Prevents the skill host from seeing a stale `task` mode (which produces
  * wrong effectiveSkillIds for the office mode). Mirrors the normalization in
- * kworks-compat.ts but operates on the skills capability section.
+ * the runtime capability store but operates only on the skills section.
  */
 function normalizeLegacyTaskSkills(skills: QiongqiCapabilitiesConfig['skills'] | undefined): QiongqiCapabilitiesConfig['skills'] | undefined {
   if (!skills?.workModes?.modes) return skills
@@ -1468,7 +1459,7 @@ async function assembleRuntime(input: {
   const scopedModelClient = new UserScopedModelClient({
     fallback: model.client,
     threadService: core.threadService,
-    userDataStore: core.kworksUserDataStore,
+    userDataStore: core.userDataStore,
     ...(options.runtime?.modelStreamIdleTimeoutMs !== undefined
       ? { streamIdleTimeoutMs: options.runtime.modelStreamIdleTimeoutMs }
       : {})
@@ -1625,7 +1616,7 @@ async function assembleRuntime(input: {
     reviewService,
     usageService: core.usageService,
     authService: core.authService,
-    kworksUserDataStore: core.kworksUserDataStore,
+    userDataStore: core.userDataStore,
     eventBus: core.eventBus,
     sessionStore: core.sessionStore,
     events: core.events,
