@@ -210,4 +210,172 @@ describe('Qiongqi agent CLI text', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('starts an evented_v2 worker pool by spawning one worker per shard', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-worker-supervisor-'))
+    const configPath = join(root, 'config.json')
+    const spawned: Array<{ args: string[]; killed: boolean }> = []
+    let stdout = ''
+    let runtimeCreations = 0
+    await writeFile(configPath, JSON.stringify({
+      serve: {
+        baseUrl: 'https://example.invalid/v1',
+        apiKey: 'test-key'
+      },
+      runtime: {
+        eventedV2AgentPeers: {
+          planner: 'peer_planner',
+          researcher: 'peer_researcher',
+          reviewer: 'peer_reviewer',
+          writer: 'peer_writer'
+        }
+      }
+    }), 'utf8')
+
+    try {
+      const code = await runAgentCommand('worker', [
+        '--json',
+        '--config', configPath,
+        '--pool-size', '2',
+        '--data-dir', '/tmp/qiongqi-data'
+      ], {
+        stdout: { write: (chunk) => { stdout += chunk } },
+        stderr: { write: () => undefined },
+        env: {},
+        cwd: () => '/tmp/workspace',
+        createRuntime: async () => {
+          runtimeCreations += 1
+          throw new Error('pool supervisor must not create runtime directly')
+        },
+        spawnWorker: (args) => {
+          const child = { args: [...args], killed: false }
+          spawned.push(child)
+          return {
+            kill: () => {
+              child.killed = true
+            }
+          }
+        },
+        waitForWorkerShutdown: async () => undefined
+      })
+
+      expect(code).toBe(ServeExitCode.ok)
+      expect(runtimeCreations).toBe(0)
+      expect(spawned).toMatchObject([
+        { args: expect.arrayContaining(['worker', '--config', configPath, '--data-dir', '/tmp/qiongqi-data', '--shard-index', '0', '--shard-count', '2']) },
+        { args: expect.arrayContaining(['worker', '--config', configPath, '--data-dir', '/tmp/qiongqi-data', '--shard-index', '1', '--shard-count', '2']) }
+      ])
+      expect(spawned.every((child) => child.killed)).toBe(true)
+      expect(JSON.parse(stdout)).toMatchObject({
+        mode: 'worker_pool',
+        poolSize: 2,
+        shards: [
+          { index: 0, count: 2, agentIds: ['planner', 'reviewer'] },
+          { index: 1, count: 2, agentIds: ['researcher', 'writer'] }
+        ]
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an invalid evented_v2 worker pool size before creating runtimes', async () => {
+    let stderr = ''
+    let runtimeCreations = 0
+
+    const code = await runAgentCommand('worker', [
+      '--pool-size', '0',
+      '--data-dir', '/tmp/qiongqi-data',
+      '--api-key', 'test-key',
+      '--base-url', 'https://example.invalid/v1'
+    ], {
+      stdout: { write: () => undefined },
+      stderr: { write: (chunk) => { stderr += chunk } },
+      env: {},
+      cwd: () => '/tmp/workspace',
+      createRuntime: async () => {
+        runtimeCreations += 1
+        throw new Error('invalid worker pool size must not create runtime')
+      }
+    })
+
+    expect(code).toBe(ServeExitCode.config)
+    expect(runtimeCreations).toBe(0)
+    expect(stderr).toContain('--pool-size must be a positive integer')
+  })
+
+  it('restarts an evented_v2 worker shard after an unexpected child exit', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-worker-supervisor-restart-'))
+    const configPath = join(root, 'config.json')
+    type FakeChild = {
+      args: string[]
+      killed: boolean
+      exitListener?: (code: number | null, signal: NodeJS.Signals | null) => void
+    }
+    const spawned: FakeChild[] = []
+    const sleepCalls: number[] = []
+    let stderr = ''
+    let releaseShutdown = () => undefined
+    const shutdown = new Promise<void>((resolve) => {
+      releaseShutdown = resolve
+    })
+    await writeFile(configPath, JSON.stringify({
+      serve: {
+        baseUrl: 'https://example.invalid/v1',
+        apiKey: 'test-key'
+      },
+      runtime: {
+        eventedV2AgentPeers: {
+          planner: 'peer_planner',
+          researcher: 'peer_researcher'
+        }
+      }
+    }), 'utf8')
+
+    try {
+      const command = runAgentCommand('worker', [
+        '--config', configPath,
+        '--pool-size', '1',
+        '--data-dir', '/tmp/qiongqi-data'
+      ], {
+        stdout: { write: () => undefined },
+        stderr: { write: (chunk) => { stderr += chunk } },
+        env: {},
+        cwd: () => '/tmp/workspace',
+        spawnWorker: (args) => {
+          const child: FakeChild = { args: [...args], killed: false }
+          spawned.push(child)
+          return {
+            kill: () => {
+              child.killed = true
+            },
+            once: (event: string, listener: (code: number | null, signal: NodeJS.Signals | null) => void) => {
+              if (event === 'exit') child.exitListener = listener
+            }
+          }
+        },
+        waitForWorkerShutdown: async () => shutdown,
+        sleep: async (ms: number) => {
+          sleepCalls.push(ms)
+        }
+      })
+
+      expect(spawned).toHaveLength(1)
+      spawned[0]?.exitListener?.(1, null)
+      await Promise.resolve()
+      await Promise.resolve()
+      releaseShutdown()
+
+      const code = await command
+      expect(code).toBe(ServeExitCode.ok)
+      expect(spawned).toHaveLength(2)
+      expect(spawned[1]?.args).toEqual(spawned[0]?.args)
+      expect(sleepCalls).toEqual([1000])
+      expect(stderr).toContain('worker shard 0/1 exited')
+      expect(spawned.every((child) => child.killed)).toBe(true)
+    } finally {
+      releaseShutdown()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
