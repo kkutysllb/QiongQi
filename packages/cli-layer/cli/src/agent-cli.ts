@@ -52,6 +52,10 @@ Exec options:
 
 Worker options:
   --once                     Flush outbox and remote-agent mailboxes once, then exit
+  --plan                     Print worker pool shard topology without starting workers
+  --pool-size <n>            Number of worker shards to plan
+  --shard-index <n>          Process only this 0-based worker shard
+  --shard-count <n>          Total number of worker shards
 `
 
 const VALUE_FLAGS = new Set([
@@ -74,7 +78,13 @@ const VALUE_FLAGS = new Set([
   'prompt',
   'p',
   'args',
-  'title'
+  'title',
+  'shard-index',
+  'shard-count',
+  'worker-shard-index',
+  'worker-shard-count',
+  'pool-size',
+  'worker-pool-size'
 ])
 
 export type QiongqiCliCommand = 'serve' | 'worker' | 'run' | 'chat' | 'exec' | 'help'
@@ -117,9 +127,28 @@ export async function runAgentCommand(
 async function runWorker(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseSharedOptions(argv, io)
   if (!parsed.ok) return writeParseError(parsed, io, 'qiongqi worker')
+  if (hasFlag(argv, 'plan')) {
+    const plan = buildWorkerPoolPlan(parsed.options, argv)
+    if (!plan.ok) {
+      io.stderr.write(`qiongqi worker: ${plan.message}\n`)
+      return ServeExitCode.config
+    }
+    if (parsed.json) {
+      io.stdout.write(JSON.stringify(plan.value) + '\n')
+    } else {
+      io.stdout.write(formatWorkerPoolPlan(plan.value))
+    }
+    return ServeExitCode.ok
+  }
+  const shard = parseWorkerShard(argv)
+  if (!shard.ok) {
+    io.stderr.write(`qiongqi worker: ${shard.message}\n`)
+    return ServeExitCode.config
+  }
+  const runtimeOptions = shard.value ? applyWorkerShard(parsed.options, shard.value) : parsed.options
   let runtime: ServerRuntime | undefined
   try {
-    runtime = await createRuntime(parsed.options, io)
+    runtime = await createRuntime(runtimeOptions, io)
     const scheduler = runtime.multiAgentRemoteScheduler
     if (!scheduler) {
       io.stderr.write('qiongqi worker: evented_v2 remote agent scheduler is not configured\n')
@@ -129,9 +158,14 @@ async function runWorker(argv: readonly string[], io: CliIo): Promise<number> {
       const outbox = await runtime.multiAgentOutboxReconciler?.flushOnce()
       const remote = await scheduler.flushOnce()
       if (parsed.json) {
-        io.stdout.write(JSON.stringify({ mode: 'worker', outbox, remote }) + '\n')
+        io.stdout.write(JSON.stringify({
+          mode: 'worker',
+          ...(shard.value ? { shard: shard.value } : {}),
+          outbox,
+          remote
+        }) + '\n')
       } else {
-        io.stdout.write(`qiongqi worker: processed ${remote.messagesProcessed} message(s)\n`)
+        io.stdout.write(`qiongqi worker: processed ${remote.messagesProcessed} message(s)${shard.value ? ` on shard ${shard.value.index}/${shard.value.count}` : ''}\n`)
       }
       return ServeExitCode.ok
     }
@@ -139,9 +173,13 @@ async function runWorker(argv: readonly string[], io: CliIo): Promise<number> {
     scheduler.start()
     const snapshot = scheduler.snapshot()
     if (parsed.json) {
-      io.stdout.write(JSON.stringify({ mode: 'worker', snapshot }) + '\n')
+      io.stdout.write(JSON.stringify({
+        mode: 'worker',
+        ...(shard.value ? { shard: shard.value } : {}),
+        snapshot
+      }) + '\n')
     } else {
-      io.stdout.write(`qiongqi worker running: ${snapshot.workerId}\n`)
+      io.stdout.write(`qiongqi worker running: ${snapshot.workerId}${shard.value ? ` shard ${shard.value.index}/${shard.value.count}` : ''}\n`)
     }
     await waitForWorkerShutdownSignal()
     return ServeExitCode.ok
@@ -343,6 +381,9 @@ type SharedOptionsResult =
   | { ok: true; options: ServeOptions; workspace: string; json: boolean }
   | { ok: false; exitCode: number; message: string; issues?: unknown }
 
+type WorkerShard = { index: number; count: number; agentIds: string[] }
+type WorkerPoolPlan = { mode: 'worker_pool_plan'; poolSize: number; shards: WorkerShard[] }
+
 function parseSharedOptions(argv: readonly string[], io: CliIo): SharedOptionsResult {
   const parsed = parseServeOptionsSafe(argv, io.env ?? {})
   if (!parsed.ok) return parsed
@@ -373,6 +414,68 @@ function createRuntime(options: ServeOptions, io: CliIo): Promise<ServerRuntime>
   if (io.createRuntime) return io.createRuntime(options)
   const factory = resolveRuntimeFactory(options.preset)
   return factory(options)
+}
+
+function parseWorkerShard(argv: readonly string[]): { ok: true; value?: WorkerShard } | { ok: false; message: string } {
+  const rawIndex = stringFlag(argv, ['shard-index', 'worker-shard-index'])
+  const rawCount = stringFlag(argv, ['shard-count', 'worker-shard-count'])
+  if (rawIndex === undefined && rawCount === undefined) return { ok: true }
+  if (rawIndex === undefined || rawCount === undefined) {
+    return { ok: false, message: '--shard-index and --shard-count must be provided together' }
+  }
+  const index = Number(rawIndex)
+  const count = Number(rawCount)
+  if (!Number.isInteger(index) || !Number.isInteger(count) || count <= 0 || index < 0 || index >= count) {
+    return { ok: false, message: '--shard-index must be an integer in [0, shard-count) and --shard-count must be positive' }
+  }
+  return { ok: true, value: { index, count, agentIds: [] } }
+}
+
+function applyWorkerShard(options: ServeOptions, shard: WorkerShard): ServeOptions {
+  const peers = options.runtime?.eventedV2AgentPeers
+  if (!peers || Object.keys(peers).length === 0) return options
+  const agentIds = Object.keys(peers).sort()
+    .filter((_agentId, position) => position % shard.count === shard.index)
+  const eventedV2AgentPeers = Object.fromEntries(agentIds.map((agentId) => [agentId, peers[agentId]]))
+  shard.agentIds = agentIds
+  return {
+    ...options,
+    runtime: {
+      ...options.runtime,
+      eventedV2AgentPeers
+    }
+  }
+}
+
+function buildWorkerPoolPlan(options: ServeOptions, argv: readonly string[]): { ok: true; value: WorkerPoolPlan } | { ok: false; message: string } {
+  const rawPoolSize = stringFlag(argv, ['pool-size', 'worker-pool-size'])
+  if (rawPoolSize === undefined) return { ok: false, message: '--plan requires --pool-size <n>' }
+  const poolSize = Number(rawPoolSize)
+  if (!Number.isInteger(poolSize) || poolSize <= 0) {
+    return { ok: false, message: '--pool-size must be a positive integer' }
+  }
+  const peers = options.runtime?.eventedV2AgentPeers ?? {}
+  const agentIds = Object.keys(peers).sort()
+  return {
+    ok: true,
+    value: {
+      mode: 'worker_pool_plan',
+      poolSize,
+      shards: Array.from({ length: poolSize }, (_unused, index) => ({
+        index,
+        count: poolSize,
+        agentIds: agentIds.filter((_agentId, position) => position % poolSize === index)
+      }))
+    }
+  }
+}
+
+function formatWorkerPoolPlan(plan: WorkerPoolPlan): string {
+  const lines = [`qiongqi worker pool plan: ${plan.poolSize} shard(s)`]
+  for (const shard of plan.shards) {
+    lines.push(`  shard ${shard.index}/${shard.count}: ${shard.agentIds.join(', ') || '(no agents)'}`)
+  }
+  return `${lines.join('\n')}\n`
 }
 
 async function shutdownRuntime(

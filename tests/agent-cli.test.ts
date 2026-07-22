@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { QIONGQI_CLI_USAGE, runAgentCommand, splitQiongqiCliCommand } from '@qiongqi/cli'
 import { ServeExitCode } from '@qiongqi/cli'
 import type { ServerRuntime } from '@qiongqi/http'
@@ -61,7 +64,7 @@ describe('Qiongqi agent CLI text', () => {
       }
     } as unknown as ServerRuntime
 
-    const code = await runAgentCommand('worker' as never, [
+    const code = await runAgentCommand('worker', [
       '--once',
       '--json',
       '--data-dir', '/tmp/qiongqi-data',
@@ -84,5 +87,127 @@ describe('Qiongqi agent CLI text', () => {
       outbox: { runsFlushed: 1 },
       remote: { messagesProcessed: 1 }
     })
+  })
+
+  it('shards evented_v2 worker peer bindings before creating the runtime', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-worker-shard-'))
+    const configPath = join(root, 'config.json')
+    let stdout = ''
+    let capturedOptions: unknown
+    const runtime = {
+      multiAgentOutboxReconciler: {
+        flushOnce: async () => ({ runIds: [], runsFlushed: 0, startedAt: '2026-07-21T00:00:00.000Z', finishedAt: '2026-07-21T00:00:00.001Z' }),
+        start: () => undefined,
+        stop: () => undefined,
+        isRunning: () => false
+      },
+      multiAgentRemoteScheduler: {
+        flushOnce: async () => ({ agentIds: ['researcher', 'writer'], agentsChecked: 2, messagesProcessed: 0, messageIds: [], startedAt: '2026-07-21T00:00:00.000Z', finishedAt: '2026-07-21T00:00:00.001Z' }),
+        start: () => undefined,
+        stop: () => undefined,
+        isRunning: () => false,
+        snapshot: () => ({ workerId: 'worker_a', status: 'stopped', health: 'ok', agentIds: ['researcher', 'writer'] })
+      },
+      shutdown: async () => undefined
+    } as unknown as ServerRuntime
+    await writeFile(configPath, JSON.stringify({
+      serve: {
+        baseUrl: 'https://example.invalid/v1',
+        apiKey: 'test-key'
+      },
+      runtime: {
+        eventedV2AgentPeers: {
+          planner: 'peer_planner',
+          researcher: 'peer_researcher',
+          reviewer: 'peer_reviewer',
+          writer: 'peer_writer'
+        }
+      }
+    }), 'utf8')
+
+    try {
+      const code = await runAgentCommand('worker', [
+        '--once',
+        '--json',
+        '--config', configPath,
+        '--shard-index', '1',
+        '--shard-count', '2',
+        '--data-dir', '/tmp/qiongqi-data'
+      ], {
+        stdout: { write: (chunk) => { stdout += chunk } },
+        stderr: { write: () => undefined },
+        env: {},
+        cwd: () => '/tmp/workspace',
+        createRuntime: async (options) => {
+          capturedOptions = options
+          return runtime
+        }
+      })
+
+      expect(code).toBe(ServeExitCode.ok)
+      expect((capturedOptions as { runtime?: { eventedV2AgentPeers?: unknown } }).runtime?.eventedV2AgentPeers).toEqual({
+        researcher: 'peer_researcher',
+        writer: 'peer_writer'
+      })
+      expect(JSON.parse(stdout)).toMatchObject({
+        mode: 'worker',
+        shard: { index: 1, count: 2, agentIds: ['researcher', 'writer'] }
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('plans an evented_v2 worker pool without creating runtimes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-worker-pool-'))
+    const configPath = join(root, 'config.json')
+    let stdout = ''
+    let runtimeCreations = 0
+    await writeFile(configPath, JSON.stringify({
+      serve: {
+        baseUrl: 'https://example.invalid/v1',
+        apiKey: 'test-key'
+      },
+      runtime: {
+        eventedV2AgentPeers: {
+          planner: 'peer_planner',
+          researcher: 'peer_researcher',
+          reviewer: 'peer_reviewer',
+          writer: 'peer_writer'
+        }
+      }
+    }), 'utf8')
+
+    try {
+      const code = await runAgentCommand('worker', [
+        '--plan',
+        '--json',
+        '--config', configPath,
+        '--pool-size', '2',
+        '--data-dir', '/tmp/qiongqi-data'
+      ], {
+        stdout: { write: (chunk) => { stdout += chunk } },
+        stderr: { write: () => undefined },
+        env: {},
+        cwd: () => '/tmp/workspace',
+        createRuntime: async () => {
+          runtimeCreations += 1
+          throw new Error('must not create runtime for pool planning')
+        }
+      })
+
+      expect(code).toBe(ServeExitCode.ok)
+      expect(runtimeCreations).toBe(0)
+      expect(JSON.parse(stdout)).toEqual({
+        mode: 'worker_pool_plan',
+        poolSize: 2,
+        shards: [
+          { index: 0, count: 2, agentIds: ['planner', 'reviewer'] },
+          { index: 1, count: 2, agentIds: ['researcher', 'writer'] }
+        ]
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
