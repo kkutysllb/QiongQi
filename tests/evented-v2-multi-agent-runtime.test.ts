@@ -198,6 +198,34 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(next.agentRuns.filter((agentRun) => agentRun.agentId === 'researcher')).toHaveLength(1)
     expect(next.events.filter((event) => event.type === 'handoff_delivered')).toHaveLength(1)
   })
+
+  it('returns a compact trace for observability', async () => {
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs: new InMemoryMultiAgentRunStore(),
+      mailbox: new InMemoryMailboxStore(),
+      graph: defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' }),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    expect(await runtime.trace(run.runId)).toEqual([
+      'run_started:manager',
+      'handoff_requested:manager',
+      'handoff_delivered:researcher'
+    ])
+  })
 })
 
 function fixedClock(): () => string {

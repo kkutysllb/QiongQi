@@ -197,4 +197,10 @@ export class EventedV2MultiAgentRuntime {
     await this.options.runs.save(next)
     return next
   }
+
+  async trace(runId: string): Promise<string[]> {
+    const run = await this.options.runs.load(runId)
+    if (!run) throw new Error(`MultiAgentRun not found: ${runId}`)
+    return run.events.map((event) => `${event.type}:${event.agentId ?? event.nodeId ?? 'runtime'}`)
+  }
 }
