@@ -101,6 +101,27 @@ describe('multi-agent runtime contracts', () => {
     expect(intent.status).toBe('pending')
   })
 
+  it('parses a pending mailbox completion outbox intent for recovery', () => {
+    const intent = MultiAgentOutboxIntentSchema.parse({
+      outboxId: 'outbox_complete_1',
+      kind: 'mailbox_complete',
+      status: 'pending',
+      messageId: 'msg_1',
+      mailboxStatus: 'failed',
+      claimLease: {
+        holderId: 'worker_a',
+        expiresAt: '2026-07-21T00:01:00.000Z',
+        epoch: 1,
+        token: 'claim_token_1'
+      },
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z'
+    })
+
+    expect(intent.kind).toBe('mailbox_complete')
+    expect(intent.status).toBe('pending')
+  })
+
   it('parses a mailbox message correlated to an envelope', () => {
     const message = MailboxMessageSchema.parse({
       messageId: 'msg_1',

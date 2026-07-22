@@ -380,6 +380,7 @@ export class FileMailboxStore implements MailboxStore {
         throw error
       })
       if (!latest) return
+      if (latest.status === status) return
       assertMailboxFence(latest, fence)
       const { claimLease: _claimLease, ...rest } = latest
       await this.write(MailboxMessageSchema.parse({ ...rest, status, updatedAt: new Date(this.nowMs()).toISOString() }))

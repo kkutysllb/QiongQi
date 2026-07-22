@@ -817,6 +817,72 @@ describe('EventedV2MultiAgentRuntime', () => {
     })
   })
 
+  it('recovers remote mailbox completion for compensation outcomes through run outbox', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new FailFirstCompleteMailboxStore()
+    const graph = remoteCompensationGraph()
+    const runtimeA = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2RemoteAgentWorker({
+      runtime: runtimeA,
+      mailbox,
+      runs,
+      peerInvoker: new RecordingPeerInvoker({
+        peerCardId: 'peer_researcher',
+        status: 'failed',
+        error: 'remote model failed'
+      }),
+      agentPeers: { researcher: 'peer_researcher' },
+      compensationPolicy: {
+        statusConditions: { failed: 'remote_failed' }
+      }
+    })
+    const run = await runtimeA.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtimeA.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    await expect(worker.processNext({ agentId: 'researcher' })).rejects.toThrow('complete failed once')
+
+    expect(await runs.load(run.runId)).toMatchObject({
+      status: 'completed',
+      activeNodeId: 'compensated',
+      outbox: [
+        { kind: 'mailbox_enqueue', status: 'published' },
+        { kind: 'mailbox_complete', status: 'pending', messageId: expect.any(String), mailboxStatus: 'failed' }
+      ]
+    })
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'delivered' }])
+
+    const runtimeB = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const recovered = await runtimeB.flushPendingOutbox(run.runId)
+
+    expect(recovered.outbox).toMatchObject([
+      { kind: 'mailbox_enqueue', status: 'published' },
+      { kind: 'mailbox_complete', status: 'published' }
+    ])
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'failed' }])
+  })
+
   it('converts remote peer cancellation into an aborted agent task', async () => {
     const runs = new InMemoryMultiAgentRunStore()
     const mailbox = new InMemoryMailboxStore()
@@ -1545,6 +1611,16 @@ class FailFirstEnqueueMailboxStore extends InMemoryMailboxStore {
     this.enqueues += 1
     if (this.enqueues === 1) throw new Error('enqueue failed once')
     return super.enqueue(message)
+  }
+}
+
+class FailFirstCompleteMailboxStore extends InMemoryMailboxStore {
+  private completes = 0
+
+  async complete(messageId: string, status?: 'completed' | 'failed' | 'aborted', fence?: unknown) {
+    this.completes += 1
+    if (this.completes === 1) throw new Error('complete failed once')
+    return super.complete(messageId, status, fence as never)
   }
 }
 

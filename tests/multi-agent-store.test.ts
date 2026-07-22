@@ -148,6 +148,27 @@ describe.each([
     }
   })
 
+  it('treats repeated mailbox completion with the same terminal status as idempotent', async () => {
+    const created = await factory()
+    try {
+      await created.mailbox.enqueue(baseMessage())
+
+      const claimed = await created.mailbox.claimNext('researcher', { holderId: 'worker_a', ttlMs: 1000 })
+      expect(claimed).toMatchObject({
+        status: 'delivered',
+        claimLease: { holderId: 'worker_a', epoch: 1 }
+      })
+
+      await created.mailbox.complete('msg_1', 'failed', claimed?.claimLease)
+      await created.mailbox.complete('msg_1', 'failed', claimed?.claimLease)
+      await expect(created.mailbox.complete('msg_1', 'completed', claimed?.claimLease)).rejects.toThrow(/stale mailbox claim/i)
+
+      expect(await created.mailbox.listForRun('mar_1')).toMatchObject([{ status: 'failed' }])
+    } finally {
+      if ('root' in created) await rm(created.root, { recursive: true, force: true })
+    }
+  })
+
   it('serializes concurrent run updates through the store', async () => {
     const created = await factory()
     try {

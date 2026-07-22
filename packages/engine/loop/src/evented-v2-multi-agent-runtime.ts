@@ -157,9 +157,13 @@ export class EventedV2AgentWorker {
       runId: message.runId,
       agentId: input.agentId,
       condition: result.condition ?? 'completed',
-      summary: result.summary
+      summary: result.summary,
+      mailboxCompletion: {
+        messageId: message.messageId,
+        status: 'completed',
+        fence: message.claimLease
+      }
     })
-    await this.options.mailbox.complete(message.messageId, undefined, message.claimLease)
     return { processed: true, runId: message.runId, messageId: message.messageId }
   }
 }
@@ -206,9 +210,13 @@ export class EventedV2RemoteAgentWorker {
       status: artifact.status,
       summary: artifact.summary ?? artifact.error,
       error: artifact.error,
-      peerArtifact: artifact
+      peerArtifact: artifact,
+      mailboxCompletion: {
+        messageId: message.messageId,
+        status: artifact.status,
+        fence: message.claimLease
+      }
     })
-    await this.options.mailbox.complete(message.messageId, artifact.status, message.claimLease)
     return {
       processed: true,
       runId: message.runId,
@@ -625,7 +633,7 @@ export class EventedV2MultiAgentRuntime {
     targetAgentId: string
     prompt: string
   }, envelopeId: string): MultiAgentRun {
-    const existing = run.outbox.find((intent) => intent.message.envelopeId === envelopeId)
+    const existing = run.outbox.find((intent) => intent.kind === 'mailbox_enqueue' && intent.message.envelopeId === envelopeId)
     if (existing) return MultiAgentRunSchema.parse(run)
     const now = this.options.nowIso()
     const message = this.createHandoffMessage(run, input, envelopeId)
@@ -657,52 +665,64 @@ export class EventedV2MultiAgentRuntime {
     summary?: string
     error?: string
     peerArtifact?: PeerArtifact
+    mailboxCompletion?: {
+      messageId: string
+      status: 'completed' | 'failed' | 'aborted'
+      fence?: MailboxMessage['claimLease']
+    }
   }): Promise<MultiAgentRun> {
-    return this.withRunLock(input.runId, () => this.withRunMutationLease(input.runId, async (fence) =>
-      this.options.runs.update(input.runId, (current) => {
-      const activeNode = requireGraphNode(this.graph, current.activeNodeId)
-      if (activeNode.kind !== 'agent') throw new Error(`Active node must be agent to complete task: ${activeNode.id}`)
-      if (activeNode.agentId !== input.agentId) {
-        throw new Error(`Agent task completion mismatch: ${activeNode.agentId} !== ${input.agentId}`)
-      }
-      const now = this.options.nowIso()
-      const condition = input.condition ?? 'completed'
-      const status = input.status ?? agentRunStatusFromCondition(condition)
-      const nextNodeId = nextNodeForCondition(this.graph, activeNode.id, condition)
-      if (!nextNodeId) throw new Error(`No ${condition} edge from node: ${activeNode.id}`)
-      const agentRunIndex = latestAgentRunIndex(current, input.agentId, activeNode.id)
-      const withCompletedAgent = MultiAgentRunSchema.parse({
-        ...current,
-        agentRuns: current.agentRuns.map((agentRun, index) =>
-          index === agentRunIndex
-            ? {
-                ...agentRun,
-                status,
-                summary: input.summary ?? agentRun.summary,
+    return this.withRunLock(input.runId, () =>
+      this.withRunMutationLease(input.runId, async (fence) => {
+        const next = await this.options.runs.update(input.runId, (current) => {
+          const activeNode = requireGraphNode(this.graph, current.activeNodeId)
+          if (activeNode.kind !== 'agent') throw new Error(`Active node must be agent to complete task: ${activeNode.id}`)
+          if (activeNode.agentId !== input.agentId) {
+            throw new Error(`Agent task completion mismatch: ${activeNode.agentId} !== ${input.agentId}`)
+          }
+          const now = this.options.nowIso()
+          const condition = input.condition ?? 'completed'
+          const status = input.status ?? agentRunStatusFromCondition(condition)
+          const nextNodeId = nextNodeForCondition(this.graph, activeNode.id, condition)
+          if (!nextNodeId) throw new Error(`No ${condition} edge from node: ${activeNode.id}`)
+          const agentRunIndex = latestAgentRunIndex(current, input.agentId, activeNode.id)
+          const withCompletedAgent = MultiAgentRunSchema.parse({
+            ...current,
+            agentRuns: current.agentRuns.map((agentRun, index) =>
+              index === agentRunIndex
+                ? {
+                    ...agentRun,
+                    status,
+                    summary: input.summary ?? agentRun.summary,
+                    ...(input.error !== undefined ? { error: input.error } : {}),
+                    ...(input.peerArtifact !== undefined ? { peerArtifact: input.peerArtifact } : {}),
+                    completedAt: agentRun.completedAt ?? now,
+                    updatedAt: now
+                  }
+                : agentRun
+            ),
+            events: [...current.events, {
+              eventId: this.options.ids('mae'),
+              type: 'node_completed',
+              nodeId: activeNode.id,
+              agentId: input.agentId,
+              payload: {
+                condition,
+                summary: input.summary,
                 ...(input.error !== undefined ? { error: input.error } : {}),
                 ...(input.peerArtifact !== undefined ? { peerArtifact: input.peerArtifact } : {}),
-                completedAt: agentRun.completedAt ?? now,
-                updatedAt: now
-              }
-            : agentRun
-        ),
-        events: [...current.events, {
-          eventId: this.options.ids('mae'),
-          type: 'node_completed',
-          nodeId: activeNode.id,
-          agentId: input.agentId,
-          payload: {
-            condition,
-            summary: input.summary,
-            ...(input.error !== undefined ? { error: input.error } : {}),
-            ...(input.peerArtifact !== undefined ? { peerArtifact: input.peerArtifact } : {})
-          },
-          timestamp: now
-        }],
-        updatedAt: now
-      })
-      return this.enterGraphNode(withCompletedAgent, nextNodeId)
-    }, updateOptions(fence))))
+                ...(input.mailboxCompletion !== undefined ? { messageId: input.mailboxCompletion.messageId } : {})
+              },
+              timestamp: now
+            }],
+            updatedAt: now
+          })
+          const advanced = this.enterGraphNode(withCompletedAgent, nextNodeId)
+          return input.mailboxCompletion
+            ? this.ensureMailboxCompleteOutboxIntent(advanced, input.mailboxCompletion)
+            : advanced
+        }, updateOptions(fence))
+        return input.mailboxCompletion ? this.flushPendingOutboxUnlocked(next.runId, fence) : next
+      }))
   }
 
   async completeExternalNode(input: {
@@ -753,6 +773,7 @@ export class EventedV2MultiAgentRuntime {
     let latest = MultiAgentRunSchema.parse(current)
     for (const intent of latest.outbox.filter((candidate) => candidate.status === 'pending')) {
       if (intent.kind === 'mailbox_enqueue') await this.options.mailbox.enqueue(intent.message)
+      if (intent.kind === 'mailbox_complete') await this.options.mailbox.complete(intent.messageId, intent.mailboxStatus, intent.claimLease)
       latest = await this.options.runs.update(
         runId,
         (run) => this.markOutboxPublished(run, intent.outboxId),
@@ -769,6 +790,31 @@ export class EventedV2MultiAgentRuntime {
       outbox: run.outbox.map((intent) => intent.outboxId === outboxId
         ? { ...intent, status: 'published', updatedAt: now, publishedAt: intent.publishedAt ?? now }
         : intent),
+      updatedAt: now
+    })
+  }
+
+  private ensureMailboxCompleteOutboxIntent(run: MultiAgentRun, completion: {
+    messageId: string
+    status: 'completed' | 'failed' | 'aborted'
+    fence?: MailboxMessage['claimLease']
+  }): MultiAgentRun {
+    const existing = run.outbox.find((intent) => intent.kind === 'mailbox_complete' && intent.messageId === completion.messageId)
+    if (existing) return MultiAgentRunSchema.parse(run)
+    const now = this.options.nowIso()
+    const intent: MultiAgentOutboxIntent = {
+      outboxId: `outbox_complete_${completion.messageId}`,
+      kind: 'mailbox_complete',
+      status: 'pending',
+      messageId: completion.messageId,
+      mailboxStatus: completion.status,
+      ...(completion.fence !== undefined ? { claimLease: completion.fence } : {}),
+      createdAt: now,
+      updatedAt: now
+    }
+    return MultiAgentRunSchema.parse({
+      ...run,
+      outbox: [...run.outbox, intent],
       updatedAt: now
     })
   }

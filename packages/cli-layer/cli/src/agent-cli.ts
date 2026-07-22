@@ -33,6 +33,7 @@ export const QIONGQI_CLI_USAGE = `qiongqi <command> [options]
 
 Commands:
   serve [options]            Start the local HTTP/SSE runtime
+  worker [options]           Run evented_v2 remote-agent workers without HTTP
   run [options] <prompt>     Run one agent turn without the GUI
   chat [options]             Start a line-oriented terminal chat
   exec [options] <tool>      List or invoke tools directly
@@ -48,6 +49,9 @@ Common options:
 Exec options:
   --list-tools               Print available tools
   --args <json>              JSON object passed to the selected tool
+
+Worker options:
+  --once                     Flush outbox and remote-agent mailboxes once, then exit
 `
 
 const VALUE_FLAGS = new Set([
@@ -73,7 +77,7 @@ const VALUE_FLAGS = new Set([
   'title'
 ])
 
-export type QiongqiCliCommand = 'serve' | 'run' | 'chat' | 'exec' | 'help'
+export type QiongqiCliCommand = 'serve' | 'worker' | 'run' | 'chat' | 'exec' | 'help'
 
 export function splitQiongqiCliCommand(argv: readonly string[]): {
   command: QiongqiCliCommand
@@ -84,7 +88,7 @@ export function splitQiongqiCliCommand(argv: readonly string[]): {
   if (!first || first === '--help' || first === '-h' || first === 'help') {
     return { command: 'help', args: [] }
   }
-  if (first === 'serve' || first === 'run' || first === 'chat' || first === 'exec') {
+  if (first === 'serve' || first === 'worker' || first === 'run' || first === 'chat' || first === 'exec') {
     return { command: first, args: [...argv.slice(1)] }
   }
   if (first.startsWith('--')) {
@@ -99,12 +103,53 @@ export async function runAgentCommand(
   io: CliIo
 ): Promise<number> {
   switch (command) {
+    case 'worker':
+      return runWorker(argv, io)
     case 'run':
       return runOneShot(argv, io)
     case 'chat':
       return runChat(argv, io)
     case 'exec':
       return runExec(argv, io)
+  }
+}
+
+async function runWorker(argv: readonly string[], io: CliIo): Promise<number> {
+  const parsed = parseSharedOptions(argv, io)
+  if (!parsed.ok) return writeParseError(parsed, io, 'qiongqi worker')
+  let runtime: ServerRuntime | undefined
+  try {
+    runtime = await createRuntime(parsed.options, io)
+    const scheduler = runtime.multiAgentRemoteScheduler
+    if (!scheduler) {
+      io.stderr.write('qiongqi worker: evented_v2 remote agent scheduler is not configured\n')
+      return ServeExitCode.config
+    }
+    if (hasFlag(argv, 'once')) {
+      const outbox = await runtime.multiAgentOutboxReconciler?.flushOnce()
+      const remote = await scheduler.flushOnce()
+      if (parsed.json) {
+        io.stdout.write(JSON.stringify({ mode: 'worker', outbox, remote }) + '\n')
+      } else {
+        io.stdout.write(`qiongqi worker: processed ${remote.messagesProcessed} message(s)\n`)
+      }
+      return ServeExitCode.ok
+    }
+    runtime.multiAgentOutboxReconciler?.start()
+    scheduler.start()
+    const snapshot = scheduler.snapshot()
+    if (parsed.json) {
+      io.stdout.write(JSON.stringify({ mode: 'worker', snapshot }) + '\n')
+    } else {
+      io.stdout.write(`qiongqi worker running: ${snapshot.workerId}\n`)
+    }
+    await waitForWorkerShutdownSignal()
+    return ServeExitCode.ok
+  } catch (error) {
+    io.stderr.write(`qiongqi worker: ${errorMessage(error)}\n`)
+    return ServeExitCode.runtime
+  } finally {
+    await shutdownRuntime(runtime, io, 'qiongqi worker')
   }
 }
 
@@ -435,6 +480,18 @@ function stringFlag(argv: readonly string[], names: readonly string[]): string |
 
 function hasFlag(argv: readonly string[], name: string): boolean {
   return argv.some((token) => token === `--${name}` || token === `--${name}=true`)
+}
+
+function waitForWorkerShutdownSignal(): Promise<void> {
+  return new Promise((resolve) => {
+    const stop = () => {
+      process.off('SIGTERM', stop)
+      process.off('SIGINT', stop)
+      resolve()
+    }
+    process.once('SIGTERM', stop)
+    process.once('SIGINT', stop)
+  })
 }
 
 function formatToolOutput(output: unknown): string {

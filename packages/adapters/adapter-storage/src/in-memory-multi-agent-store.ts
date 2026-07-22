@@ -233,6 +233,7 @@ export class InMemoryMailboxStore implements MailboxStore {
   async complete(messageId: string, status: 'completed' | 'failed' | 'aborted' = 'completed', fence?: MailboxMessage['claimLease']): Promise<void> {
     const current = this.messages.get(messageId)
     if (!current) return
+    if (current.status === status) return
     assertMailboxFence(current, fence)
     const { claimLease: _claimLease, ...rest } = current
     this.messages.set(messageId, MailboxMessageSchema.parse({ ...rest, status, updatedAt: new Date(this.nowMs()).toISOString() }))

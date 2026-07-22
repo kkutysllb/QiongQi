@@ -20,9 +20,10 @@ export type EventedV2TimelineOutboxIntent = Pick<
 > & {
   publishedAt?: string
   messageId: string
-  envelopeId: string
-  fromAgentId: string
-  toAgentId: string
+  envelopeId?: string
+  fromAgentId?: string
+  toAgentId?: string
+  mailboxStatus?: 'completed' | 'failed' | 'aborted'
 }
 
 export type EventedV2RunTimeline = Pick<
@@ -90,18 +91,29 @@ export function buildEventedV2RunTimeline(run: MultiAgentRun): EventedV2RunTimel
       ...(agentRun.error !== undefined ? { error: agentRun.error } : {}),
       ...(agentRun.peerArtifact !== undefined ? { peerArtifact: agentRun.peerArtifact } : {})
     })),
-    outbox: run.outbox.map((intent) => ({
-      outboxId: intent.outboxId,
-      kind: intent.kind,
-      status: intent.status,
-      messageId: intent.message.messageId,
-      envelopeId: intent.message.envelopeId,
-      fromAgentId: intent.message.fromAgentId,
-      toAgentId: intent.message.toAgentId,
-      createdAt: intent.createdAt,
-      updatedAt: intent.updatedAt,
-      ...(intent.publishedAt !== undefined ? { publishedAt: intent.publishedAt } : {})
-    }))
+    outbox: run.outbox.map((intent) => intent.kind === 'mailbox_enqueue'
+      ? {
+          outboxId: intent.outboxId,
+          kind: intent.kind,
+          status: intent.status,
+          messageId: intent.message.messageId,
+          envelopeId: intent.message.envelopeId,
+          fromAgentId: intent.message.fromAgentId,
+          toAgentId: intent.message.toAgentId,
+          createdAt: intent.createdAt,
+          updatedAt: intent.updatedAt,
+          ...(intent.publishedAt !== undefined ? { publishedAt: intent.publishedAt } : {})
+        }
+      : {
+          outboxId: intent.outboxId,
+          kind: intent.kind,
+          status: intent.status,
+          messageId: intent.messageId,
+          mailboxStatus: intent.mailboxStatus,
+          createdAt: intent.createdAt,
+          updatedAt: intent.updatedAt,
+          ...(intent.publishedAt !== undefined ? { publishedAt: intent.publishedAt } : {})
+        })
   }
 }
 

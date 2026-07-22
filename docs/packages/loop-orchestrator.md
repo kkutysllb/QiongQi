@@ -13,7 +13,7 @@
 
 - **`TurnOrchestrator`** —— 经典命令式循环，组装 `PromptBuilder` / `ModelStepRunner` / `ContinuationPolicy` / `ToolCallCoordinator` 4 个子组件
 - **`EventedTurnOrchestrator`** —— `LoopRunner` 驱动的 evented loop shell + 崩溃恢复（`LoopRun` / `TurnStateV2` 持久化）
-- **`EventedV2MultiAgentRuntime`** —— `evented_v2` 的多 Agent 编排 shell，当前支持 durable run、mailbox、manager-to-specialist handoff、agent task completion、外部 wait/tool/judge 节点恢复、run 内持久化 outbox + `flushPendingOutbox()` / `flushAllPendingOutbox()` 恢复投递，以及 `timeline()` / `metrics()` 只读管理投影
+- **`EventedV2MultiAgentRuntime`** —— `evented_v2` 的多 Agent 编排 shell，当前支持 durable run、mailbox、manager-to-specialist handoff、agent task completion、外部 wait/tool/judge 节点恢复、run 内持久化 outbox + `flushPendingOutbox()` / `flushAllPendingOutbox()` 恢复 mailbox enqueue / complete，以及 `timeline()` / `metrics()` 只读管理投影
 - **`EventedV2AgentWorker`** —— 通用 agent task worker，负责从 mailbox claim task、运行注入的 agent handler、提交结果并 complete mailbox
 - **`EventedV2OutboxReconciler`** —— 可嵌入 worker / server lifecycle 的周期性 outbox flush 外壳，提供 `flushOnce()` / `start()` / `stop()` / `isRunning()` 与 flush 结果回调
 - **`EventedV2RemoteAgentScheduler`** —— 可嵌入 worker / server lifecycle 的周期性 remote agent polling 外壳，按配置的 agent 列表调用 remote worker，隔离单 agent 错误，并通过 `snapshot()` 暴露 supervisor 指标
@@ -33,7 +33,7 @@
 | `TurnOrchestratorOptions` | type | `turn-orchestrator.ts` | 30+ 依赖字段 |
 | `runOrchestratorStep` | function | `turn-orchestrator.ts` | classic step 纯函数 |
 | `EventedTurnOrchestrator` | class | `evented-turn-orchestrator.ts` | 事件驱动 + 崩溃恢复 |
-| `EventedV2MultiAgentRuntime` | class | `evented-v2-multi-agent-runtime.ts` | `evented_v2` 多 Agent 编排 shell；handoff 写入 run outbox，`completeAgentTask()` / `completeExternalNode()` 按 graph edge 推进，`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 可恢复 mailbox 投递，`timeline()` / `metrics()` 暴露只读观测面 |
+| `EventedV2MultiAgentRuntime` | class | `evented-v2-multi-agent-runtime.ts` | `evented_v2` 多 Agent 编排 shell；handoff 写入 `mailbox_enqueue` run outbox，agent completion 写入 `mailbox_complete` run outbox，`completeAgentTask()` / `completeExternalNode()` 按 graph edge 推进，`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 可恢复 mailbox 投递与完成，`timeline()` / `metrics()` 暴露只读观测面 |
 | `buildEventedV2RunTimeline` / `buildEventedV2RunMetrics` | function | `evented-v2-observability.ts` | 将 `MultiAgentRun` 投影为 timeline，或将 run 列表聚合为 status / agent-run / outbox 指标 |
 | `EventedV2AgentWorker` | class | `evented-v2-multi-agent-runtime.ts` | claim mailbox task、执行 agent handler、提交 agent 结果并 complete mailbox |
 | `EventedV2OutboxReconciler` | class | `evented-v2-multi-agent-runtime.ts` | 周期性调用 `flushAllPendingOutbox()`；提供 `start` / `stop` / `isRunning` / `onFlush` / `onError` 生命周期与观测 hook |
@@ -72,13 +72,14 @@
 - **`SteeringQueue.setTurn` 切换清空**（`steering-queue.ts:11-16`）—— 避免上一回合消息被下一回合消费。
 - **`TurnEventBus` 是同步**（`turn-event-bus.ts:12-19`）—— `emit` 立即调用订阅者，订阅者返回值取首个非 void。
 - **`TurnStateV2` / `LoopRun` 含 `stepIndex` + `phaseCursor` + `events`** —— 崩溃恢复与审计日志的关键；`TurnStateV1` 只作为兼容读入格式。
-- **`EventedV2MultiAgentRuntime` 的 handoff 使用 durable outbox** —— run 事务提交 `handoff_requested` / `handoff_delivered` 与 `mailbox_enqueue` intent；提交后再投递 mailbox，并把 outbox 标记为 `published`。
-- **`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 是可重入恢复入口** —— 若进程在 run 提交后、mailbox enqueue 前/后崩溃，新的 runtime 实例可以重放 pending intent；`MultiAgentRunStore.listWithPendingOutbox()` 负责发现待恢复 run；`MailboxStore.enqueue` 对同一 message 保持幂等且不会把 delivered/completed 降级回 queued。
+- **`EventedV2MultiAgentRuntime` 的 mailbox side effect 使用 durable outbox** —— handoff 的 run 事务提交 `handoff_requested` / `handoff_delivered` 与 `mailbox_enqueue` intent；agent completion 的 run 事务提交 graph advancement 与 `mailbox_complete` intent；提交后再执行 mailbox side effect，并把 outbox 标记为 `published`。
+- **`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 是可重入恢复入口** —— 若进程在 run 提交后、mailbox enqueue / complete 前后崩溃，新的 runtime 实例可以重放 pending intent；`MultiAgentRunStore.listWithPendingOutbox()` 负责发现待恢复 run；`MailboxStore.enqueue` 对同一 message 保持幂等且不会把 delivered/completed 降级回 queued，`MailboxStore.complete` 对同一 terminal 状态重放幂等，同时继续用 claim fence 拒绝迟到 worker 覆盖不同终态。
 - **`EventedV2MultiAgentRuntime` 的 graph interpreter 是 condition 驱动** —— `completeAgentTask()` 完成 active agent node 后按 edge condition 推进；`agent` / `terminate` / `join` / `retry` 在 runtime 内解释；`wait` / `tool` / `judge` 作为外部执行节点进入 `suspended`，再由 `completeExternalNode()` 按 condition 恢复。
 - **`evented_v2` graph 可由 runtime config 声明** —— HTTP runtime factory 会优先使用 `runtime.eventedV2AgentGraph`，该字段复用 `AgentGraphSchema` 并经 `validateAgentGraph()` 校验；未配置时才回退到内置 manager-specialist graph。
 - **`EventedV2RemoteAgentWorker` 是远程 agent 执行适配层** —— HTTP runtime factory 可通过 `runtime.eventedV2AgentPeers` 绑定 `agentId -> AgentCard.id`，并通过 `runtime.eventedV2RemoteAgent.timeoutMs` / `leaseTtlMs` 配置远程调用超时与 mailbox claim lease；worker 从 mailbox claim 任务后调用共享的 `PeerRegistry.invokePeer()`，再把 `PeerArtifact.status` 映射为 graph condition 推进 run，`PeerArtifact.artifacts` 会进入 `agentRuns[].peerArtifact` 与 timeline。
 - **`EventedV2RemoteAgentWorker` 支持声明式补偿 condition** —— 默认把 peer outcome 映射为 `completed` / `failed` / `aborted`；配置 `runtime.eventedV2RemoteAgent.compensation.statusConditions` 后，可把 `failed` / `aborted` 映射为 `remote_failed`、`fallback` 等 graph condition，由 AgentGraph 决定 retry、fallback、terminate 或人工介入。
 - **`EventedV2RemoteAgentScheduler` 是远程 worker 的调度外壳** —— HTTP runtime factory 可通过 `runtime.eventedV2RemoteAgent.scheduler.enabled` 自动启动，并通过 `scheduler.intervalMs` 配置轮询间隔；scheduler 按 peer binding 的 agent 列表调用 worker，单 agent 错误进入 `onError`，不会阻断同批其他 agent；`snapshot()` 会投影 workerId、running/stopped、health、flush/message/error 计数与 heartbeat 时间，供 HTTP runtime metrics 与 Prometheus 导出；挂载 `EventedV2WorkerRegistryStore` 时，每次 flush 后会写入 remote agent worker heartbeat。
+- **`qiongqi worker` 是独立 remote worker 入口** —— CLI 可在不启动 HTTP server 的情况下创建 runtime 并驱动 `EventedV2OutboxReconciler` + `EventedV2RemoteAgentScheduler`；`--once` 适合批处理、探针和容器 job，daemon 模式等待 SIGINT/SIGTERM 后 shutdown。
 - **`EventedV2WorkerRegistryStore` 是跨进程 worker 监督基础** —— `InMemoryEventedV2WorkerRegistryStore` 与 `FileEventedV2WorkerRegistryStore` 都支持 `recordHeartbeat()` / `list({ nowIso })`；list 会按 `expiresAt` 计算 online/expired，并被 HTTP runtime metrics / Prometheus 投影为 worker total/online/expired 与 role 维度计数。
 - **`EventedV2MultiAgentRuntime` 自动使用 store lease/CAS 能力** —— 当 `MultiAgentRunStore` 实现 `acquireLease` / `releaseLease` 时，handoff、agent completion、external node completion 与 outbox flush 都会以 fencing token 调用 `update(..., { fence })`；store 还可通过 `loadVersion()` + `expectedVersion` 提供 CAS。
 - **`EventedV2MultiAgentRuntime` 的观测面是 projection-only** —— `timeline(runId)` 只读取 run 并调用 `buildEventedV2RunTimeline()`；`metrics()` 通过 `MultiAgentRunStore.listAll()` 聚合所有 run，不改变运行状态，也不依赖业务 UI。
@@ -99,8 +100,8 @@
 - `EventedTurnOrchestrator drives LoopRunner and emits prompt/model/decision/tools/retry rich events`
 - `EventedTurnOrchestrator retries truncated output on the same stepIndex`
 - `EventedTurnOrchestrator preserves required-tool-missing error code/items in evented mode`
-- `EventedV2AgentWorker claims queued agent tasks, completes mailbox messages, and advances runs`
-- `EventedV2RemoteAgentWorker invokes configured peers for mailbox tasks, records peer artifacts, maps cancellation/timeout to aborted, and advances runs through PeerArtifact statuses`
+- `EventedV2AgentWorker claims queued agent tasks, advances runs, and completes mailbox messages through a recoverable mailbox_complete outbox intent`
+- `EventedV2RemoteAgentWorker invokes configured peers for mailbox tasks, records peer artifacts, maps cancellation/timeout to aborted, advances runs through PeerArtifact statuses, and recovers mailbox terminal completion through run outbox`
 - `EventedV2MultiAgentRuntime resumes suspended wait/tool/judge nodes through external completion conditions`
 - `EventedV2MultiAgentRuntime uses store lease fencing when completing agent tasks`
 - `EventedV2MultiAgentRuntime returns projected timeline and aggregate metrics for management observability`
@@ -111,8 +112,10 @@
 - `MultiAgentRunStore rejects stale lease fences and stale compare-and-swap versions`
 - `EventedV2OutboxReconciler starts from runtime config and stops during runtime shutdown`
 - `EventedV2RemoteAgentScheduler starts from runtime config, isolates per-agent polling errors, records store-backed worker registry heartbeats, reports supervision metrics through snapshot/Prometheus, and stops during runtime shutdown`
+- `qiongqi worker --once runs evented_v2 outbox and remote-agent scheduler flushes without starting the HTTP server`
 - `EventedV2WorkerRegistryStore records memory/file-backed worker heartbeats and reports online/expired status for HTTP/Prometheus metrics`
 - `EventedV2RemoteAgentWorker maps peer outcomes through configured compensation conditions before advancing AgentGraph`
+- `EventedV2MultiAgentRuntime recovers pending mailbox_complete outbox intents after run advancement succeeds but mailbox completion fails`
 - `InflightTracker.run registers before, guarantees end() in finally`
 - `InflightTracker.abortAll returns id+reason markers for tool cleanup`
 - `SteeringQueue.enqueue trims and pushes; switch turns clears the buffer`

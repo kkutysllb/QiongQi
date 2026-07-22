@@ -129,6 +129,14 @@ export const MultiAgentEventSchema = z.object({
 }).strict()
 export type MultiAgentEvent = z.infer<typeof MultiAgentEventSchema>
 
+export const MailboxClaimLeaseSchema = z.object({
+  holderId: NonEmptyString,
+  expiresAt: NonEmptyString,
+  epoch: z.number().int().positive(),
+  token: NonEmptyString
+}).strict()
+export type MailboxClaimLease = z.infer<typeof MailboxClaimLeaseSchema>
+
 export const MailboxMessageSchema = z.object({
   messageId: NonEmptyString,
   envelopeId: NonEmptyString,
@@ -136,12 +144,7 @@ export const MailboxMessageSchema = z.object({
   fromAgentId: NonEmptyString,
   toAgentId: NonEmptyString,
   status: z.enum(['queued', 'delivered', 'completed', 'failed', 'aborted']),
-  claimLease: z.object({
-    holderId: NonEmptyString,
-    expiresAt: NonEmptyString,
-    epoch: z.number().int().positive(),
-    token: NonEmptyString
-  }).strict().optional(),
+  claimLease: MailboxClaimLeaseSchema.optional(),
   payload: z.object({ prompt: NonEmptyString }).passthrough(),
   createdAt: NonEmptyString,
   updatedAt: NonEmptyString
@@ -166,7 +169,7 @@ export const EventedV2WorkerRecordSchema = z.object({
 }).strict()
 export type EventedV2WorkerRecord = z.infer<typeof EventedV2WorkerRecordSchema>
 
-export const MultiAgentOutboxIntentSchema = z.object({
+export const MailboxEnqueueOutboxIntentSchema = z.object({
   outboxId: NonEmptyString,
   kind: z.literal('mailbox_enqueue'),
   status: z.enum(['pending', 'published']),
@@ -175,6 +178,23 @@ export const MultiAgentOutboxIntentSchema = z.object({
   updatedAt: NonEmptyString,
   publishedAt: NonEmptyString.optional()
 }).strict()
+
+export const MailboxCompleteOutboxIntentSchema = z.object({
+  outboxId: NonEmptyString,
+  kind: z.literal('mailbox_complete'),
+  status: z.enum(['pending', 'published']),
+  messageId: NonEmptyString,
+  mailboxStatus: z.enum(['completed', 'failed', 'aborted']),
+  claimLease: MailboxClaimLeaseSchema.optional(),
+  createdAt: NonEmptyString,
+  updatedAt: NonEmptyString,
+  publishedAt: NonEmptyString.optional()
+}).strict()
+
+export const MultiAgentOutboxIntentSchema = z.discriminatedUnion('kind', [
+  MailboxEnqueueOutboxIntentSchema,
+  MailboxCompleteOutboxIntentSchema
+])
 export type MultiAgentOutboxIntent = z.infer<typeof MultiAgentOutboxIntentSchema>
 
 export const MultiAgentRunSchema = z.object({
