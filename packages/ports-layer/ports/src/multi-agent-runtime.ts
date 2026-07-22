@@ -22,6 +22,7 @@ export interface MultiAgentRunStore {
   }>
   renewLease?(runId: string, holderId: string, fenceOrTtl: LeaseFence | number, ttlMs?: number): Promise<boolean>
   releaseLease?(runId: string, holderId: string, fence?: LeaseFence): Promise<void>
+  listAll(): Promise<MultiAgentRun[]>
   listWithPendingOutbox(): Promise<MultiAgentRun[]>
   listByThread(threadId: string): Promise<MultiAgentRun[]>
   delete(runId: string): Promise<void>

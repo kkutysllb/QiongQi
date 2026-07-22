@@ -10,6 +10,12 @@ import {
 } from '@qiongqi/contracts'
 import type { LeaseFence, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
 import { nextNodeForCondition, requireGraphNode, validateAgentGraph } from './multi-agent-graph.js'
+import {
+  buildEventedV2RunMetrics,
+  buildEventedV2RunTimeline,
+  type EventedV2RunMetrics,
+  type EventedV2RunTimeline
+} from './evented-v2-observability.js'
 
 export type EventedV2MultiAgentRuntimeOptions = {
   runs: MultiAgentRunStore
@@ -658,6 +664,16 @@ export class EventedV2MultiAgentRuntime {
     const run = await this.options.runs.load(runId)
     if (!run) throw new Error(`MultiAgentRun not found: ${runId}`)
     return run.events.map((event) => `${event.type}:${event.agentId ?? event.nodeId ?? 'runtime'}`)
+  }
+
+  async timeline(runId: string): Promise<EventedV2RunTimeline> {
+    const run = await this.options.runs.load(runId)
+    if (!run) throw new Error(`MultiAgentRun not found: ${runId}`)
+    return buildEventedV2RunTimeline(run)
+  }
+
+  async metrics(): Promise<EventedV2RunMetrics> {
+    return buildEventedV2RunMetrics(await this.options.runs.listAll())
   }
 }
 

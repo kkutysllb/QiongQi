@@ -481,6 +481,43 @@ describe('EventedV2MultiAgentRuntime', () => {
     ])
   })
 
+  it('returns projected timeline and aggregate metrics for management observability', async () => {
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs: new InMemoryMultiAgentRunStore(),
+      mailbox: new InMemoryMailboxStore(),
+      graph: defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' }),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    await expect(runtime.timeline(run.runId)).resolves.toMatchObject({
+      runId: run.runId,
+      events: [
+        { seq: 0, type: 'run_started' },
+        { seq: 1, type: 'handoff_requested' },
+        { seq: 2, type: 'handoff_delivered' }
+      ],
+      outbox: [{ status: 'published' }]
+    })
+    await expect(runtime.metrics()).resolves.toMatchObject({
+      totalRuns: 1,
+      byStatus: { running: 1 },
+      outbox: { total: 1, pending: 0, published: 1, runsWithPendingOutbox: 0 }
+    })
+  })
+
   it('claims a queued agent task, completes the mailbox message, and advances the run to termination', async () => {
     const runs = new InMemoryMultiAgentRunStore()
     const mailbox = new InMemoryMailboxStore()

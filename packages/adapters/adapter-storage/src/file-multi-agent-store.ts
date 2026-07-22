@@ -159,7 +159,7 @@ export class FileMultiAgentRunStore implements MultiAgentRunStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }
 
-  async listWithPendingOutbox(): Promise<MultiAgentRun[]> {
+  async listAll(): Promise<MultiAgentRun[]> {
     const root = join(this.rootDir, 'multi-agent-runs')
     const threadDirs = await readDirIfExists(root)
     const all: MultiAgentRun[] = []
@@ -167,8 +167,12 @@ export class FileMultiAgentRunStore implements MultiAgentRunStore {
       all.push(...await this.listByThread(threadDir))
     }
     return all
-      .filter((run) => run.outbox.some((intent) => intent.status === 'pending'))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
+  async listWithPendingOutbox(): Promise<MultiAgentRun[]> {
+    return (await this.listAll())
+      .filter((run) => run.outbox.some((intent) => intent.status === 'pending'))
   }
 
   async delete(runId: string): Promise<void> {

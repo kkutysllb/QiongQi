@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { dispatchRequest, startNodeHttpServer } from '@qiongqi/http'
-import { buildHarness } from './http-server-test-harness.js'
+import { InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
+import { EventedV2MultiAgentRuntime, defaultManagerSpecialistGraph } from '@qiongqi/loop'
+import { buildHarness, readJson } from './http-server-test-harness.js'
 
 describe('HTTP observability', () => {
   it('adds a request id response header and reuses caller-provided ids', async () => {
@@ -128,4 +130,94 @@ describe('HTTP observability', () => {
     expect(text).toContain('qiongqi_cache_hit_rate ')
     expect(text).toContain('qiongqi_a2a_tasks_total 0')
   })
+
+  it('serves evented v2 timeline and metrics management projections when configured', async () => {
+    const h = buildHarness()
+    h.runtime.multiAgentRuntime = new EventedV2MultiAgentRuntime({
+      runs: new InMemoryMultiAgentRunStore(),
+      mailbox: new InMemoryMailboxStore(),
+      graph: defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' }),
+      ids: nextHttpId(),
+      nowIso: h.nowIso
+    })
+    const run = await h.runtime.multiAgentRuntime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Observe evented v2.'
+    })
+
+    const timelineResponse = await dispatchRequest(
+      h.router,
+      new Request(`http://localhost/v1/runtime/evented-v2/runs/${run.runId}/timeline`, {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+    const metricsResponse = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/runtime/evented-v2/metrics', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(timelineResponse.status).toBe(200)
+    expect(await readJson(timelineResponse)).toMatchObject({
+      runId: run.runId,
+      events: [{ seq: 0, type: 'run_started', agentId: 'manager' }]
+    })
+    expect(metricsResponse.status).toBe(200)
+    expect(await readJson(metricsResponse)).toMatchObject({
+      totalRuns: 1,
+      byStatus: { running: 1 }
+    })
+  })
+
+  it('returns unavailable for evented v2 management routes when the runtime is not configured', async () => {
+    const h = buildHarness()
+
+    const response = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/runtime/evented-v2/metrics', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(response.status).toBe(503)
+    expect(await readJson(response)).toMatchObject({ code: 'capability_unavailable' })
+  })
+
+  it('includes evented v2 metrics in Prometheus output when configured', async () => {
+    const h = buildHarness()
+    h.runtime.multiAgentRuntime = new EventedV2MultiAgentRuntime({
+      runs: new InMemoryMultiAgentRunStore(),
+      mailbox: new InMemoryMailboxStore(),
+      graph: defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' }),
+      ids: nextHttpId(),
+      nowIso: h.nowIso
+    })
+    await h.runtime.multiAgentRuntime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Observe evented v2.'
+    })
+
+    const response = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/runtime/metrics?format=prometheus', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(response.status).toBe(200)
+    const text = await response.text()
+    expect(text).toContain('qiongqi_evented_v2_runs_total{status="running"} 1')
+    expect(text).toContain('qiongqi_evented_v2_outbox_pending 0')
+    expect(text).toContain('qiongqi_evented_v2_agent_runs_total{status="running"} 1')
+  })
 })
+
+function nextHttpId(): (prefix: string) => string {
+  let seq = 0
+  return (prefix) => `${prefix}_${++seq}`
+}

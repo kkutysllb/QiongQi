@@ -21,6 +21,7 @@ describe('multi-agent runtime stores', () => {
         runs[index] = next
         return next
       },
+      listAll: async () => runs.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       listWithPendingOutbox: async () => runs.filter((run) => run.outbox.some((intent) => intent.status === 'pending')),
       listByThread: async (threadId) => runs.filter((run) => run.threadId === threadId),
       delete: async (runId) => {
@@ -67,6 +68,7 @@ describe.each([
       await created.mailbox.enqueue(baseMessage())
 
       expect(await created.runs.load('mar_1')).toMatchObject({ runId: 'mar_1' })
+      expect(await created.runs.listAll?.()).toMatchObject([{ runId: 'mar_1' }])
       expect(await created.runs.listByThread('thread_1')).toHaveLength(1)
 
       const claimed = await created.mailbox.claimNext('researcher')
@@ -184,6 +186,21 @@ describe.each([
       await created.runs.save(runWithPendingOutbox())
 
       expect(await created.runs.listWithPendingOutbox()).toMatchObject([{ runId: 'mar_pending' }])
+    } finally {
+      if ('root' in created) await rm(created.root, { recursive: true, force: true })
+    }
+  })
+
+  it('lists all runs across threads for management projections', async () => {
+    const created = await factory()
+    try {
+      await created.runs.save({ ...baseRun(), runId: 'mar_a', threadId: 'thread_2', createdAt: '2026-07-21T00:00:02.000Z' })
+      await created.runs.save({ ...baseRun(), runId: 'mar_b', threadId: 'thread_1', createdAt: '2026-07-21T00:00:01.000Z' })
+
+      expect(await created.runs.listAll?.()).toMatchObject([
+        { runId: 'mar_b', threadId: 'thread_1' },
+        { runId: 'mar_a', threadId: 'thread_2' }
+      ])
     } finally {
       if ('root' in created) await rm(created.root, { recursive: true, force: true })
     }

@@ -546,6 +546,7 @@ const agent = await createCodingAgent({
 | `/a2a/tasks/:id/subscribe` | SSE progress stream | Bearer |
 | `/a2a` | Backward-compat alias | Bearer |
 | `/v1/runtime/info` / `/v1/runtime/tools` / `/v1/runtime/metrics` | Runtime diagnostics and metrics | Bearer |
+| `/v1/runtime/evented-v2/runs/:runId/timeline` / `/v1/runtime/evented-v2/metrics` | evented_v2 multi-Agent timeline and aggregate metrics | Bearer |
 | `/v1/skills` | Skills list (v1 + v2 merged) | Bearer |
 | `/v1/attachments` | POST upload / GET list / GET diagnostics | Bearer |
 | `/v1/memory` | Memory CRUD | Bearer |
@@ -621,7 +622,7 @@ The runtime now selects `kernel_v3` by default. `classic`, `evented`, and `event
 | Mode | Orchestrator | Crash recovery | Use case |
 |------|--------------|----------------|----------|
 | `kernel_v3` | durable kernel loop with checkpoints and idempotent effects | yes | default production mode |
-| `evented_v2` | `EventedTurnOrchestrator` + `LoopRunner`, with `EventedV2MultiAgentRuntime` + `EventedV2OutboxReconciler` for durable run / mailbox / handoff / outbox flush | yes (`LoopRun` / `TurnStateV2` plus multi-agent `run.events` / `outbox` / `trace()`) | multi-Agent graph foundation, handoff, cross-Agent trace |
+| `evented_v2` | `EventedTurnOrchestrator` + `LoopRunner`, with `EventedV2MultiAgentRuntime` + `EventedV2OutboxReconciler` for durable run / mailbox / handoff / outbox flush | yes (`LoopRun` / `TurnStateV2` plus multi-agent `run.events` / `outbox` / `trace()` / `timeline()` / `metrics()`) | multi-Agent graph foundation, handoff, cross-Agent trace |
 | `classic` | `TurnOrchestrator` (explicit step advancement) | none | explicit compatibility fallback |
 | `evented` | legacy alias normalized to `evented_v2` | same as `evented_v2` | legacy config compatibility |
 
@@ -633,7 +634,9 @@ The runtime now selects `kernel_v3` by default. `classic`, `evented`, and `event
 
 **P1-A transaction progress**: `MultiAgentRunStore` now exposes optional run lease, fencing token, `loadVersion()`, and `expectedVersion` CAS capabilities. The in-memory and file stores implement epoch fencing and reject stale fenced writes. When a store supports leases, `EventedV2MultiAgentRuntime` automatically wraps handoff, agent completion, external node completion, and outbox flush in acquire -> fenced update -> release. Remaining P1-A hardening includes long-running heartbeat/renew, lease metrics, and store-native batch transaction helpers.
 
-**Real backlog**: timeline and metrics APIs, declarative graph/agent binding config, remote Agent execution, and production shadow/canary rollout remain next. `createPromptSubscriber` is still a placeholder; peer-style orchestration is a future direction (the honest annotation on Proposition ① in §1.2).
+**P1-B observability progress**: `@qiongqi/loop` now exposes `buildEventedV2RunTimeline(run)` and `buildEventedV2RunMetrics(runs)` projections; `EventedV2MultiAgentRuntime.timeline(runId)` / `metrics()` provide read-only runtime APIs; and `MultiAgentRunStore.listAll()` is the store-native full-run enumeration capability. HTTP management adds `GET /v1/runtime/evented-v2/runs/:runId/timeline` and `GET /v1/runtime/evented-v2/metrics`, returning `capability_unavailable` when no `evented_v2` runtime is configured. Prometheus `/v1/runtime/metrics?format=prometheus` appends `qiongqi_evented_v2_runs_total{status=...}`, `qiongqi_evented_v2_outbox_pending`, and `qiongqi_evented_v2_agent_runs_total{status=...}` when the multi-agent runtime is mounted.
+
+**Real backlog**: reconciler lease/flush metrics, standardized failure reasons, replay/rebuild queries with pagination/filtering, declarative graph/agent binding config, remote Agent execution, and production shadow/canary rollout remain next. `createPromptSubscriber` is still a placeholder; peer-style orchestration is a future direction (the honest annotation on Proposition ① in §1.2).
 
 ### 4.5 AgentCard / PeerRegistry / A2A Protocol
 
@@ -907,9 +910,11 @@ curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
 curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
   -H "Accept: text/plain" \
   "http://127.0.0.1:8899/v1/runtime/metrics?format=prometheus"
+curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
+  "http://127.0.0.1:8899/v1/runtime/evented-v2/metrics"
 ```
 
-`/health` is suitable for liveness; `/ready` is suitable for readiness and returns `status=degraded` when hybrid SQLite falls back; the Prometheus text endpoint exports token/cache, A2A task status, and storage degraded state.
+`/health` is suitable for liveness; `/ready` is suitable for readiness and returns `status=degraded` when hybrid SQLite falls back; the Prometheus text endpoint exports token/cache, A2A task status, evented_v2 run/agent/outbox state, and storage degraded state.
 
 Evented orchestrator + two-instance A2A verification:
 

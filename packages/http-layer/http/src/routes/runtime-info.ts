@@ -54,6 +54,7 @@ export async function runtimeMetricsResponse(request: Request, runtime: ServerRu
 async function buildRuntimeMetrics(runtime: ServerRuntime) {
   const usage = runtime.usageService.total()
   const tasks = await runtime.a2aTaskStore?.list().catch(() => []) ?? []
+  const eventedV2 = runtime.multiAgentRuntime ? await runtime.multiAgentRuntime.metrics() : undefined
   const byStatus: Record<string, number> = {}
   for (const task of tasks) {
     byStatus[task.status] = (byStatus[task.status] ?? 0) + 1
@@ -84,6 +85,7 @@ async function buildRuntimeMetrics(runtime: ServerRuntime) {
       total: tasks.length,
       byStatus
     },
+    ...(eventedV2 ? { eventedV2 } : {}),
     storage
   }
 }
@@ -110,8 +112,29 @@ function formatPrometheusMetrics(metrics: Awaited<ReturnType<typeof buildRuntime
     lines.push(`qiongqi_a2a_tasks_total{status="${status}"} ${metrics.a2a.byStatus[status] ?? 0}`)
   }
   lines.push(`qiongqi_a2a_tasks_total ${metrics.a2a.total}`)
+  if (metrics.eventedV2) {
+    lines.push('# HELP qiongqi_evented_v2_runs_total Evented v2 multi-agent runs by status.')
+    lines.push('# TYPE qiongqi_evented_v2_runs_total gauge')
+    for (const status of labelKeys(['created', 'running', 'suspended', 'completed', 'failed', 'aborted'], metrics.eventedV2.byStatus)) {
+      lines.push(`qiongqi_evented_v2_runs_total{status="${status}"} ${metrics.eventedV2.byStatus[status] ?? 0}`)
+    }
+    lines.push(`qiongqi_evented_v2_runs_total ${metrics.eventedV2.totalRuns}`)
+    lines.push('# HELP qiongqi_evented_v2_outbox_pending Pending evented v2 outbox intents.')
+    lines.push('# TYPE qiongqi_evented_v2_outbox_pending gauge')
+    lines.push(`qiongqi_evented_v2_outbox_pending ${metrics.eventedV2.outbox.pending}`)
+    lines.push('# HELP qiongqi_evented_v2_agent_runs_total Evented v2 agent runs by status.')
+    lines.push('# TYPE qiongqi_evented_v2_agent_runs_total gauge')
+    for (const status of labelKeys(['queued', 'running', 'completed', 'failed', 'aborted', 'suspended'], metrics.eventedV2.agentRuns.byStatus)) {
+      lines.push(`qiongqi_evented_v2_agent_runs_total{status="${status}"} ${metrics.eventedV2.agentRuns.byStatus[status] ?? 0}`)
+    }
+    lines.push(`qiongqi_evented_v2_agent_runs_total ${metrics.eventedV2.agentRuns.total}`)
+  }
   lines.push('# HELP qiongqi_storage_degraded Storage degraded state, 1 when degraded.')
   lines.push('# TYPE qiongqi_storage_degraded gauge')
   lines.push(`qiongqi_storage_degraded ${metrics.storage.degraded ? 1 : 0}`)
   return `${lines.join('\n')}\n`
+}
+
+function labelKeys(defaults: string[], counts: Record<string, number>): string[] {
+  return [...new Set([...defaults, ...Object.keys(counts)])]
 }

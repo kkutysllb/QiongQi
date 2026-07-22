@@ -45,7 +45,7 @@
 | `health.ts` | `GET /health` + `GET /ready` |
 | `agent-card.ts` | `GET /.well-known/agent-card.json` |
 | `a2a.ts` | `POST /a2a` + Stage 4 端点 |
-| `runtime-info.ts` | `GET /v1/runtime/info` + `/tools` + `/metrics` |
+| `runtime-info.ts` | `GET /v1/runtime/info` + `/tools` + `/metrics`，并在 Prometheus 输出中追加 evented_v2 run/agent/outbox 指标 |
 | `skills.ts` | `GET /v1/skills` |
 | `attachments.ts` | `POST/GET /v1/attachments` |
 | `artifacts.ts` | `GET /v1/threads/:id/artifacts` + `GET /v1/threads/:id/artifacts/content?path=...` |

@@ -13,7 +13,7 @@
 
 - **`TurnOrchestrator`** —— 经典命令式循环，组装 `PromptBuilder` / `ModelStepRunner` / `ContinuationPolicy` / `ToolCallCoordinator` 4 个子组件
 - **`EventedTurnOrchestrator`** —— `LoopRunner` 驱动的 evented loop shell + 崩溃恢复（`LoopRun` / `TurnStateV2` 持久化）
-- **`EventedV2MultiAgentRuntime`** —— `evented_v2` 的多 Agent 编排 shell，当前支持 durable run、mailbox、manager-to-specialist handoff、agent task completion、外部 wait/tool/judge 节点恢复，以及 run 内持久化 outbox + `flushPendingOutbox()` / `flushAllPendingOutbox()` 恢复投递
+- **`EventedV2MultiAgentRuntime`** —— `evented_v2` 的多 Agent 编排 shell，当前支持 durable run、mailbox、manager-to-specialist handoff、agent task completion、外部 wait/tool/judge 节点恢复、run 内持久化 outbox + `flushPendingOutbox()` / `flushAllPendingOutbox()` 恢复投递，以及 `timeline()` / `metrics()` 只读管理投影
 - **`EventedV2AgentWorker`** —— 通用 agent task worker，负责从 mailbox claim task、运行注入的 agent handler、提交结果并 complete mailbox
 - **`EventedV2OutboxReconciler`** —— 可嵌入 worker / server lifecycle 的周期性 outbox flush 外壳，提供 `flushOnce()` / `start()` / `stop()` / `isRunning()` 与 flush 结果回调
 - **`LoopPlan` / `LoopRunner` / `LoopEvaluator`** —— 声明式 phase spec、phase 解释器与确定性评估/重试策略
@@ -31,7 +31,8 @@
 | `TurnOrchestratorOptions` | type | `turn-orchestrator.ts` | 30+ 依赖字段 |
 | `runOrchestratorStep` | function | `turn-orchestrator.ts` | classic step 纯函数 |
 | `EventedTurnOrchestrator` | class | `evented-turn-orchestrator.ts` | 事件驱动 + 崩溃恢复 |
-| `EventedV2MultiAgentRuntime` | class | `evented-v2-multi-agent-runtime.ts` | `evented_v2` 多 Agent 编排 shell；handoff 写入 run outbox，`completeAgentTask()` / `completeExternalNode()` 按 graph edge 推进，`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 可恢复 mailbox 投递 |
+| `EventedV2MultiAgentRuntime` | class | `evented-v2-multi-agent-runtime.ts` | `evented_v2` 多 Agent 编排 shell；handoff 写入 run outbox，`completeAgentTask()` / `completeExternalNode()` 按 graph edge 推进，`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 可恢复 mailbox 投递，`timeline()` / `metrics()` 暴露只读观测面 |
+| `buildEventedV2RunTimeline` / `buildEventedV2RunMetrics` | function | `evented-v2-observability.ts` | 将 `MultiAgentRun` 投影为 timeline，或将 run 列表聚合为 status / agent-run / outbox 指标 |
 | `EventedV2AgentWorker` | class | `evented-v2-multi-agent-runtime.ts` | claim mailbox task、执行 agent handler、提交 agent 结果并 complete mailbox |
 | `EventedV2OutboxReconciler` | class | `evented-v2-multi-agent-runtime.ts` | 周期性调用 `flushAllPendingOutbox()`；提供 `start` / `stop` / `isRunning` / `onFlush` / `onError` 生命周期与观测 hook |
 | `LoopPlan` / `LoopRun` | type | `loop-plan.ts` | 声明式 phase spec + 可序列化运行日志 |
@@ -71,6 +72,7 @@
 - **`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 是可重入恢复入口** —— 若进程在 run 提交后、mailbox enqueue 前/后崩溃，新的 runtime 实例可以重放 pending intent；`MultiAgentRunStore.listWithPendingOutbox()` 负责发现待恢复 run；`MailboxStore.enqueue` 对同一 message 保持幂等且不会把 delivered/completed 降级回 queued。
 - **`EventedV2MultiAgentRuntime` 的 graph interpreter 是 condition 驱动** —— `completeAgentTask()` 完成 active agent node 后按 edge condition 推进；`agent` / `terminate` / `join` / `retry` 在 runtime 内解释；`wait` / `tool` / `judge` 作为外部执行节点进入 `suspended`，再由 `completeExternalNode()` 按 condition 恢复。
 - **`EventedV2MultiAgentRuntime` 自动使用 store lease/CAS 能力** —— 当 `MultiAgentRunStore` 实现 `acquireLease` / `releaseLease` 时，handoff、agent completion、external node completion 与 outbox flush 都会以 fencing token 调用 `update(..., { fence })`；store 还可通过 `loadVersion()` + `expectedVersion` 提供 CAS。
+- **`EventedV2MultiAgentRuntime` 的观测面是 projection-only** —— `timeline(runId)` 只读取 run 并调用 `buildEventedV2RunTimeline()`；`metrics()` 通过 `MultiAgentRunStore.listAll()` 聚合所有 run，不改变运行状态，也不依赖业务 UI。
 - **`EventedV2AgentWorker` 是 agent 执行适配层** —— runtime 不绑定具体模型/工具执行策略；worker 只负责任务领取、handler 调用、结果提交与 mailbox 完成，handler 由 server/worker 进程注入。
 - **`EventedV2OutboxReconciler` 是调度外壳，不是进程管理器** —— 它提供周期性 flush、停止与观测 hook；HTTP/server runtime 可通过 `runtime.eventedV2OutboxReconciler.enabled` 自动启动，并通过 `intervalMs` 配置间隔；多实例部署策略仍由 store lease/CAS 层继续深化。
 - **`createPromptSubscriber` 是占位**（`turn-event-bus.ts`）—— Stage 3 未来扩展为 peer-style 协作。
@@ -90,6 +92,8 @@
 - `EventedV2AgentWorker claims queued agent tasks, completes mailbox messages, and advances runs`
 - `EventedV2MultiAgentRuntime resumes suspended wait/tool/judge nodes through external completion conditions`
 - `EventedV2MultiAgentRuntime uses store lease fencing when completing agent tasks`
+- `EventedV2MultiAgentRuntime returns projected timeline and aggregate metrics for management observability`
+- `buildEventedV2RunTimeline` / `buildEventedV2RunMetrics` project run timeline and aggregate status/agent/outbox metrics`
 - `MultiAgentRunStore rejects stale lease fences and stale compare-and-swap versions`
 - `EventedV2OutboxReconciler starts from runtime config and stops during runtime shutdown`
 - `InflightTracker.run registers before, guarantees end() in finally`

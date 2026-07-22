@@ -177,6 +177,23 @@ function registerRuntimeRoutes(router: Router, runtime: ServerRuntime): void {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     return runtimeMetricsResponse(request, runtime)
   })
+  router.add('GET', '/v1/runtime/evented-v2/runs/:runId/timeline', async (request, ctx) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    if (!runtime.multiAgentRuntime) return ERRORS.unavailable('evented_v2 runtime is not configured')
+    try {
+      return jsonResponse(await runtime.multiAgentRuntime.timeline(ctx.params.runId))
+    } catch (error) {
+      if (String((error as { message?: unknown })?.message ?? error).includes('MultiAgentRun not found')) {
+        return ERRORS.notFound(`evented_v2 run not found: ${ctx.params.runId}`)
+      }
+      throw error
+    }
+  })
+  router.add('GET', '/v1/runtime/evented-v2/metrics', async (request) => {
+    if (!authorize(request, runtime)) return ERRORS.unauthorized()
+    if (!runtime.multiAgentRuntime) return ERRORS.unavailable('evented_v2 runtime is not configured')
+    return jsonResponse(await runtime.multiAgentRuntime.metrics())
+  })
   router.add('GET', '/v1/workspace/status', async (request) => {
     if (!authorize(request, runtime)) return ERRORS.unauthorized()
     const url = new URL(request.url)
