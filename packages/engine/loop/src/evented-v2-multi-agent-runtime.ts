@@ -10,7 +10,13 @@ import {
   type PeerArtifact,
   type PeerTask
 } from '@qiongqi/contracts'
-import type { LeaseFence, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
+import type {
+  EventedV2WorkerRegistryStore,
+  LeaseFence,
+  MailboxStore,
+  MultiAgentRunStore,
+  MultiAgentRunUpdateOptions
+} from '@qiongqi/ports'
 import { nextNodeForCondition, requireGraphNode, validateAgentGraph } from './multi-agent-graph.js'
 import {
   buildEventedV2RunMetrics,
@@ -122,6 +128,8 @@ export type EventedV2RemoteAgentSchedulerSnapshot = {
 
 export type EventedV2RemoteAgentSchedulerOptions = {
   workerId?: string
+  workerRegistry?: EventedV2WorkerRegistryStore
+  heartbeatTtlMs?: number
   worker: Pick<EventedV2RemoteAgentWorker, 'processNext'>
   agentIds: string[]
   intervalMs: number
@@ -227,6 +235,9 @@ export class EventedV2RemoteAgentScheduler {
     if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
       throw new Error(`EventedV2RemoteAgentScheduler intervalMs must be positive: ${options.intervalMs}`)
     }
+    if (options.heartbeatTtlMs !== undefined && (!Number.isFinite(options.heartbeatTtlMs) || options.heartbeatTtlMs <= 0)) {
+      throw new Error(`EventedV2RemoteAgentScheduler heartbeatTtlMs must be positive: ${options.heartbeatTtlMs}`)
+    }
   }
 
   start(): void {
@@ -307,6 +318,7 @@ export class EventedV2RemoteAgentScheduler {
     this.lastMessageIds = [...messageIds]
     this.lastFlushFinishedAt = finishedAt
     this.lastHeartbeatAt = finishedAt
+    await this.recordWorkerHeartbeat(finishedAt)
     const result = {
       agentIds: [...this.options.agentIds],
       agentsChecked: this.options.agentIds.length,
@@ -317,6 +329,23 @@ export class EventedV2RemoteAgentScheduler {
     }
     this.options.onFlush?.(result)
     return result
+  }
+
+  private async recordWorkerHeartbeat(heartbeatAt: string): Promise<void> {
+    if (!this.options.workerRegistry) return
+    try {
+      await this.options.workerRegistry.recordHeartbeat({
+        workerId: this.options.workerId ?? 'evented_v2_remote_scheduler',
+        role: 'remote_agent',
+        agentIds: [...this.options.agentIds],
+        heartbeatAt,
+        ttlMs: this.options.heartbeatTtlMs ?? Math.max(this.options.intervalMs * 3, 1)
+      })
+    } catch (error) {
+      this.errorsTotal += 1
+      this.consecutiveErrors += 1
+      this.options.onError?.(error)
+    }
   }
 }
 

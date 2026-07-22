@@ -70,6 +70,7 @@
     "eventedV2RemoteAgent": {
       "timeoutMs": 30000,
       "leaseTtlMs": 60000,
+      "heartbeatTtlMs": 180000,
       "scheduler": {
         "enabled": false,
         "intervalMs": 1000

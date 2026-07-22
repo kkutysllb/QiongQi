@@ -304,17 +304,28 @@ describe('runtime factory evented_v2 multi-agent wiring', () => {
         eventedV2AgentPeers: { specialist: 'peer_specialist' },
         eventedV2RemoteAgent: {
           workerId: 'worker_runtime_a',
+          heartbeatTtlMs: 60_000,
           scheduler: { enabled: true, intervalMs: 10_000 }
         }
       }
     })
     try {
       expect(runtime.multiAgentRemoteWorker).toBeDefined()
+      expect(runtime.multiAgentWorkerRegistry).toBeDefined()
       expect(runtime.multiAgentRemoteScheduler?.isRunning()).toBe(true)
       expect(runtime.multiAgentRemoteScheduler?.snapshot()).toMatchObject({
         workerId: 'worker_runtime_a',
         status: 'running'
       })
+      await runtime.multiAgentRemoteScheduler?.flushOnce()
+      expect(await runtime.multiAgentWorkerRegistry?.list({ nowIso: runtime.nowIso() })).toMatchObject([
+        {
+          workerId: 'worker_runtime_a',
+          role: 'remote_agent',
+          status: 'online',
+          agentIds: ['specialist']
+        }
+      ])
 
       await runtime.shutdown?.()
 

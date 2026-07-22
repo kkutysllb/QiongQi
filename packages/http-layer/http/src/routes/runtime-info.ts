@@ -56,6 +56,9 @@ async function buildRuntimeMetrics(runtime: ServerRuntime) {
   const tasks = await runtime.a2aTaskStore?.list().catch(() => []) ?? []
   const eventedV2 = runtime.multiAgentRuntime ? await runtime.multiAgentRuntime.metrics() : undefined
   const eventedV2RemoteScheduler = runtime.multiAgentRemoteScheduler?.snapshot()
+  const eventedV2Workers = runtime.multiAgentWorkerRegistry
+    ? buildEventedV2WorkerRegistryMetrics(await runtime.multiAgentWorkerRegistry.list({ nowIso: runtime.nowIso() }))
+    : undefined
   const byStatus: Record<string, number> = {}
   for (const task of tasks) {
     byStatus[task.status] = (byStatus[task.status] ?? 0) + 1
@@ -88,6 +91,7 @@ async function buildRuntimeMetrics(runtime: ServerRuntime) {
     },
     ...(eventedV2 ? { eventedV2 } : {}),
     ...(eventedV2RemoteScheduler ? { eventedV2RemoteScheduler } : {}),
+    ...(eventedV2Workers ? { eventedV2Workers } : {}),
     storage
   }
 }
@@ -145,10 +149,45 @@ function formatPrometheusMetrics(metrics: Awaited<ReturnType<typeof buildRuntime
     lines.push('# TYPE qiongqi_evented_v2_remote_scheduler_errors_total counter')
     lines.push(`qiongqi_evented_v2_remote_scheduler_errors_total ${metrics.eventedV2RemoteScheduler.errorsTotal}`)
   }
+  if (metrics.eventedV2Workers) {
+    lines.push('# HELP qiongqi_evented_v2_workers_total Evented v2 registered workers.')
+    lines.push('# TYPE qiongqi_evented_v2_workers_total gauge')
+    lines.push(`qiongqi_evented_v2_workers_total ${metrics.eventedV2Workers.total}`)
+    lines.push('# HELP qiongqi_evented_v2_workers_online Evented v2 online registered workers.')
+    lines.push('# TYPE qiongqi_evented_v2_workers_online gauge')
+    lines.push(`qiongqi_evented_v2_workers_online ${metrics.eventedV2Workers.online}`)
+    lines.push('# HELP qiongqi_evented_v2_workers_expired Evented v2 expired registered workers.')
+    lines.push('# TYPE qiongqi_evented_v2_workers_expired gauge')
+    lines.push(`qiongqi_evented_v2_workers_expired ${metrics.eventedV2Workers.expired}`)
+    for (const role of Object.keys(metrics.eventedV2Workers.byRole).sort()) {
+      const counts = metrics.eventedV2Workers.byRole[role]!
+      lines.push(`qiongqi_evented_v2_workers_total{role="${role}"} ${counts.total}`)
+      lines.push(`qiongqi_evented_v2_workers_online{role="${role}"} ${counts.online}`)
+      lines.push(`qiongqi_evented_v2_workers_expired{role="${role}"} ${counts.expired}`)
+    }
+  }
   lines.push('# HELP qiongqi_storage_degraded Storage degraded state, 1 when degraded.')
   lines.push('# TYPE qiongqi_storage_degraded gauge')
   lines.push(`qiongqi_storage_degraded ${metrics.storage.degraded ? 1 : 0}`)
   return `${lines.join('\n')}\n`
+}
+
+function buildEventedV2WorkerRegistryMetrics(workers: Awaited<ReturnType<NonNullable<ServerRuntime['multiAgentWorkerRegistry']>['list']>>) {
+  const byRole: Record<string, { total: number, online: number, expired: number }> = {}
+  for (const worker of workers) {
+    const bucket = byRole[worker.role] ?? { total: 0, online: 0, expired: 0 }
+    bucket.total += 1
+    if (worker.status === 'online') bucket.online += 1
+    if (worker.status === 'expired') bucket.expired += 1
+    byRole[worker.role] = bucket
+  }
+  return {
+    total: workers.length,
+    online: workers.filter((worker) => worker.status === 'online').length,
+    expired: workers.filter((worker) => worker.status === 'expired').length,
+    byRole,
+    workers
+  }
 }
 
 function labelKeys(defaults: string[], counts: Record<string, number>): string[] {

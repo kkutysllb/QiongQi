@@ -1,8 +1,52 @@
-import { MailboxMessageSchema, MultiAgentRunSchema, type MailboxMessage, type MultiAgentRun } from '@qiongqi/contracts'
-import type { LeaseFence, MailboxClaimOptions, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
+import {
+  EventedV2WorkerRecordSchema,
+  MailboxMessageSchema,
+  MultiAgentRunSchema,
+  type EventedV2WorkerRecord,
+  type MailboxMessage,
+  type MultiAgentRun
+} from '@qiongqi/contracts'
+import type {
+  EventedV2WorkerHeartbeat,
+  EventedV2WorkerRegistryListOptions,
+  EventedV2WorkerRegistryStore,
+  LeaseFence,
+  MailboxClaimOptions,
+  MailboxStore,
+  MultiAgentRunStore,
+  MultiAgentRunUpdateOptions
+} from '@qiongqi/ports'
 import { randomUUID } from 'node:crypto'
 
 type RunLease = { holderId: string; expiresAt: number; epoch: number; token: string }
+
+export class InMemoryEventedV2WorkerRegistryStore implements EventedV2WorkerRegistryStore {
+  private readonly workers = new Map<string, EventedV2WorkerRecord>()
+
+  async recordHeartbeat(heartbeat: EventedV2WorkerHeartbeat): Promise<EventedV2WorkerRecord> {
+    const existing = this.workers.get(heartbeat.workerId)
+    const expiresAt = new Date(Date.parse(heartbeat.heartbeatAt) + Math.max(1, Math.floor(heartbeat.ttlMs))).toISOString()
+    const record = EventedV2WorkerRecordSchema.parse({
+      workerId: heartbeat.workerId,
+      role: heartbeat.role,
+      status: 'online',
+      agentIds: [...heartbeat.agentIds],
+      startedAt: existing?.startedAt ?? heartbeat.heartbeatAt,
+      heartbeatAt: heartbeat.heartbeatAt,
+      expiresAt,
+      updatedAt: heartbeat.heartbeatAt
+    })
+    this.workers.set(record.workerId, record)
+    return record
+  }
+
+  async list(options: EventedV2WorkerRegistryListOptions = {}): Promise<EventedV2WorkerRecord[]> {
+    const now = options.nowIso ? Date.parse(options.nowIso) : Date.now()
+    return [...this.workers.values()]
+      .map((record) => workerRecordWithComputedStatus(record, now))
+      .sort((a, b) => a.workerId.localeCompare(b.workerId))
+  }
+}
 
 export class InMemoryMultiAgentRunStore implements MultiAgentRunStore {
   private readonly runs = new Map<string, MultiAgentRun>()
@@ -144,6 +188,13 @@ function leaseFence(lease: RunLease): LeaseFence {
 
 function sameFence(lease: RunLease, fence: LeaseFence): boolean {
   return lease.holderId === fence.holderId && lease.epoch === fence.epoch && lease.token === fence.token
+}
+
+function workerRecordWithComputedStatus(record: EventedV2WorkerRecord, now: number): EventedV2WorkerRecord {
+  return EventedV2WorkerRecordSchema.parse({
+    ...record,
+    status: Date.parse(record.expiresAt) <= now ? 'expired' : 'online'
+  })
 }
 
 export class InMemoryMailboxStore implements MailboxStore {

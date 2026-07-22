@@ -1,8 +1,24 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readdir, readFile, rm } from 'node:fs/promises'
 import { basename, join } from 'node:path'
-import { MailboxMessageSchema, MultiAgentRunSchema, type MailboxMessage, type MultiAgentRun } from '@qiongqi/contracts'
-import type { LeaseFence, MailboxClaimOptions, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
+import {
+  EventedV2WorkerRecordSchema,
+  MailboxMessageSchema,
+  MultiAgentRunSchema,
+  type EventedV2WorkerRecord,
+  type MailboxMessage,
+  type MultiAgentRun
+} from '@qiongqi/contracts'
+import type {
+  EventedV2WorkerHeartbeat,
+  EventedV2WorkerRegistryListOptions,
+  EventedV2WorkerRegistryStore,
+  LeaseFence,
+  MailboxClaimOptions,
+  MailboxStore,
+  MultiAgentRunStore,
+  MultiAgentRunUpdateOptions
+} from '@qiongqi/ports'
 import { atomicWriteFile } from './atomic-write.js'
 import { withFileLock } from './file-lock.js'
 
@@ -43,6 +59,61 @@ async function readRunFile(path: string): Promise<MultiAgentRun> {
 
 async function readMessageFile(path: string): Promise<MailboxMessage> {
   return MailboxMessageSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+}
+
+async function readWorkerFile(path: string): Promise<EventedV2WorkerRecord> {
+  return EventedV2WorkerRecordSchema.parse(JSON.parse(await readFile(path, 'utf8')))
+}
+
+export class FileEventedV2WorkerRegistryStore implements EventedV2WorkerRegistryStore {
+  constructor(readonly rootDir: string) {}
+
+  async recordHeartbeat(heartbeat: EventedV2WorkerHeartbeat): Promise<EventedV2WorkerRecord> {
+    const workerId = safeSegment(heartbeat.workerId, 'workerId')
+    return withFileLock(this.workerLockPath(workerId), async () => {
+      const existing = await this.read(workerId).catch((error) => {
+        if (isNoEntry(error)) return undefined
+        throw error
+      })
+      const expiresAt = new Date(Date.parse(heartbeat.heartbeatAt) + Math.max(1, Math.floor(heartbeat.ttlMs))).toISOString()
+      const record = EventedV2WorkerRecordSchema.parse({
+        workerId,
+        role: heartbeat.role,
+        status: 'online',
+        agentIds: [...heartbeat.agentIds],
+        startedAt: existing?.startedAt ?? heartbeat.heartbeatAt,
+        heartbeatAt: heartbeat.heartbeatAt,
+        expiresAt,
+        updatedAt: heartbeat.heartbeatAt
+      })
+      await atomicWriteFile(this.workerPath(workerId), JSON.stringify(record, null, 2))
+      return record
+    })
+  }
+
+  async list(options: EventedV2WorkerRegistryListOptions = {}): Promise<EventedV2WorkerRecord[]> {
+    const now = options.nowIso ? Date.parse(options.nowIso) : Date.now()
+    const dir = join(this.rootDir, 'evented-v2-workers')
+    const entries = await readDirIfExists(dir)
+    const records = await Promise.all(entries
+      .filter((entry) => entry.endsWith('.json'))
+      .map((entry) => readWorkerFile(join(dir, safeSegment(entry, 'worker file')))))
+    return records
+      .map((record) => workerRecordWithComputedStatus(record, now))
+      .sort((a, b) => a.workerId.localeCompare(b.workerId))
+  }
+
+  private async read(workerId: string): Promise<EventedV2WorkerRecord> {
+    return readWorkerFile(this.workerPath(workerId))
+  }
+
+  private workerPath(workerId: string): string {
+    return join(this.rootDir, 'evented-v2-workers', `${safeSegment(workerId, 'workerId')}.json`)
+  }
+
+  private workerLockPath(workerId: string): string {
+    return join(this.rootDir, 'evented-v2-worker-locks', `${safeSegment(workerId, 'workerId')}.json`)
+  }
 }
 
 export class FileMultiAgentRunStore implements MultiAgentRunStore {
@@ -383,6 +454,13 @@ function mailboxStatusRank(status: MailboxMessage['status']): number {
 function claimableMailboxMessage(message: MailboxMessage, now: number): boolean {
   if (message.status === 'queued') return true
   return message.status === 'delivered' && Boolean(message.claimLease) && Date.parse(message.claimLease!.expiresAt) <= now
+}
+
+function workerRecordWithComputedStatus(record: EventedV2WorkerRecord, now: number): EventedV2WorkerRecord {
+  return EventedV2WorkerRecordSchema.parse({
+    ...record,
+    status: Date.parse(record.expiresAt) <= now ? 'expired' : 'online'
+  })
 }
 
 function nextClaimLease(message: MailboxMessage, options: MailboxClaimOptions, now: number): NonNullable<MailboxMessage['claimLease']> {

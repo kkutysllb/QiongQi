@@ -1,4 +1,4 @@
-import type { MailboxMessage, MultiAgentRun } from '@qiongqi/contracts'
+import type { EventedV2WorkerRecord, EventedV2WorkerRole, MailboxMessage, MultiAgentRun } from '@qiongqi/contracts'
 import type { LeaseFence } from './runtime-kernel.js'
 
 export type MailboxClaimOptions = {
@@ -38,4 +38,21 @@ export interface MailboxStore {
   claimNext(agentId: string, options?: MailboxClaimOptions): Promise<MailboxMessage | undefined>
   complete(messageId: string, status?: 'completed' | 'failed' | 'aborted', fence?: MailboxMessage['claimLease']): Promise<void>
   listForRun(runId: string): Promise<MailboxMessage[]>
+}
+
+export type EventedV2WorkerHeartbeat = {
+  workerId: string
+  role: EventedV2WorkerRole
+  agentIds: string[]
+  heartbeatAt: string
+  ttlMs: number
+}
+
+export type EventedV2WorkerRegistryListOptions = {
+  nowIso?: string
+}
+
+export interface EventedV2WorkerRegistryStore {
+  recordHeartbeat(heartbeat: EventedV2WorkerHeartbeat): Promise<EventedV2WorkerRecord>
+  list(options?: EventedV2WorkerRegistryListOptions): Promise<EventedV2WorkerRecord[]>
 }

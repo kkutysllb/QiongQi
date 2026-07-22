@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { dispatchRequest, startNodeHttpServer } from '@qiongqi/http'
-import { InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
+import { InMemoryEventedV2WorkerRegistryStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
 import { EventedV2MultiAgentRuntime, EventedV2RemoteAgentScheduler, defaultManagerSpecialistGraph } from '@qiongqi/loop'
 import { buildHarness, readJson } from './http-server-test-harness.js'
 
@@ -264,6 +264,62 @@ describe('HTTP observability', () => {
     expect(text).toContain('qiongqi_evented_v2_remote_scheduler_flushes_total 1')
     expect(text).toContain('qiongqi_evented_v2_remote_scheduler_messages_processed_total 1')
     expect(text).toContain('qiongqi_evented_v2_remote_scheduler_errors_total 0')
+  })
+
+  it('includes evented v2 worker registry metrics', async () => {
+    const h = buildHarness()
+    const workerRegistry = new InMemoryEventedV2WorkerRegistryStore()
+    h.runtime.multiAgentWorkerRegistry = workerRegistry
+    const now = Date.parse(h.nowIso())
+    await workerRegistry.recordHeartbeat({
+      workerId: 'worker_active',
+      role: 'remote_agent',
+      agentIds: ['researcher'],
+      heartbeatAt: new Date(now).toISOString(),
+      ttlMs: 60_000
+    })
+    await workerRegistry.recordHeartbeat({
+      workerId: 'worker_expired',
+      role: 'remote_agent',
+      agentIds: ['writer'],
+      heartbeatAt: new Date(now - 120_000).toISOString(),
+      ttlMs: 60_000
+    })
+
+    const json = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/runtime/metrics', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+    const prometheus = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/runtime/metrics?format=prometheus', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(json.status).toBe(200)
+    expect(await readJson(json)).toMatchObject({
+      eventedV2Workers: {
+        total: 2,
+        online: 1,
+        expired: 1,
+        byRole: {
+          remote_agent: {
+            total: 2,
+            online: 1,
+            expired: 1
+          }
+        }
+      }
+    })
+    expect(prometheus.status).toBe(200)
+    const text = await prometheus.text()
+    expect(text).toContain('qiongqi_evented_v2_workers_total 2')
+    expect(text).toContain('qiongqi_evented_v2_workers_online 1')
+    expect(text).toContain('qiongqi_evented_v2_workers_expired 1')
+    expect(text).toContain('qiongqi_evented_v2_workers_total{role="remote_agent"} 2')
   })
 })
 

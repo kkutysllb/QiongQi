@@ -2,7 +2,13 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { FileMailboxStore, FileMultiAgentRunStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
+import {
+  FileMailboxStore,
+  FileMultiAgentRunStore,
+  InMemoryEventedV2WorkerRegistryStore,
+  InMemoryMailboxStore,
+  InMemoryMultiAgentRunStore
+} from '@qiongqi/adapter-storage'
 import type { AgentGraph, MultiAgentRun, PeerArtifact, PeerTask } from '@qiongqi/contracts'
 import { EventedV2AgentWorker, EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, EventedV2RemoteAgentScheduler, EventedV2RemoteAgentWorker, defaultManagerSpecialistGraph } from '@qiongqi/loop'
 import type { LeaseFence, MailboxClaimOptions, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
@@ -1289,6 +1295,37 @@ describe('EventedV2RemoteAgentScheduler', () => {
       status: 'stopped',
       health: 'stopped'
     })
+  })
+
+  it('records worker registry heartbeats after remote polling flushes', async () => {
+    const workerRegistry = new InMemoryEventedV2WorkerRegistryStore()
+    const scheduler = new EventedV2RemoteAgentScheduler({
+      workerId: 'worker_registry_a',
+      workerRegistry,
+      heartbeatTtlMs: 60_000,
+      worker: {
+        processNext: async () => ({ processed: false })
+      },
+      agentIds: ['researcher', 'writer'],
+      intervalMs: 1000,
+      nowIso: sequenceClock([
+        '2026-07-21T00:00:00.000Z',
+        '2026-07-21T00:00:01.000Z'
+      ])
+    })
+
+    await scheduler.flushOnce()
+
+    expect(await workerRegistry.list({ nowIso: '2026-07-21T00:00:02.000Z' })).toMatchObject([
+      {
+        workerId: 'worker_registry_a',
+        role: 'remote_agent',
+        status: 'online',
+        agentIds: ['researcher', 'writer'],
+        heartbeatAt: '2026-07-21T00:00:01.000Z',
+        expiresAt: '2026-07-21T00:01:01.000Z'
+      }
+    ])
   })
 })
 

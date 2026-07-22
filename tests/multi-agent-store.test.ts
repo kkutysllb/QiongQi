@@ -2,14 +2,22 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { FileMailboxStore, FileMultiAgentRunStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
-import type { MailboxStore, MultiAgentRunStore } from '@qiongqi/ports'
+import {
+  FileEventedV2WorkerRegistryStore,
+  FileMailboxStore,
+  FileMultiAgentRunStore,
+  InMemoryEventedV2WorkerRegistryStore,
+  InMemoryMailboxStore,
+  InMemoryMultiAgentRunStore
+} from '@qiongqi/adapter-storage'
+import type { EventedV2WorkerRegistryStore, MailboxStore, MultiAgentRunStore } from '@qiongqi/ports'
 import type { MailboxMessage, MultiAgentRun } from '@qiongqi/contracts'
 
 describe('multi-agent runtime stores', () => {
   it('defines store contracts for runs and mailbox messages', async () => {
     const runs: MultiAgentRun[] = []
     const messages: MailboxMessage[] = []
+    const workers: Awaited<ReturnType<EventedV2WorkerRegistryStore['recordHeartbeat']>>[] = []
     const runStore: MultiAgentRunStore = {
       save: async (run) => { runs.push(run) },
       load: async (runId) => runs.find((run) => run.runId === runId),
@@ -38,12 +46,36 @@ describe('multi-agent runtime stores', () => {
       },
       listForRun: async (runId) => messages.filter((message) => message.runId === runId)
     }
+    const workerRegistry: EventedV2WorkerRegistryStore = {
+      recordHeartbeat: async (heartbeat) => {
+        const record = {
+          workerId: heartbeat.workerId,
+          role: heartbeat.role,
+          status: 'online' as const,
+          agentIds: heartbeat.agentIds,
+          startedAt: heartbeat.heartbeatAt,
+          heartbeatAt: heartbeat.heartbeatAt,
+          expiresAt: new Date(Date.parse(heartbeat.heartbeatAt) + heartbeat.ttlMs).toISOString(),
+          updatedAt: heartbeat.heartbeatAt
+        }
+        workers.push(record)
+        return record
+      },
+      list: async () => workers
+    }
 
     await runStore.save(baseRun())
     await mailbox.enqueue(baseMessage())
 
     expect(await runStore.load('mar_1')).toBeDefined()
     expect(await mailbox.claimNext('researcher')).toMatchObject({ messageId: 'msg_1' })
+    expect(await workerRegistry.recordHeartbeat({
+      workerId: 'worker_a',
+      role: 'remote_agent',
+      agentIds: ['researcher'],
+      heartbeatAt: '2026-07-21T00:00:00.000Z',
+      ttlMs: 1000
+    })).toMatchObject({ workerId: 'worker_a', status: 'online' })
   })
 })
 
@@ -52,14 +84,16 @@ let mailboxNowMs = Date.parse('2026-07-21T00:00:00.000Z')
 describe.each([
   ['memory', async () => ({
     runs: new InMemoryMultiAgentRunStore(),
-    mailbox: new InMemoryMailboxStore({ nowMs: () => mailboxNowMs })
+    mailbox: new InMemoryMailboxStore({ nowMs: () => mailboxNowMs }),
+    workerRegistry: new InMemoryEventedV2WorkerRegistryStore()
   })],
   ['file', async () => {
     const root = await mkdtemp(join(tmpdir(), 'qiongqi-multi-agent-'))
     return {
       root,
       runs: new FileMultiAgentRunStore(root),
-      mailbox: new FileMailboxStore(root, { nowMs: () => mailboxNowMs })
+      mailbox: new FileMailboxStore(root, { nowMs: () => mailboxNowMs }),
+      workerRegistry: new FileEventedV2WorkerRegistryStore(root)
     }
   }]
 ] as const)('%s multi-agent stores', (_name, factory) => {
@@ -230,6 +264,46 @@ describe.each([
       expect(await created.runs.listAll?.()).toMatchObject([
         { runId: 'mar_b', threadId: 'thread_1' },
         { runId: 'mar_a', threadId: 'thread_2' }
+      ])
+    } finally {
+      if ('root' in created) await rm(created.root, { recursive: true, force: true })
+    }
+  })
+
+  it('records evented_v2 worker heartbeats and reports expired workers', async () => {
+    const created = await factory()
+    try {
+      await created.workerRegistry.recordHeartbeat({
+        workerId: 'worker_a',
+        role: 'remote_agent',
+        agentIds: ['researcher'],
+        heartbeatAt: '2026-07-21T00:00:00.000Z',
+        ttlMs: 1000
+      })
+      await created.workerRegistry.recordHeartbeat({
+        workerId: 'worker_a',
+        role: 'remote_agent',
+        agentIds: ['researcher', 'writer'],
+        heartbeatAt: '2026-07-21T00:00:00.500Z',
+        ttlMs: 1000
+      })
+
+      expect(await created.workerRegistry.list({ nowIso: '2026-07-21T00:00:01.000Z' })).toMatchObject([
+        {
+          workerId: 'worker_a',
+          role: 'remote_agent',
+          status: 'online',
+          agentIds: ['researcher', 'writer'],
+          startedAt: '2026-07-21T00:00:00.000Z',
+          heartbeatAt: '2026-07-21T00:00:00.500Z',
+          expiresAt: '2026-07-21T00:00:01.500Z'
+        }
+      ])
+      expect(await created.workerRegistry.list({ nowIso: '2026-07-21T00:00:02.000Z' })).toMatchObject([
+        {
+          workerId: 'worker_a',
+          status: 'expired'
+        }
       ])
     } finally {
       if ('root' in created) await rm(created.root, { recursive: true, force: true })

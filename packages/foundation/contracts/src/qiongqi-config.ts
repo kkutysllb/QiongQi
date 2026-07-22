@@ -141,6 +141,7 @@ export const RuntimeTuningConfigSchema = z
       timeoutMs: PositiveInt.optional(),
       leaseTtlMs: PositiveInt.optional(),
       workerId: z.string().min(1).optional(),
+      heartbeatTtlMs: PositiveInt.optional(),
       scheduler: z.object({
         enabled: z.boolean().optional(),
         intervalMs: PositiveInt.optional()

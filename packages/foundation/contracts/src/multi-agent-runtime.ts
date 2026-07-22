@@ -148,6 +148,24 @@ export const MailboxMessageSchema = z.object({
 }).strict()
 export type MailboxMessage = z.infer<typeof MailboxMessageSchema>
 
+export const EventedV2WorkerRoleSchema = z.enum(['remote_agent'])
+export type EventedV2WorkerRole = z.infer<typeof EventedV2WorkerRoleSchema>
+
+export const EventedV2WorkerStatusSchema = z.enum(['online', 'expired'])
+export type EventedV2WorkerStatus = z.infer<typeof EventedV2WorkerStatusSchema>
+
+export const EventedV2WorkerRecordSchema = z.object({
+  workerId: NonEmptyString,
+  role: EventedV2WorkerRoleSchema,
+  status: EventedV2WorkerStatusSchema,
+  agentIds: z.array(NonEmptyString).default([]),
+  startedAt: NonEmptyString,
+  heartbeatAt: NonEmptyString,
+  expiresAt: NonEmptyString,
+  updatedAt: NonEmptyString
+}).strict()
+export type EventedV2WorkerRecord = z.infer<typeof EventedV2WorkerRecordSchema>
+
 export const MultiAgentOutboxIntentSchema = z.object({
   outboxId: NonEmptyString,
   kind: z.literal('mailbox_enqueue'),

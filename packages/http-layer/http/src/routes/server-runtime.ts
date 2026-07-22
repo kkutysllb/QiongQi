@@ -27,6 +27,7 @@ import type { QiongqiConfig } from '@qiongqi/contracts'
 import type { UserDataStore } from '../user-data-store.js'
 import type { PeerRegistry } from '@qiongqi/delegation'
 import type { EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, EventedV2RemoteAgentScheduler, EventedV2RemoteAgentWorker } from '@qiongqi/loop'
+import type { EventedV2WorkerRegistryStore } from '@qiongqi/ports'
 
 export type RuntimeToolDiagnostics = {
   providers: ToolProviderPolicy[]
@@ -80,6 +81,7 @@ export type ServerRuntime = {
   peerRegistry?: PeerRegistry
   multiAgentRuntime?: EventedV2MultiAgentRuntime
   multiAgentOutboxReconciler?: EventedV2OutboxReconciler
+  multiAgentWorkerRegistry?: EventedV2WorkerRegistryStore
   multiAgentRemoteWorker?: EventedV2RemoteAgentWorker
   multiAgentRemoteScheduler?: EventedV2RemoteAgentScheduler
   runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> | void

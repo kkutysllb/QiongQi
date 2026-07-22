@@ -45,6 +45,7 @@ describe('contracts', () => {
         timeoutMs: 30_000,
         leaseTtlMs: 60_000,
         workerId: 'worker_a',
+        heartbeatTtlMs: 120_000,
         scheduler: { enabled: true, intervalMs: 5_000 },
         compensation: {
           statusConditions: {
@@ -60,6 +61,7 @@ describe('contracts', () => {
       timeoutMs: 30_000,
       leaseTtlMs: 60_000,
       workerId: 'worker_a',
+      heartbeatTtlMs: 120_000,
       scheduler: { enabled: true, intervalMs: 5_000 },
       compensation: {
         statusConditions: {

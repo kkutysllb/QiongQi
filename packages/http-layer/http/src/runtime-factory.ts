@@ -12,7 +12,17 @@ import { FileAttachmentStore } from '@qiongqi/attachments'
 import { InMemoryApprovalGate } from '@qiongqi/adapter-storage'
 import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
 import { InMemoryEventBus } from '@qiongqi/adapter-storage'
-import { FileEffectResultStore, FileSessionStore, FileTaskStateStore, FileThreadStore, FileRunEventStore, FileRunStateStore, FileMailboxStore, FileMultiAgentRunStore } from '@qiongqi/adapter-storage'
+import {
+  FileEffectResultStore,
+  FileEventedV2WorkerRegistryStore,
+  FileSessionStore,
+  FileTaskStateStore,
+  FileThreadStore,
+  FileRunEventStore,
+  FileRunStateStore,
+  FileMailboxStore,
+  FileMultiAgentRunStore
+} from '@qiongqi/adapter-storage'
 import { HybridSessionStore, HybridThreadStore } from '@qiongqi/adapter-storage'
 import {
   DynamicRoutedModelCompatClient,
@@ -1573,6 +1583,9 @@ async function assembleRuntime(input: {
   const multiAgentMailbox = orchestrationMode === 'evented_v2'
     ? new FileMailboxStore(multiAgentRoot)
     : undefined
+  const multiAgentWorkerRegistry = orchestrationMode === 'evented_v2'
+    ? new FileEventedV2WorkerRegistryStore(multiAgentRoot)
+    : undefined
   const multiAgentRuntime = multiAgentRuns && multiAgentMailbox
     ? new EventedV2MultiAgentRuntime({
         runs: multiAgentRuns,
@@ -1627,6 +1640,10 @@ async function assembleRuntime(input: {
   const multiAgentRemoteScheduler = multiAgentRemoteWorker && eventedV2AgentPeerBindings
     ? new EventedV2RemoteAgentScheduler({
         workerId: eventedV2RemoteAgentWorkerId,
+        ...(multiAgentWorkerRegistry ? { workerRegistry: multiAgentWorkerRegistry } : {}),
+        ...(eventedV2RemoteAgentConfig?.heartbeatTtlMs !== undefined
+          ? { heartbeatTtlMs: eventedV2RemoteAgentConfig.heartbeatTtlMs }
+          : {}),
         worker: multiAgentRemoteWorker,
         agentIds: Object.keys(eventedV2AgentPeerBindings),
         intervalMs: eventedV2RemoteAgentSchedulerConfig?.intervalMs ?? 1000,
@@ -1712,6 +1729,7 @@ async function assembleRuntime(input: {
     peerRegistry: tools.peerRegistry,
     ...(multiAgentRuntime ? { multiAgentRuntime } : {}),
     ...(multiAgentOutboxReconciler ? { multiAgentOutboxReconciler } : {}),
+    ...(multiAgentWorkerRegistry ? { multiAgentWorkerRegistry } : {}),
     ...(multiAgentRemoteWorker ? { multiAgentRemoteWorker } : {}),
     ...(multiAgentRemoteScheduler ? { multiAgentRemoteScheduler } : {}),
     eventBus: core.eventBus,
