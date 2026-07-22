@@ -64,6 +64,7 @@ Worker options:
   --plan                     Print worker pool shard topology without starting workers
   --pool-size <n>            Number of worker shards to start or plan
   --restart-backoff-ms <n>   Worker pool child restart backoff in milliseconds
+  --max-restarts <n>         Max child restarts per shard before pool exits
   --shard-index <n>          Process only this 0-based worker shard
   --shard-count <n>          Total number of worker shards
 `
@@ -96,7 +97,9 @@ const VALUE_FLAGS = new Set([
   'pool-size',
   'worker-pool-size',
   'restart-backoff-ms',
-  'worker-restart-backoff-ms'
+  'worker-restart-backoff-ms',
+  'max-restarts',
+  'worker-max-restarts'
 ])
 
 export type QiongqiCliCommand = 'serve' | 'worker' | 'run' | 'chat' | 'exec' | 'help'
@@ -222,7 +225,13 @@ async function runWorkerPool(
     io.stderr.write(`qiongqi worker: ${restartBackoff.message}\n`)
     return ServeExitCode.config
   }
+  const maxRestarts = parseWorkerPoolMaxRestarts(argv)
+  if (!maxRestarts.ok) {
+    io.stderr.write(`qiongqi worker: ${maxRestarts.message}\n`)
+    return ServeExitCode.config
+  }
   const children: WorkerChildProcess[] = []
+  const restartCounts = new Map<string, number>()
   let stopping = false
   let rejectSupervisorFailure: ((error: unknown) => void) | undefined
   const supervisorFailure = new Promise<never>((_resolve, reject) => {
@@ -235,6 +244,12 @@ async function runWorkerPool(
     child.once?.('exit', (code, signal) => {
       if (stopping) return
       void (async () => {
+        const shardKey = `${shard.index}/${shard.count}`
+        const restartCount = (restartCounts.get(shardKey) ?? 0) + 1
+        if (maxRestarts.value !== undefined && restartCount > maxRestarts.value) {
+          throw new Error(`worker shard ${shardKey} exceeded max restarts (${maxRestarts.value})`)
+        }
+        restartCounts.set(shardKey, restartCount)
         io.stderr.write(`qiongqi worker: worker shard ${shard.index}/${shard.count} exited (code=${code ?? 'null'}, signal=${signal ?? 'null'}); restarting in ${restartBackoff.value}ms\n`)
         await sleepForWorkerSupervisor(io, restartBackoff.value)
         if (!stopping) spawnShard(shard)
@@ -527,12 +542,12 @@ function applyWorkerShard(options: ServeOptions, shard: WorkerShard): ServeOptio
 function buildWorkerPoolPlan(options: ServeOptions, argv: readonly string[]): { ok: true; value: WorkerPoolPlan } | { ok: false; message: string } {
   const rawPoolSize = stringFlag(argv, ['pool-size', 'worker-pool-size'])
   if (rawPoolSize === undefined) return { ok: false, message: '--plan requires --pool-size <n>' }
-  const poolSize = Number(rawPoolSize)
-  if (!Number.isInteger(poolSize) || poolSize <= 0) {
-    return { ok: false, message: '--pool-size must be a positive integer' }
-  }
   const peers = options.runtime?.eventedV2AgentPeers ?? {}
   const agentIds = Object.keys(peers).sort()
+  const poolSize = rawPoolSize === 'auto' ? Math.max(1, agentIds.length) : Number(rawPoolSize)
+  if (!Number.isInteger(poolSize) || poolSize <= 0) {
+    return { ok: false, message: '--pool-size must be a positive integer or auto' }
+  }
   return {
     ok: true,
     value: {
@@ -555,6 +570,16 @@ function parseWorkerPoolRestartBackoff(argv: readonly string[]): { ok: true; val
     return { ok: false, message: '--restart-backoff-ms must be a non-negative integer' }
   }
   return { ok: true, value: backoff }
+}
+
+function parseWorkerPoolMaxRestarts(argv: readonly string[]): { ok: true; value?: number } | { ok: false; message: string } {
+  const rawMaxRestarts = stringFlag(argv, ['max-restarts', 'worker-max-restarts'])
+  if (rawMaxRestarts === undefined) return { ok: true }
+  const maxRestarts = Number(rawMaxRestarts)
+  if (!Number.isInteger(maxRestarts) || maxRestarts < 0) {
+    return { ok: false, message: '--max-restarts must be a non-negative integer' }
+  }
+  return { ok: true, value: maxRestarts }
 }
 
 function formatWorkerPoolPlan(plan: WorkerPoolPlan): string {
@@ -595,7 +620,7 @@ function spawnWorkerProcess(io: CliIo, args: string[], shard: WorkerShard): Work
 
 function stripWorkerSupervisorFlags(argv: readonly string[]): string[] {
   const stripped: string[] = []
-  const removeValueFlags = new Set(['pool-size', 'worker-pool-size', 'restart-backoff-ms', 'worker-restart-backoff-ms', 'shard-index', 'worker-shard-index', 'shard-count', 'worker-shard-count'])
+  const removeValueFlags = new Set(['pool-size', 'worker-pool-size', 'restart-backoff-ms', 'worker-restart-backoff-ms', 'max-restarts', 'worker-max-restarts', 'shard-index', 'worker-shard-index', 'shard-count', 'worker-shard-count'])
   const removeBooleanFlags = new Set(['plan', 'json'])
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
