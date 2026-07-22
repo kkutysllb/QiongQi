@@ -18,6 +18,7 @@ import {
   QiongqiErrorBody,
   QiongqiCapabilitiesConfig,
   RuntimeCapabilityManifest,
+  RuntimeTuningConfigSchema,
   TurnSchema,
   buildRuntimeCapabilityManifest,
   emptyUsageSnapshot,
@@ -36,6 +37,14 @@ import {
 } from '@qiongqi/cli'
 
 describe('contracts', () => {
+  it('parses evented v2 outbox reconciler runtime tuning', () => {
+    const runtime = RuntimeTuningConfigSchema.parse({
+      eventedV2OutboxReconciler: { enabled: true, intervalMs: 10_000 }
+    })
+
+    expect(runtime.eventedV2OutboxReconciler).toEqual({ enabled: true, intervalMs: 10_000 })
+  })
+
   it('defaults explicit skill activations for legacy turn records', () => {
     const turn = TurnSchema.parse({
       id: 'turn_legacy',

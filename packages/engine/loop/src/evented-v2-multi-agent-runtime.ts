@@ -36,6 +36,47 @@ export type EventedV2OutboxReconcilerOptions = {
   clearInterval?: (timer: unknown) => void
 }
 
+export type EventedV2AgentTaskResult = {
+  condition?: string
+  summary?: string
+}
+
+export type EventedV2AgentTaskContext = {
+  message: MailboxMessage
+}
+
+export type EventedV2AgentWorkerOptions = {
+  runtime: Pick<EventedV2MultiAgentRuntime, 'completeAgentTask'>
+  mailbox: MailboxStore
+}
+
+export type EventedV2AgentWorkerProcessResult = {
+  processed: boolean
+  runId?: string
+  messageId?: string
+}
+
+export class EventedV2AgentWorker {
+  constructor(private readonly options: EventedV2AgentWorkerOptions) {}
+
+  async processNext(input: {
+    agentId: string
+    handler: (context: EventedV2AgentTaskContext) => Promise<EventedV2AgentTaskResult>
+  }): Promise<EventedV2AgentWorkerProcessResult> {
+    const message = await this.options.mailbox.claimNext(input.agentId)
+    if (!message) return { processed: false }
+    const result = await input.handler({ message })
+    await this.options.runtime.completeAgentTask({
+      runId: message.runId,
+      agentId: input.agentId,
+      condition: result.condition ?? 'completed',
+      summary: result.summary
+    })
+    await this.options.mailbox.complete(message.messageId)
+    return { processed: true, runId: message.runId, messageId: message.messageId }
+  }
+}
+
 export class EventedV2OutboxReconciler {
   private timer: unknown
   private inFlight: Promise<EventedV2OutboxReconcilerFlushResult> | undefined
@@ -62,6 +103,10 @@ export class EventedV2OutboxReconciler {
       clearInterval(this.timer as ReturnType<typeof setInterval>)
     }
     this.timer = undefined
+  }
+
+  isRunning(): boolean {
+    return Boolean(this.timer)
   }
 
   async flushOnce(): Promise<EventedV2OutboxReconcilerFlushResult> {
@@ -324,6 +369,82 @@ export class EventedV2MultiAgentRuntime {
     return this.withRunLock(runId, () => this.flushPendingOutboxUnlocked(runId))
   }
 
+  async completeAgentTask(input: {
+    runId: string
+    agentId: string
+    condition?: string
+    summary?: string
+  }): Promise<MultiAgentRun> {
+    return this.withRunLock(input.runId, async () => this.options.runs.update(input.runId, (current) => {
+      const activeNode = requireGraphNode(this.graph, current.activeNodeId)
+      if (activeNode.kind !== 'agent') throw new Error(`Active node must be agent to complete task: ${activeNode.id}`)
+      if (activeNode.agentId !== input.agentId) {
+        throw new Error(`Agent task completion mismatch: ${activeNode.agentId} !== ${input.agentId}`)
+      }
+      const now = this.options.nowIso()
+      const condition = input.condition ?? 'completed'
+      const nextNodeId = nextNodeForCondition(this.graph, activeNode.id, condition)
+      if (!nextNodeId) throw new Error(`No ${condition} edge from node: ${activeNode.id}`)
+      const agentRunIndex = latestAgentRunIndex(current, input.agentId, activeNode.id)
+      const withCompletedAgent = MultiAgentRunSchema.parse({
+        ...current,
+        agentRuns: current.agentRuns.map((agentRun, index) =>
+          index === agentRunIndex
+            ? {
+                ...agentRun,
+                status: 'completed',
+                summary: input.summary ?? agentRun.summary,
+                completedAt: agentRun.completedAt ?? now,
+                updatedAt: now
+              }
+            : agentRun
+        ),
+        events: [...current.events, {
+          eventId: this.options.ids('mae'),
+          type: 'node_completed',
+          nodeId: activeNode.id,
+          agentId: input.agentId,
+          payload: { condition, summary: input.summary },
+          timestamp: now
+        }],
+        updatedAt: now
+      })
+      return this.enterGraphNode(withCompletedAgent, nextNodeId)
+    }))
+  }
+
+  async completeExternalNode(input: {
+    runId: string
+    nodeId: string
+    condition: string
+    payload?: Record<string, unknown>
+  }): Promise<MultiAgentRun> {
+    return this.withRunLock(input.runId, async () => this.options.runs.update(input.runId, (current) => {
+      const activeNode = requireGraphNode(this.graph, current.activeNodeId)
+      if (activeNode.id !== input.nodeId) {
+        throw new Error(`External node completion mismatch: ${activeNode.id} !== ${input.nodeId}`)
+      }
+      if (!['wait', 'tool', 'judge'].includes(activeNode.kind)) {
+        throw new Error(`Active node is not externally completable: ${activeNode.id}`)
+      }
+      const nextNodeId = nextNodeForCondition(this.graph, activeNode.id, input.condition)
+      if (!nextNodeId) throw new Error(`No ${input.condition} edge from node: ${activeNode.id}`)
+      const now = this.options.nowIso()
+      const withCompletedNode = MultiAgentRunSchema.parse({
+        ...current,
+        events: [...current.events, {
+          eventId: this.options.ids('mae'),
+          type: 'node_completed',
+          nodeId: activeNode.id,
+          payload: { condition: input.condition, ...input.payload },
+          timestamp: now
+        }],
+        updatedAt: now
+      })
+      return this.enterGraphNode(withCompletedNode, nextNodeId)
+    }))
+  }
+
   async flushAllPendingOutbox(): Promise<MultiAgentRun[]> {
     const pending = await this.options.runs.listWithPendingOutbox()
     const flushed: MultiAgentRun[] = []
@@ -355,6 +476,121 @@ export class EventedV2MultiAgentRuntime {
     })
   }
 
+  private enterGraphNode(run: MultiAgentRun, nodeId: string): MultiAgentRun {
+    const node = requireGraphNode(this.graph, nodeId)
+    const now = this.options.nowIso()
+    if (node.kind === 'terminate') {
+      const hasRunCompleted = run.events.some((event) => event.type === 'run_completed')
+      return MultiAgentRunSchema.parse({
+        ...run,
+        status: 'completed',
+        activeNodeId: node.id,
+        events: [
+          ...run.events,
+          ...(hasRunCompleted ? [] : [{
+            eventId: this.options.ids('mae'),
+            type: 'run_completed',
+            nodeId: node.id,
+            timestamp: now
+          }])
+        ],
+        updatedAt: now
+      })
+    }
+    if (node.kind === 'agent') {
+      const hasActiveAgentRun = run.agentRuns.some((agentRun) =>
+        agentRun.agentId === node.agentId &&
+        agentRun.nodeId === node.id &&
+        ['queued', 'running'].includes(agentRun.status)
+      )
+      return MultiAgentRunSchema.parse({
+        ...run,
+        status: 'running',
+        activeNodeId: node.id,
+        activeAgentStack: [...run.activeAgentStack, node.agentId],
+        agentRuns: hasActiveAgentRun ? run.agentRuns : [...run.agentRuns, {
+          agentRunId: this.options.ids('agent_run'),
+          agentId: node.agentId,
+          nodeId: node.id,
+          status: 'queued',
+          startedAt: now,
+          updatedAt: now
+        }],
+        updatedAt: now
+      })
+    }
+    if (node.kind === 'join') {
+      const ready = node.requiredBranchIds.every((branchId) => run.branchStatus[branchId] === 'completed')
+      if (ready) {
+        const nextNodeId = nextNodeForCondition(this.graph, node.id, 'completed') ?? nextNodeForCondition(this.graph, node.id, 'joined')
+        if (nextNodeId) {
+          return this.enterGraphNode(MultiAgentRunSchema.parse({
+            ...run,
+            activeNodeId: node.id,
+            events: [
+              ...run.events,
+              {
+                eventId: this.options.ids('mae'),
+                type: 'node_started',
+                nodeId: node.id,
+                timestamp: now
+              },
+              {
+                eventId: this.options.ids('mae'),
+                type: 'node_completed',
+                nodeId: node.id,
+                payload: { condition: 'completed' },
+                timestamp: now
+              }
+            ],
+            updatedAt: now
+          }), nextNodeId)
+        }
+      }
+    }
+    if (node.kind === 'retry') {
+      const attempts = (run.retryCounters[node.id] ?? 0) + 1
+      const condition = attempts <= node.maxAttempts ? 'retry' : 'exhausted'
+      const nextNodeId = nextNodeForCondition(this.graph, node.id, condition)
+      if (nextNodeId) {
+        return this.enterGraphNode(MultiAgentRunSchema.parse({
+          ...run,
+          activeNodeId: node.id,
+          retryCounters: { ...run.retryCounters, [node.id]: attempts },
+          events: [
+            ...run.events,
+            {
+              eventId: this.options.ids('mae'),
+              type: 'node_started',
+              nodeId: node.id,
+              timestamp: now
+            },
+            {
+              eventId: this.options.ids('mae'),
+              type: 'node_completed',
+              nodeId: node.id,
+              payload: { condition, attempts, maxAttempts: node.maxAttempts },
+              timestamp: now
+            }
+          ],
+          updatedAt: now
+        }), nextNodeId)
+      }
+    }
+    return MultiAgentRunSchema.parse({
+      ...run,
+      status: 'suspended',
+      activeNodeId: node.id,
+      events: [...run.events, {
+        eventId: this.options.ids('mae'),
+        type: 'node_started',
+        nodeId: node.id,
+        timestamp: now
+      }],
+      updatedAt: now
+    })
+  }
+
   private async withRunLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.runLocks.get(runId) ?? Promise.resolve()
     let release: () => void = () => undefined
@@ -379,6 +615,14 @@ export class EventedV2MultiAgentRuntime {
     if (!run) throw new Error(`MultiAgentRun not found: ${runId}`)
     return run.events.map((event) => `${event.type}:${event.agentId ?? event.nodeId ?? 'runtime'}`)
   }
+}
+
+function latestAgentRunIndex(run: MultiAgentRun, agentId: string, nodeId: string): number {
+  for (let index = run.agentRuns.length - 1; index >= 0; index -= 1) {
+    const agentRun = run.agentRuns[index]
+    if (agentRun?.agentId === agentId && agentRun.nodeId === nodeId) return index
+  }
+  throw new Error(`AgentRun not found for completion: ${agentId}/${nodeId}`)
 }
 
 function handoffIdempotencyKey(input: {

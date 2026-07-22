@@ -25,7 +25,7 @@ import type { ReviewTarget } from '@qiongqi/contracts'
 import type { AuthService } from '../auth-service.js'
 import type { QiongqiConfig } from '@qiongqi/contracts'
 import type { UserDataStore } from '../user-data-store.js'
-import type { EventedV2MultiAgentRuntime } from '@qiongqi/loop'
+import type { EventedV2MultiAgentRuntime, EventedV2OutboxReconciler } from '@qiongqi/loop'
 
 export type RuntimeToolDiagnostics = {
   providers: ToolProviderPolicy[]
@@ -77,6 +77,7 @@ export type ServerRuntime = {
   authService?: AuthService
   userDataStore?: UserDataStore
   multiAgentRuntime?: EventedV2MultiAgentRuntime
+  multiAgentOutboxReconciler?: EventedV2OutboxReconciler
   runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> | void
   cancelA2ATaskTurn?(input: { threadId: string; turnId: string }): Promise<void> | void
   runReview?(input: {

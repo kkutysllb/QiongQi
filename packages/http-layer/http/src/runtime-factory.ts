@@ -40,6 +40,7 @@ import {
   createKernelV3NodeHandlers,
   EffectCommitCoordinator,
   EventedV2MultiAgentRuntime,
+  EventedV2OutboxReconciler,
   KernelV3TurnRunner,
   ModelProposalRunner,
   PromptBuilder,
@@ -1561,6 +1562,20 @@ async function assembleRuntime(input: {
         nowIso: core.nowIso
       })
     : undefined
+  const eventedV2OutboxReconcilerConfig = options.runtime?.eventedV2OutboxReconciler
+  const multiAgentOutboxReconciler = multiAgentRuntime
+    ? new EventedV2OutboxReconciler({
+        runtime: multiAgentRuntime,
+        intervalMs: eventedV2OutboxReconcilerConfig?.intervalMs ?? 1000,
+        nowIso: core.nowIso,
+        onError: (error) => {
+          console.warn('[qiongqi] evented_v2 outbox reconciliation failed:', error)
+        }
+      })
+    : undefined
+  if (eventedV2OutboxReconcilerConfig?.enabled) {
+    multiAgentOutboxReconciler?.start()
+  }
   const currentCapabilities = () => {
     const config = configStore.snapshot?.() ?? qiongqiConfigFromRuntimeOptions(options)
     const effectiveCapabilities = withRuntimeMountedSkillRoots(
@@ -1632,6 +1647,7 @@ async function assembleRuntime(input: {
     authService: core.authService,
     userDataStore: core.userDataStore,
     ...(multiAgentRuntime ? { multiAgentRuntime } : {}),
+    ...(multiAgentOutboxReconciler ? { multiAgentOutboxReconciler } : {}),
     eventBus: core.eventBus,
     sessionStore: core.sessionStore,
     events: core.events,
@@ -1712,7 +1728,11 @@ async function assembleRuntime(input: {
         try {
           await core.storesShutdown?.()
         } finally {
-          core.userDataShutdown?.()
+          try {
+            core.userDataShutdown?.()
+          } finally {
+            multiAgentOutboxReconciler?.stop()
+          }
         }
       }
     }

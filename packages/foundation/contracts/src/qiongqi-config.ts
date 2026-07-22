@@ -129,6 +129,10 @@ export const RuntimeTuningConfigSchema = z
       defaultMode: z.enum(['classic', 'kernel_v3']).optional(),
       fallbackBeforeEffect: z.boolean().optional()
     }).strict().optional(),
+    eventedV2OutboxReconciler: z.object({
+      enabled: z.boolean().optional(),
+      intervalMs: PositiveInt.optional()
+    }).strict().optional(),
     modelStreamIdleTimeoutMs: PositiveInt.optional(),
     toolStorm: z
       .object({

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FileMailboxStore, FileMultiAgentRunStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
 import type { AgentGraph, MultiAgentRun } from '@qiongqi/contracts'
-import { EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, defaultManagerSpecialistGraph } from '@qiongqi/loop'
+import { EventedV2AgentWorker, EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, defaultManagerSpecialistGraph } from '@qiongqi/loop'
 import type { MultiAgentRunStore } from '@qiongqi/ports'
 
 describe('EventedV2MultiAgentRuntime', () => {
@@ -480,6 +480,189 @@ describe('EventedV2MultiAgentRuntime', () => {
       'handoff_delivered:researcher'
     ])
   })
+
+  it('claims a queued agent task, completes the mailbox message, and advances the run to termination', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const graph = defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' })
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2AgentWorker({ runtime, mailbox })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    const handled: string[] = []
+    const result = await worker.processNext({
+      agentId: 'researcher',
+      handler: async ({ message }) => {
+        handled.push(message.payload.prompt)
+        return { condition: 'completed', summary: 'Research complete.' }
+      }
+    })
+
+    const saved = await runs.load(run.runId)
+    expect(result).toMatchObject({ processed: true, runId: run.runId })
+    expect(handled).toEqual(['Summarize current loop.'])
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'completed' }])
+    expect(saved).toMatchObject({ status: 'completed', activeNodeId: 'done' })
+    expect(saved?.agentRuns.find((agentRun) => agentRun.agentId === 'researcher')).toMatchObject({
+      status: 'completed',
+      summary: 'Research complete.'
+    })
+    expect(saved?.events.map((event) => event.type)).toContain('run_completed')
+  })
+
+  it('suspends the run when graph advancement reaches an external wait node', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new InMemoryMailboxStore(),
+      graph: waitAfterManagerGraph(),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Wait for approval.'
+    })
+
+    const next = await runtime.completeAgentTask({ runId: run.runId, agentId: 'manager', condition: 'completed' })
+
+    expect(next).toMatchObject({ status: 'suspended', activeNodeId: 'wait_approval' })
+    expect(next.events.some((event) => event.type === 'node_started' && event.nodeId === 'wait_approval')).toBe(true)
+  })
+
+  it('resumes a suspended wait node with a declared condition', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new InMemoryMailboxStore(),
+      graph: waitToTerminateGraph(),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Wait for approval.'
+    })
+    await runtime.completeAgentTask({ runId: run.runId, agentId: 'manager', condition: 'completed' })
+
+    const next = await runtime.completeExternalNode({
+      runId: run.runId,
+      nodeId: 'wait_approval',
+      condition: 'approved',
+      payload: { approver: 'human' }
+    })
+
+    expect(next).toMatchObject({ status: 'completed', activeNodeId: 'done' })
+    expect(next.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'node_completed',
+        nodeId: 'wait_approval',
+        payload: { condition: 'approved', approver: 'human' }
+      }),
+      expect.objectContaining({ type: 'run_completed', nodeId: 'done' })
+    ]))
+  })
+
+  it('routes tool and judge nodes through external completion conditions', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new InMemoryMailboxStore(),
+      graph: toolJudgeGraph(),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Run tool then judge.'
+    })
+
+    const afterTool = await runtime.completeAgentTask({ runId: run.runId, agentId: 'manager', condition: 'completed' })
+    expect(afterTool).toMatchObject({ status: 'suspended', activeNodeId: 'collect_context' })
+
+    const afterJudge = await runtime.completeExternalNode({
+      runId: run.runId,
+      nodeId: 'collect_context',
+      condition: 'succeeded'
+    })
+    expect(afterJudge).toMatchObject({ status: 'suspended', activeNodeId: 'quality_gate' })
+
+    const done = await runtime.completeExternalNode({
+      runId: run.runId,
+      nodeId: 'quality_gate',
+      condition: 'passed'
+    })
+    expect(done).toMatchObject({ status: 'completed', activeNodeId: 'done' })
+  })
+
+  it('continues through a satisfied join node to terminate the run', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new InMemoryMailboxStore(),
+      graph: joinAfterManagerGraph(),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Join branches.'
+    })
+
+    const next = await runtime.completeAgentTask({ runId: run.runId, agentId: 'manager', condition: 'completed' })
+
+    expect(next).toMatchObject({ status: 'completed', activeNodeId: 'done' })
+    expect(next.events.map((event) => event.type)).toContain('run_completed')
+  })
+
+  it('routes retry nodes through retry and exhausted edges using retryCounters', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new InMemoryMailboxStore(),
+      graph: retryAfterManagerGraph(),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Retry once.'
+    })
+
+    const retried = await runtime.completeAgentTask({ runId: run.runId, agentId: 'manager', condition: 'failed' })
+    const exhausted = await runtime.completeAgentTask({ runId: run.runId, agentId: 'manager', condition: 'failed' })
+
+    expect(retried).toMatchObject({ status: 'running', activeNodeId: 'manager', retryCounters: { retry_manager: 1 } })
+    expect(retried.agentRuns.filter((agentRun) => agentRun.agentId === 'manager')).toHaveLength(2)
+    expect(exhausted).toMatchObject({ status: 'completed', activeNodeId: 'done', retryCounters: { retry_manager: 2 } })
+  })
 })
 
 describe('EventedV2OutboxReconciler', () => {
@@ -563,6 +746,92 @@ function minimalRun(): MultiAgentRun {
     budgets: { stepsUsed: 0, toolCallsUsed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
     createdAt: '2026-07-21T00:00:00.000Z',
     updatedAt: '2026-07-21T00:00:00.000Z'
+  }
+}
+
+function waitAfterManagerGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'wait_after_manager',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'manager' },
+      { id: 'wait_approval', kind: 'wait', waitFor: 'approval' }
+    ],
+    edges: [
+      { from: 'manager', to: 'wait_approval', condition: 'completed' }
+    ]
+  }
+}
+
+function waitToTerminateGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'wait_to_terminate',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'manager' },
+      { id: 'wait_approval', kind: 'wait', waitFor: 'approval' },
+      { id: 'done', kind: 'terminate' }
+    ],
+    edges: [
+      { from: 'manager', to: 'wait_approval', condition: 'completed' },
+      { from: 'wait_approval', to: 'done', condition: 'approved' }
+    ]
+  }
+}
+
+function toolJudgeGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'tool_judge',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'manager' },
+      { id: 'collect_context', kind: 'tool', toolName: 'read_context' },
+      { id: 'quality_gate', kind: 'judge', policy: 'complete_enough' },
+      { id: 'done', kind: 'terminate' }
+    ],
+    edges: [
+      { from: 'manager', to: 'collect_context', condition: 'completed' },
+      { from: 'collect_context', to: 'quality_gate', condition: 'succeeded' },
+      { from: 'quality_gate', to: 'done', condition: 'passed' }
+    ]
+  }
+}
+
+function joinAfterManagerGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'join_after_manager',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'manager' },
+      { id: 'join_done', kind: 'join', requiredBranchIds: [] },
+      { id: 'done', kind: 'terminate' }
+    ],
+    edges: [
+      { from: 'manager', to: 'join_done', condition: 'completed' },
+      { from: 'join_done', to: 'done', condition: 'completed' }
+    ]
+  }
+}
+
+function retryAfterManagerGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'retry_after_manager',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'manager' },
+      { id: 'retry_manager', kind: 'retry', maxAttempts: 1 },
+      { id: 'done', kind: 'terminate' }
+    ],
+    edges: [
+      { from: 'manager', to: 'retry_manager', condition: 'failed' },
+      { from: 'retry_manager', to: 'manager', condition: 'retry' },
+      { from: 'retry_manager', to: 'done', condition: 'exhausted' }
+    ]
   }
 }
 
