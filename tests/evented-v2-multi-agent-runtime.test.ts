@@ -199,6 +199,46 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(next.events.filter((event) => event.type === 'handoff_delivered')).toHaveLength(1)
   })
 
+  it('keeps concurrent identical handoffs idempotent for the same run', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph: defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' }),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+
+    await Promise.all([
+      runtime.handoff({
+        runId: run.runId,
+        sourceAgentId: 'manager',
+        targetAgentId: 'researcher',
+        prompt: 'Summarize the current evented loop.'
+      }),
+      runtime.handoff({
+        runId: run.runId,
+        sourceAgentId: 'manager',
+        targetAgentId: 'researcher',
+        prompt: 'Summarize the current evented loop.'
+      })
+    ])
+
+    const messages = await mailbox.listForRun(run.runId)
+    const saved = await runs.load(run.runId)
+    expect(messages).toHaveLength(1)
+    expect(saved?.activeAgentStack).toEqual(['manager', 'researcher'])
+    expect(saved?.agentRuns.filter((agentRun) => agentRun.agentId === 'researcher')).toHaveLength(1)
+    expect(saved?.events.filter((event) => event.type === 'handoff_delivered')).toHaveLength(1)
+  })
+
   it('returns a compact trace for observability', async () => {
     const runtime = new EventedV2MultiAgentRuntime({
       runs: new InMemoryMultiAgentRunStore(),

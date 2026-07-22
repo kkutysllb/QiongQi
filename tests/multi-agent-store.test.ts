@@ -144,6 +144,24 @@ describe('file multi-agent store persistence behavior', () => {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('delivers a queued file mailbox message to only one concurrent claimant', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-multi-agent-'))
+    const mailbox = new FileMailboxStore(root)
+    try {
+      await mailbox.enqueue(baseMessage())
+
+      const claimed = await Promise.all([
+        mailbox.claimNext('researcher'),
+        mailbox.claimNext('researcher')
+      ])
+
+      expect(claimed.filter(Boolean)).toHaveLength(1)
+      expect(await mailbox.listForRun('mar_1')).toMatchObject([{ messageId: 'msg_1', status: 'delivered' }])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
 
 function baseRun(): MultiAgentRun {

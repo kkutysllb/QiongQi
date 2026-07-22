@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto'
 import { readdir, readFile, rm } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { MailboxMessageSchema, MultiAgentRunSchema, type MailboxMessage, type MultiAgentRun } from '@qiongqi/contracts'
 import type { MailboxStore, MultiAgentRunStore } from '@qiongqi/ports'
 import { atomicWriteFile } from './atomic-write.js'
+import { withFileLock } from './file-lock.js'
 
 function safeSegment(value: string, label: string): string {
   const trimmed = value.trim()
@@ -106,14 +108,16 @@ export class FileMailboxStore implements MailboxStore {
   }
 
   async claimNext(agentId: string): Promise<MailboxMessage | undefined> {
-    const all = await this.listAll()
-    const queued = all
-      .filter((message) => message.toAgentId === agentId && message.status === 'queued')
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
-    if (!queued) return undefined
-    const delivered = MailboxMessageSchema.parse({ ...queued, status: 'delivered', updatedAt: new Date().toISOString() })
-    await this.write(delivered)
-    return delivered
+    return withFileLock(this.claimLockPath(agentId), async () => {
+      const all = await this.listAll()
+      const queued = all
+        .filter((message) => message.toAgentId === agentId && message.status === 'queued')
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
+      if (!queued) return undefined
+      const delivered = MailboxMessageSchema.parse({ ...queued, status: 'delivered', updatedAt: new Date().toISOString() })
+      await this.write(delivered)
+      return delivered
+    })
   }
 
   async complete(messageId: string): Promise<void> {
@@ -150,5 +154,10 @@ export class FileMailboxStore implements MailboxStore {
       all.push(...messages)
     }
     return all
+  }
+
+  private claimLockPath(agentId: string): string {
+    const digest = createHash('sha256').update(agentId).digest('hex')
+    return join(this.rootDir, 'mailbox-claims', `${digest}.json`)
   }
 }

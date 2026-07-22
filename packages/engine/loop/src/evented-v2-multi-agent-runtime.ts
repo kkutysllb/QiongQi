@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   MailboxMessageSchema,
   MultiAgentRunSchema,
@@ -19,6 +20,7 @@ export type EventedV2MultiAgentRuntimeOptions = {
 
 export class EventedV2MultiAgentRuntime {
   private readonly graph: AgentGraph
+  private readonly runLocks = new Map<string, Promise<void>>()
 
   constructor(private readonly options: EventedV2MultiAgentRuntimeOptions) {
     this.graph = validateAgentGraph(options.graph)
@@ -75,6 +77,15 @@ export class EventedV2MultiAgentRuntime {
     targetAgentId: string
     prompt: string
   }): Promise<MultiAgentRun> {
+    return this.withRunLock(input.runId, () => this.handoffUnlocked(input))
+  }
+
+  private async handoffUnlocked(input: {
+    runId: string
+    sourceAgentId: string
+    targetAgentId: string
+    prompt: string
+  }): Promise<MultiAgentRun> {
     const current = await this.options.runs.load(input.runId)
     if (!current) throw new Error(`MultiAgentRun not found: ${input.runId}`)
     if (current.graphId !== this.graph.graphId) {
@@ -120,7 +131,14 @@ export class EventedV2MultiAgentRuntime {
       throw new Error(`Handoff accepted target mismatch: ${targetNode.agentId} !== ${input.targetAgentId}`)
     }
     const now = this.options.nowIso()
-    const envelopeId = existingMessage?.envelopeId ?? this.options.ids('env')
+    const idempotencyKey = handoffIdempotencyKey({
+      graphId: current.graphId,
+      runId: current.runId,
+      sourceAgentId: input.sourceAgentId,
+      targetAgentId: input.targetAgentId,
+      prompt: input.prompt
+    })
+    const envelopeId = existingMessage?.envelopeId ?? `env_${idempotencyKey}`
     if (!existingMessage) {
       const envelope = TaskEnvelopeSchema.parse({
         envelopeId,
@@ -134,7 +152,7 @@ export class EventedV2MultiAgentRuntime {
         createdAt: now
       })
       const message: MailboxMessage = MailboxMessageSchema.parse({
-        messageId: this.options.ids('msg'),
+        messageId: `msg_${idempotencyKey}`,
         envelopeId: envelope.envelopeId,
         runId: current.runId,
         fromAgentId: input.sourceAgentId,
@@ -198,9 +216,47 @@ export class EventedV2MultiAgentRuntime {
     return next
   }
 
+  private async withRunLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.runLocks.get(runId) ?? Promise.resolve()
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const current = previous
+      .catch(() => undefined)
+      .then(() => gate)
+    this.runLocks.set(runId, current)
+    await previous.catch(() => undefined)
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (this.runLocks.get(runId) === current) this.runLocks.delete(runId)
+    }
+  }
+
   async trace(runId: string): Promise<string[]> {
     const run = await this.options.runs.load(runId)
     if (!run) throw new Error(`MultiAgentRun not found: ${runId}`)
     return run.events.map((event) => `${event.type}:${event.agentId ?? event.nodeId ?? 'runtime'}`)
   }
+}
+
+function handoffIdempotencyKey(input: {
+  graphId: string
+  runId: string
+  sourceAgentId: string
+  targetAgentId: string
+  prompt: string
+}): string {
+  return createHash('sha256')
+    .update(JSON.stringify([
+      input.graphId,
+      input.runId,
+      input.sourceAgentId,
+      input.targetAgentId,
+      input.prompt
+    ]))
+    .digest('hex')
+    .slice(0, 32)
 }
