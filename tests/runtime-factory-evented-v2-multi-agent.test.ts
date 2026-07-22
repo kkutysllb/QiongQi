@@ -285,6 +285,107 @@ describe('runtime factory evented_v2 multi-agent wiring', () => {
     }
   })
 
+  it('starts and stops the evented_v2 remote agent scheduler from runtime config', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
+    const runtime = await createQiongqiServeRuntime({
+      host: '127.0.0.1',
+      port: 0,
+      dataDir,
+      runtimeToken: 'tok',
+      apiKey: 'test-key',
+      baseUrl: 'http://localhost',
+      model: 'test-model',
+      approvalPolicy: 'never',
+      sandboxMode: 'danger-full-access',
+      tokenEconomyMode: false,
+      insecure: true,
+      orchestrationMode: 'evented_v2',
+      runtime: {
+        eventedV2AgentPeers: { specialist: 'peer_specialist' },
+        eventedV2RemoteAgent: {
+          scheduler: { enabled: true, intervalMs: 10_000 }
+        }
+      }
+    })
+    try {
+      expect(runtime.multiAgentRemoteWorker).toBeDefined()
+      expect(runtime.multiAgentRemoteScheduler?.isRunning()).toBe(true)
+
+      await runtime.shutdown?.()
+
+      expect(runtime.multiAgentRemoteScheduler?.isRunning()).toBe(false)
+    } finally {
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('passes remote agent compensation conditions into the evented_v2 remote worker', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
+    const runtime = await createQiongqiServeRuntime({
+      host: '127.0.0.1',
+      port: 0,
+      dataDir,
+      runtimeToken: 'tok',
+      apiKey: 'test-key',
+      baseUrl: 'http://localhost',
+      model: 'test-model',
+      approvalPolicy: 'never',
+      sandboxMode: 'danger-full-access',
+      tokenEconomyMode: false,
+      insecure: true,
+      orchestrationMode: 'evented_v2',
+      runtime: {
+        eventedV2AgentGraph: remoteCompensationGraph(),
+        eventedV2AgentPeers: { specialist: 'peer_specialist' },
+        eventedV2RemoteAgent: {
+          compensation: {
+            statusConditions: { failed: 'remote_failed' }
+          }
+        }
+      }
+    })
+    try {
+      await runtime.peerRegistry?.registerLocal({
+        card: peerCard('peer_specialist'),
+        invoke: async () => ({
+          peerCardId: 'peer_specialist',
+          status: 'failed',
+          error: 'remote model failed'
+        })
+      })
+      const run = await runtime.multiAgentRuntime?.start({
+        threadId: 'thread_1',
+        turnId: 'turn_1',
+        workspaceKey: 'workspace_1',
+        prompt: 'Use remote specialist.'
+      })
+      expect(run).toBeDefined()
+      await runtime.multiAgentRuntime?.handoff({
+        runId: run!.runId,
+        sourceAgentId: 'Qiongqi',
+        targetAgentId: 'specialist',
+        prompt: 'Handle remotely.'
+      })
+
+      const result = await runtime.multiAgentRemoteWorker?.processNext({ agentId: 'specialist' })
+
+      expect(result).toMatchObject({ processed: true, peerStatus: 'failed' })
+      await expect(runtime.multiAgentRuntime?.timeline(run!.runId)).resolves.toMatchObject({
+        status: 'completed',
+        activeNodeId: 'compensated',
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            agentId: 'specialist',
+            payload: expect.objectContaining({ condition: 'remote_failed' })
+          })
+        ])
+      })
+    } finally {
+      await runtime.shutdown?.()
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
   it('rejects an invalid evented_v2 agent graph from runtime config', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
     try {
@@ -366,6 +467,25 @@ function remoteOutcomeGraph(): AgentGraph {
       { from: 'specialist', to: 'done', condition: 'completed' },
       { from: 'specialist', to: 'done', condition: 'failed' },
       { from: 'specialist', to: 'done', condition: 'aborted' }
+    ]
+  }
+}
+
+function remoteCompensationGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'remote_compensation',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'Qiongqi' },
+      { id: 'handoff_specialist', kind: 'handoff', targetAgentId: 'specialist' },
+      { id: 'specialist', kind: 'agent', agentId: 'specialist' },
+      { id: 'compensated', kind: 'terminate' }
+    ],
+    edges: [
+      { from: 'manager', to: 'handoff_specialist', condition: 'handoff' },
+      { from: 'handoff_specialist', to: 'specialist', condition: 'accepted' },
+      { from: 'specialist', to: 'compensated', condition: 'remote_failed' }
     ]
   }
 }

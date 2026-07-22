@@ -41,11 +41,33 @@ describe('contracts', () => {
   it('parses evented v2 outbox reconciler runtime tuning', () => {
     const runtime = RuntimeTuningConfigSchema.parse({
       eventedV2OutboxReconciler: { enabled: true, intervalMs: 10_000 },
-      eventedV2RemoteAgent: { timeoutMs: 30_000 }
+      eventedV2RemoteAgent: {
+        timeoutMs: 30_000,
+        leaseTtlMs: 60_000,
+        workerId: 'worker_a',
+        scheduler: { enabled: true, intervalMs: 5_000 },
+        compensation: {
+          statusConditions: {
+            failed: 'remote_failed',
+            aborted: 'remote_aborted'
+          }
+        }
+      }
     })
 
     expect(runtime.eventedV2OutboxReconciler).toEqual({ enabled: true, intervalMs: 10_000 })
-    expect(runtime.eventedV2RemoteAgent).toEqual({ timeoutMs: 30_000 })
+    expect(runtime.eventedV2RemoteAgent).toEqual({
+      timeoutMs: 30_000,
+      leaseTtlMs: 60_000,
+      workerId: 'worker_a',
+      scheduler: { enabled: true, intervalMs: 5_000 },
+      compensation: {
+        statusConditions: {
+          failed: 'remote_failed',
+          aborted: 'remote_aborted'
+        }
+      }
+    })
   })
 
   it('parses a declarative evented v2 agent graph runtime tuning', () => {

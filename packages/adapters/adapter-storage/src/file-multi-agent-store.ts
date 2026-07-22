@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readdir, readFile, rm } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 import { MailboxMessageSchema, MultiAgentRunSchema, type MailboxMessage, type MultiAgentRun } from '@qiongqi/contracts'
-import type { LeaseFence, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
+import type { LeaseFence, MailboxClaimOptions, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
 import { atomicWriteFile } from './atomic-write.js'
 import { withFileLock } from './file-lock.js'
 
@@ -261,7 +261,7 @@ export class FileMultiAgentRunStore implements MultiAgentRunStore {
 }
 
 export class FileMailboxStore implements MailboxStore {
-  constructor(readonly rootDir: string) {}
+  constructor(readonly rootDir: string, private readonly options: { nowMs?: () => number } = {}) {}
 
   async enqueue(message: MailboxMessage): Promise<void> {
     const parsed = MailboxMessageSchema.parse(message)
@@ -274,24 +274,31 @@ export class FileMailboxStore implements MailboxStore {
     })
   }
 
-  async claimNext(agentId: string): Promise<MailboxMessage | undefined> {
+  async claimNext(agentId: string, options?: MailboxClaimOptions): Promise<MailboxMessage | undefined> {
     return withFileLock(this.claimLockPath(agentId), async () => {
+      const now = this.nowMs()
       const all = await this.listAll()
       const queued = all
-        .filter((message) => message.toAgentId === agentId && message.status === 'queued')
+        .filter((message) => message.toAgentId === agentId && claimableMailboxMessage(message, now))
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
       if (!queued) return undefined
       return withFileLock(this.messageLockPath(queued), async () => {
         const current = await this.readMessage(queued)
-        if (current.status !== 'queued' || current.toAgentId !== agentId) return undefined
-        const delivered = MailboxMessageSchema.parse({ ...current, status: 'delivered', updatedAt: new Date().toISOString() })
+        if (current.toAgentId !== agentId || !claimableMailboxMessage(current, now)) return undefined
+        const claimLease = options ? nextClaimLease(current, options, now) : undefined
+        const delivered = MailboxMessageSchema.parse({
+          ...current,
+          status: 'delivered',
+          ...(claimLease ? { claimLease } : {}),
+          updatedAt: new Date(now).toISOString()
+        })
         await this.write(delivered)
         return delivered
       })
     })
   }
 
-  async complete(messageId: string, status: 'completed' | 'failed' | 'aborted' = 'completed'): Promise<void> {
+  async complete(messageId: string, status: 'completed' | 'failed' | 'aborted' = 'completed', fence?: MailboxMessage['claimLease']): Promise<void> {
     safeSegment(messageId, 'messageId')
     const all = await this.listAll()
     const current = all.find((message) => message.messageId === messageId)
@@ -302,7 +309,9 @@ export class FileMailboxStore implements MailboxStore {
         throw error
       })
       if (!latest) return
-      await this.write(MailboxMessageSchema.parse({ ...latest, status, updatedAt: new Date().toISOString() }))
+      assertMailboxFence(latest, fence)
+      const { claimLease: _claimLease, ...rest } = latest
+      await this.write(MailboxMessageSchema.parse({ ...rest, status, updatedAt: new Date(this.nowMs()).toISOString() }))
     })
   }
 
@@ -350,6 +359,10 @@ export class FileMailboxStore implements MailboxStore {
     const digest = createHash('sha256').update(agentId).digest('hex')
     return join(this.rootDir, 'mailbox-claims', `${digest}.json`)
   }
+
+  private nowMs(): number {
+    return this.options.nowMs?.() ?? Date.now()
+  }
 }
 
 function preserveMailboxProgress(existing: MailboxMessage, incoming: MailboxMessage): MailboxMessage {
@@ -365,6 +378,33 @@ function mailboxStatusRank(status: MailboxMessage['status']): number {
     aborted: 1,
     completed: 2
   }[status]
+}
+
+function claimableMailboxMessage(message: MailboxMessage, now: number): boolean {
+  if (message.status === 'queued') return true
+  return message.status === 'delivered' && Boolean(message.claimLease) && Date.parse(message.claimLease!.expiresAt) <= now
+}
+
+function nextClaimLease(message: MailboxMessage, options: MailboxClaimOptions, now: number): NonNullable<MailboxMessage['claimLease']> {
+  return {
+    holderId: options.holderId,
+    expiresAt: new Date(now + Math.max(1, Math.floor(options.ttlMs))).toISOString(),
+    epoch: (message.claimLease?.epoch ?? 0) + 1,
+    token: randomUUID()
+  }
+}
+
+function assertMailboxFence(message: MailboxMessage, fence: MailboxMessage['claimLease'] | undefined): void {
+  if (!fence) return
+  const current = message.claimLease
+  if (
+    !current ||
+    current.holderId !== fence.holderId ||
+    current.epoch !== fence.epoch ||
+    current.token !== fence.token
+  ) {
+    throw new Error('Mailbox complete rejected by stale mailbox claim')
+  }
 }
 
 function leaseFence(lease: RunLease): LeaseFence {

@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FileMailboxStore, FileMultiAgentRunStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
 import type { AgentGraph, MultiAgentRun, PeerArtifact, PeerTask } from '@qiongqi/contracts'
-import { EventedV2AgentWorker, EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, EventedV2RemoteAgentWorker, defaultManagerSpecialistGraph } from '@qiongqi/loop'
-import type { LeaseFence, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
+import { EventedV2AgentWorker, EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, EventedV2RemoteAgentScheduler, EventedV2RemoteAgentWorker, defaultManagerSpecialistGraph } from '@qiongqi/loop'
+import type { LeaseFence, MailboxClaimOptions, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
 
 describe('EventedV2MultiAgentRuntime', () => {
   it('starts a durable multi-agent run without changing single-agent behavior', async () => {
@@ -649,6 +649,53 @@ describe('EventedV2MultiAgentRuntime', () => {
     })
   })
 
+  it('uses mailbox claim leases when configured for remote peer work', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new RecordingLeasedMailboxStore()
+    const peer = new RecordingPeerInvoker()
+    const graph = defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' })
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2RemoteAgentWorker({
+      runtime,
+      mailbox,
+      runs,
+      peerInvoker: peer,
+      agentPeers: { researcher: 'peer_researcher' },
+      workerId: 'worker_a',
+      leaseTtlMs: 5000
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    const result = await worker.processNext({ agentId: 'researcher' })
+
+    expect(result).toMatchObject({ processed: true })
+    expect(mailbox.claims).toEqual([{
+      agentId: 'researcher',
+      options: { holderId: 'worker_a', ttlMs: 5000 }
+    }])
+    expect(mailbox.completeFences).toMatchObject([{
+      holderId: 'worker_a',
+      epoch: 1
+    }])
+  })
+
   it('records failed peer artifacts without marking the agent run completed', async () => {
     const runs = new InMemoryMultiAgentRunStore()
     const mailbox = new InMemoryMailboxStore()
@@ -712,6 +759,55 @@ describe('EventedV2MultiAgentRuntime', () => {
           tags: ['error']
         }]
       }
+    })
+  })
+
+  it('maps remote peer outcomes through a declared compensation condition', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const graph = remoteCompensationGraph()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2RemoteAgentWorker({
+      runtime,
+      mailbox,
+      runs,
+      peerInvoker: new RecordingPeerInvoker({
+        peerCardId: 'peer_researcher',
+        status: 'failed',
+        error: 'remote model failed'
+      }),
+      agentPeers: { researcher: 'peer_researcher' },
+      compensationPolicy: {
+        statusConditions: { failed: 'remote_failed' }
+      }
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    const result = await worker.processNext({ agentId: 'researcher' })
+
+    expect(result).toMatchObject({ processed: true, peerStatus: 'failed' })
+    expect(await runs.load(run.runId)).toMatchObject({ status: 'completed', activeNodeId: 'compensated' })
+    expect((await runs.load(run.runId))?.events.find((event) =>
+      event.type === 'node_completed' && event.agentId === 'researcher'
+    )).toMatchObject({
+      payload: { condition: 'remote_failed' }
     })
   })
 
@@ -1085,6 +1181,66 @@ describe('EventedV2OutboxReconciler', () => {
   })
 })
 
+describe('EventedV2RemoteAgentScheduler', () => {
+  it('processes each configured remote agent and reports batch results', async () => {
+    const calls: string[] = []
+    const scheduler = new EventedV2RemoteAgentScheduler({
+      worker: {
+        processNext: async ({ agentId }) => {
+          calls.push(agentId)
+          return { processed: agentId === 'researcher', messageId: agentId === 'researcher' ? 'msg_1' : undefined }
+        }
+      },
+      agentIds: ['researcher', 'writer'],
+      intervalMs: 1000,
+      nowIso: fixedClock()
+    })
+
+    const result = await scheduler.flushOnce()
+
+    expect(calls).toEqual(['researcher', 'writer'])
+    expect(result).toMatchObject({
+      agentsChecked: 2,
+      messagesProcessed: 1,
+      messageIds: ['msg_1']
+    })
+  })
+
+  it('schedules, isolates errors, and cancels periodic remote agent polling', async () => {
+    let callback: (() => void | Promise<void>) | undefined
+    let cleared: unknown
+    const errors: unknown[] = []
+    const scheduler = new EventedV2RemoteAgentScheduler({
+      worker: {
+        processNext: async ({ agentId }) => {
+          if (agentId === 'researcher') throw new Error('peer unavailable')
+          return { processed: true, messageId: 'msg_2' }
+        }
+      },
+      agentIds: ['researcher', 'writer'],
+      intervalMs: 1000,
+      nowIso: fixedClock(),
+      onError: (error) => errors.push(error),
+      setInterval: (fn, intervalMs) => {
+        expect(intervalMs).toBe(1000)
+        callback = fn
+        return 'timer_1'
+      },
+      clearInterval: (timer) => {
+        cleared = timer
+      }
+    })
+
+    scheduler.start()
+    await callback?.()
+    scheduler.stop()
+
+    expect(scheduler.isRunning()).toBe(false)
+    expect(cleared).toBe('timer_1')
+    expect(errors).toHaveLength(1)
+  })
+})
+
 function fixedClock(): () => string {
   return () => '2026-07-21T00:00:00.000Z'
 }
@@ -1229,6 +1385,25 @@ function remoteOutcomeGraph(): AgentGraph {
   }
 }
 
+function remoteCompensationGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'remote_compensation',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'manager' },
+      { id: 'handoff_researcher', kind: 'handoff', targetAgentId: 'researcher' },
+      { id: 'researcher', kind: 'agent', agentId: 'researcher' },
+      { id: 'compensated', kind: 'terminate' }
+    ],
+    edges: [
+      { from: 'manager', to: 'handoff_researcher', condition: 'handoff' },
+      { from: 'handoff_researcher', to: 'researcher', condition: 'accepted' },
+      { from: 'researcher', to: 'compensated', condition: 'remote_failed' }
+    ]
+  }
+}
+
 class FailFirstUpdateAfterMutateRunStore extends InMemoryMultiAgentRunStore implements MultiAgentRunStore {
   private updates = 0
 
@@ -1287,6 +1462,25 @@ class FailFirstEnqueueFileMailboxStore extends FileMailboxStore {
     this.enqueues += 1
     if (this.enqueues === 1) throw new Error('enqueue failed once')
     return super.enqueue(message)
+  }
+}
+
+class RecordingLeasedMailboxStore extends InMemoryMailboxStore {
+  readonly claims: Array<{ agentId: string; options?: MailboxClaimOptions }> = []
+  readonly completeFences: Array<unknown> = []
+
+  constructor() {
+    super({ nowMs: () => Date.parse('2026-07-21T00:00:00.000Z') })
+  }
+
+  override async claimNext(agentId: string, options?: MailboxClaimOptions) {
+    this.claims.push({ agentId, ...(options ? { options } : {}) })
+    return super.claimNext(agentId, options)
+  }
+
+  override async complete(messageId: string, status?: 'completed' | 'failed' | 'aborted', fence?: unknown) {
+    this.completeFences.push(fence)
+    return super.complete(messageId, status, fence as never)
   }
 }
 

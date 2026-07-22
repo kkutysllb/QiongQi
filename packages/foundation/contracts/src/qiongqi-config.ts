@@ -26,6 +26,7 @@ export const DEFAULT_QIONGQI_MODEL = 'deepseek-v4-pro'
 
 const PositiveInt = z.number().int().positive()
 const PositiveRatio = z.number().positive().max(1)
+const NonEmptyString = z.string().trim().min(1)
 
 export const ModelContextCompactionProfileConfigSchema = z
   .object({
@@ -137,7 +138,20 @@ export const RuntimeTuningConfigSchema = z
     eventedV2AgentGraph: AgentGraphSchema.optional(),
     eventedV2AgentPeers: z.record(z.string().min(1), z.string().min(1)).optional(),
     eventedV2RemoteAgent: z.object({
-      timeoutMs: PositiveInt.optional()
+      timeoutMs: PositiveInt.optional(),
+      leaseTtlMs: PositiveInt.optional(),
+      workerId: z.string().min(1).optional(),
+      scheduler: z.object({
+        enabled: z.boolean().optional(),
+        intervalMs: PositiveInt.optional()
+      }).strict().optional(),
+      compensation: z.object({
+        statusConditions: z.object({
+          completed: NonEmptyString.optional(),
+          failed: NonEmptyString.optional(),
+          aborted: NonEmptyString.optional()
+        }).strict().optional()
+      }).strict().optional()
     }).strict().optional(),
     modelStreamIdleTimeoutMs: PositiveInt.optional(),
     toolStorm: z

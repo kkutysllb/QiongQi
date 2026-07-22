@@ -68,7 +68,18 @@
       "specialist": "peer_specialist"
     },
     "eventedV2RemoteAgent": {
-      "timeoutMs": 30000
+      "timeoutMs": 30000,
+      "leaseTtlMs": 60000,
+      "scheduler": {
+        "enabled": false,
+        "intervalMs": 1000
+      },
+      "compensation": {
+        "statusConditions": {
+          "failed": "failed",
+          "aborted": "aborted"
+        }
+      }
     }
   },
   "models": {

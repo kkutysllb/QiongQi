@@ -136,6 +136,12 @@ export const MailboxMessageSchema = z.object({
   fromAgentId: NonEmptyString,
   toAgentId: NonEmptyString,
   status: z.enum(['queued', 'delivered', 'completed', 'failed', 'aborted']),
+  claimLease: z.object({
+    holderId: NonEmptyString,
+    expiresAt: NonEmptyString,
+    epoch: z.number().int().positive(),
+    token: NonEmptyString
+  }).strict().optional(),
   payload: z.object({ prompt: NonEmptyString }).passthrough(),
   createdAt: NonEmptyString,
   updatedAt: NonEmptyString

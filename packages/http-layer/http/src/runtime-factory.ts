@@ -41,6 +41,7 @@ import {
   EffectCommitCoordinator,
   EventedV2MultiAgentRuntime,
   EventedV2OutboxReconciler,
+  EventedV2RemoteAgentScheduler,
   EventedV2RemoteAgentWorker,
   KernelV3TurnRunner,
   ModelProposalRunner,
@@ -1592,8 +1593,17 @@ async function assembleRuntime(input: {
         runs: multiAgentRuns,
         peerInvoker: tools.peerRegistry,
         agentPeers: eventedV2AgentPeerBindings,
+        ...(options.runtime?.eventedV2RemoteAgent?.compensation !== undefined
+          ? { compensationPolicy: options.runtime.eventedV2RemoteAgent.compensation }
+          : {}),
         ...(options.runtime?.eventedV2RemoteAgent?.timeoutMs !== undefined
           ? { timeoutMs: options.runtime.eventedV2RemoteAgent.timeoutMs }
+          : {}),
+        ...(options.runtime?.eventedV2RemoteAgent?.leaseTtlMs !== undefined
+          ? {
+              leaseTtlMs: options.runtime.eventedV2RemoteAgent.leaseTtlMs,
+              workerId: options.runtime.eventedV2RemoteAgent.workerId ?? `evented_v2_remote_${process.pid}`
+            }
           : {})
       })
     : undefined
@@ -1610,6 +1620,21 @@ async function assembleRuntime(input: {
     : undefined
   if (eventedV2OutboxReconcilerConfig?.enabled) {
     multiAgentOutboxReconciler?.start()
+  }
+  const eventedV2RemoteAgentSchedulerConfig = options.runtime?.eventedV2RemoteAgent?.scheduler
+  const multiAgentRemoteScheduler = multiAgentRemoteWorker && eventedV2AgentPeerBindings
+    ? new EventedV2RemoteAgentScheduler({
+        worker: multiAgentRemoteWorker,
+        agentIds: Object.keys(eventedV2AgentPeerBindings),
+        intervalMs: eventedV2RemoteAgentSchedulerConfig?.intervalMs ?? 1000,
+        nowIso: core.nowIso,
+        onError: (error) => {
+          console.warn('[qiongqi] evented_v2 remote agent scheduling failed:', error)
+        }
+      })
+    : undefined
+  if (eventedV2RemoteAgentSchedulerConfig?.enabled) {
+    multiAgentRemoteScheduler?.start()
   }
   const currentCapabilities = () => {
     const config = configStore.snapshot?.() ?? qiongqiConfigFromRuntimeOptions(options)
@@ -1685,6 +1710,7 @@ async function assembleRuntime(input: {
     ...(multiAgentRuntime ? { multiAgentRuntime } : {}),
     ...(multiAgentOutboxReconciler ? { multiAgentOutboxReconciler } : {}),
     ...(multiAgentRemoteWorker ? { multiAgentRemoteWorker } : {}),
+    ...(multiAgentRemoteScheduler ? { multiAgentRemoteScheduler } : {}),
     eventBus: core.eventBus,
     sessionStore: core.sessionStore,
     events: core.events,
@@ -1768,6 +1794,7 @@ async function assembleRuntime(input: {
           try {
             core.userDataShutdown?.()
           } finally {
+            multiAgentRemoteScheduler?.stop()
             multiAgentOutboxReconciler?.stop()
           }
         }

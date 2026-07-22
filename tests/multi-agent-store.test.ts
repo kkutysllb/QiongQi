@@ -47,17 +47,19 @@ describe('multi-agent runtime stores', () => {
   })
 })
 
+let mailboxNowMs = Date.parse('2026-07-21T00:00:00.000Z')
+
 describe.each([
   ['memory', async () => ({
     runs: new InMemoryMultiAgentRunStore(),
-    mailbox: new InMemoryMailboxStore()
+    mailbox: new InMemoryMailboxStore({ nowMs: () => mailboxNowMs })
   })],
   ['file', async () => {
     const root = await mkdtemp(join(tmpdir(), 'qiongqi-multi-agent-'))
     return {
       root,
       runs: new FileMultiAgentRunStore(root),
-      mailbox: new FileMailboxStore(root)
+      mailbox: new FileMailboxStore(root, { nowMs: () => mailboxNowMs })
     }
   }]
 ] as const)('%s multi-agent stores', (_name, factory) => {
@@ -80,6 +82,34 @@ describe.each([
       await created.runs.delete('mar_1')
       expect(await created.runs.load('mar_1')).toBeUndefined()
     } finally {
+      if ('root' in created) await rm(created.root, { recursive: true, force: true })
+    }
+  })
+
+  it('leases claimed mailbox messages and makes expired claims available to another worker', async () => {
+    const created = await factory()
+    try {
+      await created.mailbox.enqueue(baseMessage())
+
+      const first = await created.mailbox.claimNext('researcher', { holderId: 'worker_a', ttlMs: 1000 })
+      expect(first).toMatchObject({
+        status: 'delivered',
+        claimLease: { holderId: 'worker_a', epoch: 1 }
+      })
+      await expect(created.mailbox.claimNext('researcher', { holderId: 'worker_b', ttlMs: 1000 })).resolves.toBeUndefined()
+
+      mailboxNowMs += 1001
+      const second = await created.mailbox.claimNext('researcher', { holderId: 'worker_b', ttlMs: 1000 })
+      expect(second).toMatchObject({
+        status: 'delivered',
+        claimLease: { holderId: 'worker_b', epoch: 2 }
+      })
+
+      await expect(created.mailbox.complete('msg_1', 'completed', first?.claimLease)).rejects.toThrow(/stale mailbox claim/i)
+      await created.mailbox.complete('msg_1', 'completed', second?.claimLease)
+      expect(await created.mailbox.listForRun('mar_1')).toMatchObject([{ status: 'completed' }])
+    } finally {
+      mailboxNowMs = Date.parse('2026-07-21T00:00:00.000Z')
       if ('root' in created) await rm(created.root, { recursive: true, force: true })
     }
   })

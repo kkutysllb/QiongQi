@@ -58,6 +58,8 @@ export type EventedV2AgentTaskContext = {
 export type EventedV2AgentWorkerOptions = {
   runtime: Pick<EventedV2MultiAgentRuntime, 'completeAgentTask'>
   mailbox: MailboxStore
+  workerId?: string
+  leaseTtlMs?: number
 }
 
 export type EventedV2AgentWorkerProcessResult = {
@@ -70,12 +72,19 @@ export type EventedV2PeerInvoker = {
   invokePeer(cardId: string, task: PeerTask, signal: AbortSignal): Promise<PeerArtifact>
 }
 
+export type EventedV2RemoteAgentCompensationPolicy = {
+  statusConditions?: Partial<Record<PeerArtifact['status'], string>>
+}
+
 export type EventedV2RemoteAgentWorkerOptions = {
   runtime: Pick<EventedV2MultiAgentRuntime, 'completeAgentTask'>
   mailbox: MailboxStore
   runs?: Pick<MultiAgentRunStore, 'load'>
   peerInvoker: EventedV2PeerInvoker
   agentPeers: Record<string, string>
+  compensationPolicy?: EventedV2RemoteAgentCompensationPolicy
+  workerId?: string
+  leaseTtlMs?: number
   timeoutMs?: number
   setTimeout?: (callback: () => void, ms: number) => unknown
   clearTimeout?: (timer: unknown) => void
@@ -86,6 +95,26 @@ export type EventedV2RemoteAgentWorkerProcessResult = EventedV2AgentWorkerProces
   peerStatus?: PeerArtifact['status']
 }
 
+export type EventedV2RemoteAgentSchedulerFlushResult = {
+  agentIds: string[]
+  agentsChecked: number
+  messagesProcessed: number
+  messageIds: string[]
+  startedAt: string
+  finishedAt: string
+}
+
+export type EventedV2RemoteAgentSchedulerOptions = {
+  worker: Pick<EventedV2RemoteAgentWorker, 'processNext'>
+  agentIds: string[]
+  intervalMs: number
+  nowIso: () => string
+  onFlush?: (result: EventedV2RemoteAgentSchedulerFlushResult) => void
+  onError?: (error: unknown) => void
+  setInterval?: (callback: () => void | Promise<void>, intervalMs: number) => unknown
+  clearInterval?: (timer: unknown) => void
+}
+
 export class EventedV2AgentWorker {
   constructor(private readonly options: EventedV2AgentWorkerOptions) {}
 
@@ -93,7 +122,10 @@ export class EventedV2AgentWorker {
     agentId: string
     handler: (context: EventedV2AgentTaskContext) => Promise<EventedV2AgentTaskResult>
   }): Promise<EventedV2AgentWorkerProcessResult> {
-    const message = await this.options.mailbox.claimNext(input.agentId)
+    const message = await this.options.mailbox.claimNext(input.agentId, mailboxClaimOptions({
+      workerId: this.options.workerId,
+      leaseTtlMs: this.options.leaseTtlMs
+    }))
     if (!message) return { processed: false }
     const result = await input.handler({ message })
     await this.options.runtime.completeAgentTask({
@@ -102,7 +134,7 @@ export class EventedV2AgentWorker {
       condition: result.condition ?? 'completed',
       summary: result.summary
     })
-    await this.options.mailbox.complete(message.messageId)
+    await this.options.mailbox.complete(message.messageId, undefined, message.claimLease)
     return { processed: true, runId: message.runId, messageId: message.messageId }
   }
 }
@@ -114,7 +146,10 @@ export class EventedV2RemoteAgentWorker {
     agentId: string
     signal?: AbortSignal
   }): Promise<EventedV2RemoteAgentWorkerProcessResult> {
-    const message = await this.options.mailbox.claimNext(input.agentId)
+    const message = await this.options.mailbox.claimNext(input.agentId, mailboxClaimOptions({
+      workerId: this.options.workerId,
+      leaseTtlMs: this.options.leaseTtlMs
+    }))
     if (!message) return { processed: false }
     const peerCardId = this.options.agentPeers[input.agentId]
     if (!peerCardId) throw new Error(`No peer binding configured for evented_v2 agent: ${input.agentId}`)
@@ -142,13 +177,13 @@ export class EventedV2RemoteAgentWorker {
     await this.options.runtime.completeAgentTask({
       runId: message.runId,
       agentId: input.agentId,
-      condition: conditionFromPeerArtifact(artifact),
+      condition: conditionFromPeerArtifact(artifact, this.options.compensationPolicy),
       status: artifact.status,
       summary: artifact.summary ?? artifact.error,
       error: artifact.error,
       peerArtifact: artifact
     })
-    await this.options.mailbox.complete(message.messageId, artifact.status)
+    await this.options.mailbox.complete(message.messageId, artifact.status, message.claimLease)
     return {
       processed: true,
       runId: message.runId,
@@ -156,6 +191,75 @@ export class EventedV2RemoteAgentWorker {
       peerCardId,
       peerStatus: artifact.status
     }
+  }
+}
+
+export class EventedV2RemoteAgentScheduler {
+  private timer: unknown
+  private inFlight: Promise<EventedV2RemoteAgentSchedulerFlushResult> | undefined
+
+  constructor(private readonly options: EventedV2RemoteAgentSchedulerOptions) {
+    if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
+      throw new Error(`EventedV2RemoteAgentScheduler intervalMs must be positive: ${options.intervalMs}`)
+    }
+  }
+
+  start(): void {
+    if (this.timer) return
+    const setTimer = this.options.setInterval ?? setInterval
+    this.timer = setTimer(() => {
+      void this.flushOnce().catch((error) => this.options.onError?.(error))
+    }, this.options.intervalMs)
+  }
+
+  stop(): void {
+    if (!this.timer) return
+    if (this.options.clearInterval) {
+      this.options.clearInterval(this.timer)
+    } else {
+      clearInterval(this.timer as ReturnType<typeof setInterval>)
+    }
+    this.timer = undefined
+  }
+
+  isRunning(): boolean {
+    return Boolean(this.timer)
+  }
+
+  async flushOnce(): Promise<EventedV2RemoteAgentSchedulerFlushResult> {
+    if (this.inFlight) return this.inFlight
+    this.inFlight = this.flushUnlocked()
+      .finally(() => {
+        this.inFlight = undefined
+      })
+    return this.inFlight
+  }
+
+  private async flushUnlocked(): Promise<EventedV2RemoteAgentSchedulerFlushResult> {
+    const startedAt = this.options.nowIso()
+    const messageIds: string[] = []
+    let messagesProcessed = 0
+    for (const agentId of this.options.agentIds) {
+      try {
+        const result = await this.options.worker.processNext({ agentId })
+        if (result.processed) {
+          messagesProcessed += 1
+          if (result.messageId) messageIds.push(result.messageId)
+        }
+      } catch (error) {
+        this.options.onError?.(error)
+      }
+    }
+    const result = {
+      agentIds: [...this.options.agentIds],
+      agentsChecked: this.options.agentIds.length,
+      messagesProcessed,
+      messageIds,
+      startedAt,
+      finishedAt: this.options.nowIso()
+    }
+    this.options.onFlush?.(result)
+    return result
   }
 }
 
@@ -771,7 +875,12 @@ function promptFromMailboxMessage(message: MailboxMessage): string {
   return typeof prompt === 'string' && prompt.trim() ? prompt : JSON.stringify(message.payload)
 }
 
-function conditionFromPeerArtifact(artifact: PeerArtifact): string {
+function conditionFromPeerArtifact(
+  artifact: PeerArtifact,
+  compensationPolicy?: EventedV2RemoteAgentCompensationPolicy
+): string {
+  const mappedCondition = compensationPolicy?.statusConditions?.[artifact.status]
+  if (mappedCondition) return mappedCondition
   return {
     completed: 'completed',
     failed: 'failed',
@@ -817,6 +926,14 @@ function remoteInvocationSignal(input: {
       input.signal?.removeEventListener('abort', abortFromParent)
     }
   }
+}
+
+function mailboxClaimOptions(input: {
+  workerId?: string
+  leaseTtlMs?: number
+}): { holderId: string; ttlMs: number } | undefined {
+  if (!input.workerId || input.leaseTtlMs === undefined) return undefined
+  return { holderId: input.workerId, ttlMs: input.leaseTtlMs }
 }
 
 function isAbortLikeError(error: unknown, signal: AbortSignal): boolean {

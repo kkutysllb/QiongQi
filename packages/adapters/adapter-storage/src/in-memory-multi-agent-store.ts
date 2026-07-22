@@ -1,5 +1,5 @@
 import { MailboxMessageSchema, MultiAgentRunSchema, type MailboxMessage, type MultiAgentRun } from '@qiongqi/contracts'
-import type { LeaseFence, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
+import type { LeaseFence, MailboxClaimOptions, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
 import { randomUUID } from 'node:crypto'
 
 type RunLease = { holderId: string; expiresAt: number; epoch: number; token: string }
@@ -148,6 +148,9 @@ function sameFence(lease: RunLease, fence: LeaseFence): boolean {
 
 export class InMemoryMailboxStore implements MailboxStore {
   private readonly messages = new Map<string, MailboxMessage>()
+  private readonly claimEpochs = new Map<string, number>()
+
+  constructor(private readonly options: { nowMs?: () => number } = {}) {}
 
   async enqueue(message: MailboxMessage): Promise<void> {
     const parsed = MailboxMessageSchema.parse(message)
@@ -159,26 +162,50 @@ export class InMemoryMailboxStore implements MailboxStore {
     this.messages.set(parsed.messageId, parsed)
   }
 
-  async claimNext(agentId: string): Promise<MailboxMessage | undefined> {
+  async claimNext(agentId: string, options?: MailboxClaimOptions): Promise<MailboxMessage | undefined> {
+    const now = this.nowMs()
     const queued = [...this.messages.values()]
-      .filter((message) => message.toAgentId === agentId && message.status === 'queued')
+      .filter((message) => message.toAgentId === agentId && claimableMailboxMessage(message, now))
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
     if (!queued) return undefined
-    const delivered = MailboxMessageSchema.parse({ ...queued, status: 'delivered', updatedAt: new Date().toISOString() })
+    const claimLease = options ? this.nextClaimLease(queued.messageId, options, now) : undefined
+    const delivered = MailboxMessageSchema.parse({
+      ...queued,
+      status: 'delivered',
+      ...(claimLease ? { claimLease } : {}),
+      updatedAt: new Date(now).toISOString()
+    })
     this.messages.set(delivered.messageId, delivered)
     return delivered
   }
 
-  async complete(messageId: string, status: 'completed' | 'failed' | 'aborted' = 'completed'): Promise<void> {
+  async complete(messageId: string, status: 'completed' | 'failed' | 'aborted' = 'completed', fence?: MailboxMessage['claimLease']): Promise<void> {
     const current = this.messages.get(messageId)
     if (!current) return
-    this.messages.set(messageId, MailboxMessageSchema.parse({ ...current, status, updatedAt: new Date().toISOString() }))
+    assertMailboxFence(current, fence)
+    const { claimLease: _claimLease, ...rest } = current
+    this.messages.set(messageId, MailboxMessageSchema.parse({ ...rest, status, updatedAt: new Date(this.nowMs()).toISOString() }))
   }
 
   async listForRun(runId: string): Promise<MailboxMessage[]> {
     return [...this.messages.values()]
       .filter((message) => message.runId === runId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
+  private nextClaimLease(messageId: string, options: MailboxClaimOptions, now: number): NonNullable<MailboxMessage['claimLease']> {
+    const epoch = (this.claimEpochs.get(messageId) ?? 0) + 1
+    this.claimEpochs.set(messageId, epoch)
+    return {
+      holderId: options.holderId,
+      expiresAt: new Date(now + Math.max(1, Math.floor(options.ttlMs))).toISOString(),
+      epoch,
+      token: randomUUID()
+    }
+  }
+
+  private nowMs(): number {
+    return this.options.nowMs?.() ?? Date.now()
   }
 }
 
@@ -195,4 +222,22 @@ function mailboxStatusRank(status: MailboxMessage['status']): number {
     aborted: 1,
     completed: 2
   }[status]
+}
+
+function claimableMailboxMessage(message: MailboxMessage, now: number): boolean {
+  if (message.status === 'queued') return true
+  return message.status === 'delivered' && Boolean(message.claimLease) && Date.parse(message.claimLease!.expiresAt) <= now
+}
+
+function assertMailboxFence(message: MailboxMessage, fence: MailboxMessage['claimLease'] | undefined): void {
+  if (!fence) return
+  const current = message.claimLease
+  if (
+    !current ||
+    current.holderId !== fence.holderId ||
+    current.epoch !== fence.epoch ||
+    current.token !== fence.token
+  ) {
+    throw new Error('Mailbox complete rejected by stale mailbox claim')
+  }
 }

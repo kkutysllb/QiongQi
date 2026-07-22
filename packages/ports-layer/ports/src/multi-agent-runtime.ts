@@ -1,6 +1,11 @@
 import type { MailboxMessage, MultiAgentRun } from '@qiongqi/contracts'
 import type { LeaseFence } from './runtime-kernel.js'
 
+export type MailboxClaimOptions = {
+  holderId: string
+  ttlMs: number
+}
+
 export type MultiAgentRunUpdateOptions = {
   fence?: LeaseFence
   expectedVersion?: number
@@ -30,7 +35,7 @@ export interface MultiAgentRunStore {
 
 export interface MailboxStore {
   enqueue(message: MailboxMessage): Promise<void>
-  claimNext(agentId: string): Promise<MailboxMessage | undefined>
-  complete(messageId: string, status?: 'completed' | 'failed' | 'aborted'): Promise<void>
+  claimNext(agentId: string, options?: MailboxClaimOptions): Promise<MailboxMessage | undefined>
+  complete(messageId: string, status?: 'completed' | 'failed' | 'aborted', fence?: MailboxMessage['claimLease']): Promise<void>
   listForRun(runId: string): Promise<MailboxMessage[]>
 }
