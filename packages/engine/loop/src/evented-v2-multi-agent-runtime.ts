@@ -19,6 +19,74 @@ export type EventedV2MultiAgentRuntimeOptions = {
   nowIso: () => string
 }
 
+export type EventedV2OutboxReconcilerFlushResult = {
+  runIds: string[]
+  runsFlushed: number
+  startedAt: string
+  finishedAt: string
+}
+
+export type EventedV2OutboxReconcilerOptions = {
+  runtime: Pick<EventedV2MultiAgentRuntime, 'flushAllPendingOutbox'>
+  intervalMs: number
+  nowIso: () => string
+  onFlush?: (result: EventedV2OutboxReconcilerFlushResult) => void
+  onError?: (error: unknown) => void
+  setInterval?: (callback: () => void | Promise<void>, intervalMs: number) => unknown
+  clearInterval?: (timer: unknown) => void
+}
+
+export class EventedV2OutboxReconciler {
+  private timer: unknown
+  private inFlight: Promise<EventedV2OutboxReconcilerFlushResult> | undefined
+
+  constructor(private readonly options: EventedV2OutboxReconcilerOptions) {
+    if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
+      throw new Error(`EventedV2OutboxReconciler intervalMs must be positive: ${options.intervalMs}`)
+    }
+  }
+
+  start(): void {
+    if (this.timer) return
+    const setTimer = this.options.setInterval ?? setInterval
+    this.timer = setTimer(() => {
+      void this.flushOnce().catch((error) => this.options.onError?.(error))
+    }, this.options.intervalMs)
+  }
+
+  stop(): void {
+    if (!this.timer) return
+    if (this.options.clearInterval) {
+      this.options.clearInterval(this.timer)
+    } else {
+      clearInterval(this.timer as ReturnType<typeof setInterval>)
+    }
+    this.timer = undefined
+  }
+
+  async flushOnce(): Promise<EventedV2OutboxReconcilerFlushResult> {
+    if (this.inFlight) return this.inFlight
+    this.inFlight = this.flushUnlocked()
+      .finally(() => {
+        this.inFlight = undefined
+      })
+    return this.inFlight
+  }
+
+  private async flushUnlocked(): Promise<EventedV2OutboxReconcilerFlushResult> {
+    const startedAt = this.options.nowIso()
+    const runs = await this.options.runtime.flushAllPendingOutbox()
+    const result = {
+      runIds: runs.map((run) => run.runId),
+      runsFlushed: runs.length,
+      startedAt,
+      finishedAt: this.options.nowIso()
+    }
+    this.options.onFlush?.(result)
+    return result
+  }
+}
+
 export class EventedV2MultiAgentRuntime {
   private readonly graph: AgentGraph
   private readonly runLocks = new Map<string, Promise<void>>()

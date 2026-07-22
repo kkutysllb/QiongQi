@@ -1,6 +1,6 @@
 # @qiongqi/loop — Orchestrator
 
-> `TurnOrchestrator` + `EventedTurnOrchestrator` + `EventedV2MultiAgentRuntime` + `LoopRunner` + `LoopPlan` + `LoopRun/TurnStateV2` + `TurnEventBus` + `InflightTracker` + `SteeringQueue` —— 回合编排器与多 Agent 编排 shell（classic / evented / evented_v2 / kernel_v3）。
+> `TurnOrchestrator` + `EventedTurnOrchestrator` + `EventedV2MultiAgentRuntime` + `EventedV2OutboxReconciler` + `LoopRunner` + `LoopPlan` + `LoopRun/TurnStateV2` + `TurnEventBus` + `InflightTracker` + `SteeringQueue` —— 回合编排器与多 Agent 编排 shell（classic / evented / evented_v2 / kernel_v3）。
 > Layer 4 — 依赖：`@qiongqi/contracts`、`@qiongqi/domain`、`@qiongqi/ports`、`@qiongqi/cache`、`@qiongqi/services`（type-only）、`@qiongqi/adapter-tools`、`@qiongqi/adapter-model`、`@qiongqi/attachments`、`@qiongqi/skills`、`@qiongqi/memory`。
 
 ---
@@ -14,6 +14,7 @@
 - **`TurnOrchestrator`** —— 经典命令式循环，组装 `PromptBuilder` / `ModelStepRunner` / `ContinuationPolicy` / `ToolCallCoordinator` 4 个子组件
 - **`EventedTurnOrchestrator`** —— `LoopRunner` 驱动的 evented loop shell + 崩溃恢复（`LoopRun` / `TurnStateV2` 持久化）
 - **`EventedV2MultiAgentRuntime`** —— `evented_v2` 的多 Agent 编排 shell，当前支持 durable run、mailbox、manager-to-specialist handoff，以及 run 内持久化 outbox + `flushPendingOutbox()` / `flushAllPendingOutbox()` 恢复投递
+- **`EventedV2OutboxReconciler`** —— 可嵌入 worker / server lifecycle 的周期性 outbox flush 外壳，提供 `flushOnce()` / `start()` / `stop()` 与 flush 结果回调
 - **`LoopPlan` / `LoopRunner` / `LoopEvaluator`** —— 声明式 phase spec、phase 解释器与确定性评估/重试策略
 - **`runOrchestratorStep`** —— classic 路径的共享 step 实现
 - **`TurnEventBus`** —— 进程内 pub/sub 事件总线（`on(kind, fn)` / `emit`）
@@ -30,6 +31,7 @@
 | `runOrchestratorStep` | function | `turn-orchestrator.ts` | classic step 纯函数 |
 | `EventedTurnOrchestrator` | class | `evented-turn-orchestrator.ts` | 事件驱动 + 崩溃恢复 |
 | `EventedV2MultiAgentRuntime` | class | `evented-v2-multi-agent-runtime.ts` | `evented_v2` 多 Agent 编排 shell；handoff 写入 run outbox，`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 可恢复 mailbox 投递 |
+| `EventedV2OutboxReconciler` | class | `evented-v2-multi-agent-runtime.ts` | 周期性调用 `flushAllPendingOutbox()`；提供 `onFlush` / `onError` 观测 hook |
 | `LoopPlan` / `LoopRun` | type | `loop-plan.ts` | 声明式 phase spec + 可序列化运行日志 |
 | `defaultLoopPlan` | function | `loop-plan.ts` | 默认 phase 序列与 step budget |
 | `LoopRunner` | class | `loop-runner.ts` | 按 `LoopPlan.phases` 解释 build/run/decide/evaluate/dispatch |
@@ -65,6 +67,7 @@
 - **`TurnStateV2` / `LoopRun` 含 `stepIndex` + `phaseCursor` + `events`** —— 崩溃恢复与审计日志的关键；`TurnStateV1` 只作为兼容读入格式。
 - **`EventedV2MultiAgentRuntime` 的 handoff 使用 durable outbox** —— run 事务提交 `handoff_requested` / `handoff_delivered` 与 `mailbox_enqueue` intent；提交后再投递 mailbox，并把 outbox 标记为 `published`。
 - **`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 是可重入恢复入口** —— 若进程在 run 提交后、mailbox enqueue 前/后崩溃，新的 runtime 实例可以重放 pending intent；`MultiAgentRunStore.listWithPendingOutbox()` 负责发现待恢复 run；`MailboxStore.enqueue` 对同一 message 保持幂等且不会把 delivered/completed 降级回 queued。
+- **`EventedV2OutboxReconciler` 是调度外壳，不是进程管理器** —— 它提供周期性 flush、停止与观测 hook；是否自动启动、间隔、错误上报与多实例部署策略由 server/worker lifecycle 装配层决定。
 - **`createPromptSubscriber` 是占位**（`turn-event-bus.ts`）—— Stage 3 未来扩展为 peer-style 协作。
 
 ### 4. 行为规约

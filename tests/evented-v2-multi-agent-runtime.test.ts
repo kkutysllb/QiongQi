@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FileMailboxStore, FileMultiAgentRunStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
 import type { AgentGraph, MultiAgentRun } from '@qiongqi/contracts'
-import { EventedV2MultiAgentRuntime, defaultManagerSpecialistGraph } from '@qiongqi/loop'
+import { EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, defaultManagerSpecialistGraph } from '@qiongqi/loop'
 import type { MultiAgentRunStore } from '@qiongqi/ports'
 
 describe('EventedV2MultiAgentRuntime', () => {
@@ -482,6 +482,59 @@ describe('EventedV2MultiAgentRuntime', () => {
   })
 })
 
+describe('EventedV2OutboxReconciler', () => {
+  it('flushes pending outbox runs and reports run ids', async () => {
+    const flushed: string[][] = []
+    const reconciler = new EventedV2OutboxReconciler({
+      runtime: {
+        flushAllPendingOutbox: async () => [
+          { ...minimalRun(), runId: 'mar_a' },
+          { ...minimalRun(), runId: 'mar_b' }
+        ]
+      },
+      intervalMs: 1000,
+      nowIso: fixedClock(),
+      onFlush: (result) => flushed.push(result.runIds)
+    })
+
+    const result = await reconciler.flushOnce()
+
+    expect(result).toMatchObject({ runsFlushed: 2, runIds: ['mar_a', 'mar_b'] })
+    expect(flushed).toEqual([['mar_a', 'mar_b']])
+  })
+
+  it('schedules and cancels periodic outbox flushes', async () => {
+    let callback: (() => void | Promise<void>) | undefined
+    let cleared: unknown
+    let flushes = 0
+    const reconciler = new EventedV2OutboxReconciler({
+      runtime: {
+        flushAllPendingOutbox: async () => {
+          flushes += 1
+          return []
+        }
+      },
+      intervalMs: 1000,
+      nowIso: fixedClock(),
+      setInterval: (fn, intervalMs) => {
+        expect(intervalMs).toBe(1000)
+        callback = fn
+        return 'timer_1'
+      },
+      clearInterval: (timer) => {
+        cleared = timer
+      }
+    })
+
+    reconciler.start()
+    await callback?.()
+    reconciler.stop()
+
+    expect(flushes).toBe(1)
+    expect(cleared).toBe('timer_1')
+  })
+})
+
 function fixedClock(): () => string {
   return () => '2026-07-21T00:00:00.000Z'
 }
@@ -489,6 +542,28 @@ function fixedClock(): () => string {
 function nextId(): (prefix: string) => string {
   let seq = 0
   return (prefix) => `${prefix}_${++seq}`
+}
+
+function minimalRun(): MultiAgentRun {
+  return {
+    version: 1,
+    runId: 'mar_1',
+    threadId: 'thread_1',
+    turnId: 'turn_1',
+    workspaceKey: 'workspace_1',
+    status: 'running',
+    graphId: 'graph_default',
+    activeNodeId: 'manager',
+    activeAgentStack: ['manager'],
+    branchStatus: {},
+    agentRuns: [],
+    events: [],
+    outbox: [],
+    retryCounters: {},
+    budgets: { stepsUsed: 0, toolCallsUsed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
+    createdAt: '2026-07-21T00:00:00.000Z',
+    updatedAt: '2026-07-21T00:00:00.000Z'
+  }
 }
 
 class FailFirstUpdateAfterMutateRunStore extends InMemoryMultiAgentRunStore implements MultiAgentRunStore {
