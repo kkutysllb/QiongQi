@@ -1,6 +1,6 @@
 # @qiongqi/loop — Orchestrator
 
-> `TurnOrchestrator` + `EventedTurnOrchestrator` + `LoopRunner` + `LoopPlan` + `LoopRun/TurnStateV2` + `TurnEventBus` + `InflightTracker` + `SteeringQueue` —— 回合编排器（classic / evented 双轨）。
+> `TurnOrchestrator` + `EventedTurnOrchestrator` + `EventedV2MultiAgentRuntime` + `LoopRunner` + `LoopPlan` + `LoopRun/TurnStateV2` + `TurnEventBus` + `InflightTracker` + `SteeringQueue` —— 回合编排器与多 Agent 编排 shell（classic / evented / evented_v2 / kernel_v3）。
 > Layer 4 — 依赖：`@qiongqi/contracts`、`@qiongqi/domain`、`@qiongqi/ports`、`@qiongqi/cache`、`@qiongqi/services`（type-only）、`@qiongqi/adapter-tools`、`@qiongqi/adapter-model`、`@qiongqi/attachments`、`@qiongqi/skills`、`@qiongqi/memory`。
 
 ---
@@ -13,6 +13,7 @@
 
 - **`TurnOrchestrator`** —— 经典命令式循环，组装 `PromptBuilder` / `ModelStepRunner` / `ContinuationPolicy` / `ToolCallCoordinator` 4 个子组件
 - **`EventedTurnOrchestrator`** —— `LoopRunner` 驱动的 evented loop shell + 崩溃恢复（`LoopRun` / `TurnStateV2` 持久化）
+- **`EventedV2MultiAgentRuntime`** —— `evented_v2` 的多 Agent 编排 shell，当前支持 durable run、mailbox 和 manager-to-specialist handoff
 - **`LoopPlan` / `LoopRunner` / `LoopEvaluator`** —— 声明式 phase spec、phase 解释器与确定性评估/重试策略
 - **`runOrchestratorStep`** —— classic 路径的共享 step 实现
 - **`TurnEventBus`** —— 进程内 pub/sub 事件总线（`on(kind, fn)` / `emit`）
@@ -28,6 +29,7 @@
 | `TurnOrchestratorOptions` | type | `turn-orchestrator.ts` | 30+ 依赖字段 |
 | `runOrchestratorStep` | function | `turn-orchestrator.ts` | classic step 纯函数 |
 | `EventedTurnOrchestrator` | class | `evented-turn-orchestrator.ts` | 事件驱动 + 崩溃恢复 |
+| `EventedV2MultiAgentRuntime` | class | `evented-v2-multi-agent-runtime.ts` | `evented_v2` 多 Agent 编排 shell |
 | `LoopPlan` / `LoopRun` | type | `loop-plan.ts` | 声明式 phase spec + 可序列化运行日志 |
 | `defaultLoopPlan` | function | `loop-plan.ts` | 默认 phase 序列与 step budget |
 | `LoopRunner` | class | `loop-runner.ts` | 按 `LoopPlan.phases` 解释 build/run/decide/evaluate/dispatch |
@@ -40,7 +42,7 @@
 | `TurnStateV1` / `TurnStateV2` | type | `turn-event-types.ts` | legacy 状态 + 当前 `LoopRun` 状态别名 |
 | `TurnStateSerializer` | interface | `turn-event-types.ts` | `save` / `load` / `delete` / `list` |
 | `FileTurnStateStore` | class | `turn-state-store.ts` | 文件持久化（`<dataDir>/<threadId>/turns/<turnId>/state.json`）|
-| `ORCHESTRATION_MODES` | const | `turn-event-types.ts` | `['classic', 'evented']` |
+| `ORCHESTRATION_MODES` | const | `turn-event-types.ts` | `['classic', 'evented', 'evented_v2', 'kernel_v3']` |
 | `OrchestrationMode` | type | `turn-event-types.ts` | 同上 |
 | `InflightTracker` | class | `inflight-tracker.ts` | inflight 资源跟踪 |
 | `InflightKind` | type | `inflight-tracker.ts` | `'model' \| 'tool'` |
@@ -124,7 +126,7 @@ const drained = steering.drain() // ['Actually, focus on the security issues']
 
 ### 6. 关联文档
 
-- 架构文档：[`../architecture.zh.md#4-关键架构决策`](../architecture.zh.md#4-关键架构决策)（§4.4 OrchestrationMode 双轨）
-- 消费方：`@qiongqi/http` 的 `createAgent` 选 classic/evented；`@qiongqi/delegation` 的 `ChildAgentExecutor` 装配独立 orchestrator
+- 架构文档：[`../architecture.zh.md#4-关键架构决策`](../architecture.zh.md#4-关键架构决策)（§4.4 OrchestrationMode：classic / evented_v2 / kernel_v3）
+- 消费方：`@qiongqi/http` 的 `createAgent` 选择 classic / evented / evented_v2 / kernel_v3；`@qiongqi/delegation` 的 `ChildAgentExecutor` 装配独立 orchestrator
 - 源文件：[`turn-orchestrator.ts`](../../packages/loop/src/turn-orchestrator.ts)、[`evented-turn-orchestrator.ts`](../../packages/loop/src/evented-turn-orchestrator.ts)、[`loop-plan.ts`](../../packages/loop/src/loop-plan.ts)、[`loop-runner.ts`](../../packages/loop/src/loop-runner.ts)、[`loop-evaluator.ts`](../../packages/loop/src/loop-evaluator.ts)、[`turn-event-bus.ts`](../../packages/loop/src/turn-event-bus.ts)、[`turn-event-types.ts`](../../packages/loop/src/turn-event-types.ts)、[`turn-state-store.ts`](../../packages/loop/src/turn-state-store.ts)、[`inflight-tracker.ts`](../../packages/loop/src/inflight-tracker.ts)、[`steering-queue.ts`](../../packages/loop/src/steering-queue.ts)
 - 验证脚本：[`../../scripts/verify-crash-recovery.mjs`](../../scripts/verify-crash-recovery.mjs)（端到端崩溃恢复）
