@@ -48,6 +48,27 @@ export class FileMultiAgentRunStore implements MultiAgentRunStore {
 
   async save(run: MultiAgentRun): Promise<void> {
     const parsed = MultiAgentRunSchema.parse(run)
+    const runId = safeSegment(parsed.runId, 'runId')
+    await withFileLock(this.runLockPath(runId), async () => {
+      await this.saveParsed(parsed)
+    })
+  }
+
+  async update(runId: string, mutate: (current: MultiAgentRun) => MultiAgentRun | Promise<MultiAgentRun>): Promise<MultiAgentRun> {
+    const safeRunId = safeSegment(runId, 'runId')
+    return withFileLock(this.runLockPath(safeRunId), async () => {
+      const current = (await this.findRunFiles(safeRunId))[0]?.run
+      if (!current) throw new Error(`MultiAgentRun not found: ${safeRunId}`)
+      const next = MultiAgentRunSchema.parse(await mutate(current))
+      if (next.runId !== safeRunId) {
+        throw new Error(`MultiAgentRun update cannot change runId: ${next.runId} !== ${safeRunId}`)
+      }
+      await this.saveParsed(next)
+      return next
+    })
+  }
+
+  private async saveParsed(parsed: MultiAgentRun): Promise<void> {
     const threadId = safeSegment(parsed.threadId, 'threadId')
     const runId = safeSegment(parsed.runId, 'runId')
     const existingFiles = await this.findRunFiles(runId)
@@ -76,8 +97,10 @@ export class FileMultiAgentRunStore implements MultiAgentRunStore {
 
   async delete(runId: string): Promise<void> {
     const safeRunId = safeSegment(runId, 'runId')
-    const existingFiles = await this.findRunFiles(safeRunId)
-    await Promise.all(existingFiles.map((existing) => rm(existing.path, { force: true })))
+    await withFileLock(this.runLockPath(safeRunId), async () => {
+      const existingFiles = await this.findRunFiles(safeRunId)
+      await Promise.all(existingFiles.map((existing) => rm(existing.path, { force: true })))
+    })
   }
 
   private async findRunFiles(runId: string): Promise<Array<{ path: string, run: MultiAgentRun, threadId: string }>> {
@@ -97,6 +120,10 @@ export class FileMultiAgentRunStore implements MultiAgentRunStore {
     }
     return runs
   }
+
+  private runLockPath(runId: string): string {
+    return join(this.rootDir, 'multi-agent-run-locks', `${safeSegment(runId, 'runId')}.json`)
+  }
 }
 
 export class FileMailboxStore implements MailboxStore {
@@ -104,7 +131,13 @@ export class FileMailboxStore implements MailboxStore {
 
   async enqueue(message: MailboxMessage): Promise<void> {
     const parsed = MailboxMessageSchema.parse(message)
-    await this.write(parsed)
+    await withFileLock(this.messageLockPath(parsed), async () => {
+      const existing = await this.readMessage(parsed).catch((error) => {
+        if (isNoEntry(error)) return undefined
+        throw error
+      })
+      await this.write(existing ? preserveMailboxProgress(existing, parsed) : parsed)
+    })
   }
 
   async claimNext(agentId: string): Promise<MailboxMessage | undefined> {
@@ -114,9 +147,13 @@ export class FileMailboxStore implements MailboxStore {
         .filter((message) => message.toAgentId === agentId && message.status === 'queued')
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
       if (!queued) return undefined
-      const delivered = MailboxMessageSchema.parse({ ...queued, status: 'delivered', updatedAt: new Date().toISOString() })
-      await this.write(delivered)
-      return delivered
+      return withFileLock(this.messageLockPath(queued), async () => {
+        const current = await this.readMessage(queued)
+        if (current.status !== 'queued' || current.toAgentId !== agentId) return undefined
+        const delivered = MailboxMessageSchema.parse({ ...current, status: 'delivered', updatedAt: new Date().toISOString() })
+        await this.write(delivered)
+        return delivered
+      })
     })
   }
 
@@ -125,7 +162,14 @@ export class FileMailboxStore implements MailboxStore {
     const all = await this.listAll()
     const current = all.find((message) => message.messageId === messageId)
     if (!current) return
-    await this.write(MailboxMessageSchema.parse({ ...current, status: 'completed', updatedAt: new Date().toISOString() }))
+    await withFileLock(this.messageLockPath(current), async () => {
+      const latest = await this.readMessage(current).catch((error) => {
+        if (isNoEntry(error)) return undefined
+        throw error
+      })
+      if (!latest) return
+      await this.write(MailboxMessageSchema.parse({ ...latest, status: 'completed', updatedAt: new Date().toISOString() }))
+    })
   }
 
   async listForRun(runId: string): Promise<MailboxMessage[]> {
@@ -139,6 +183,18 @@ export class FileMailboxStore implements MailboxStore {
     const messageId = safeSegment(message.messageId, 'messageId')
     const dir = join(this.rootDir, 'mailbox', runId)
     await atomicWriteFile(join(dir, `${messageId}.json`), JSON.stringify(message, null, 2))
+  }
+
+  private async readMessage(message: MailboxMessage): Promise<MailboxMessage> {
+    const runId = safeSegment(message.runId, 'runId')
+    const messageId = safeSegment(message.messageId, 'messageId')
+    return readMessageFile(join(this.rootDir, 'mailbox', runId, `${messageId}.json`))
+  }
+
+  private messageLockPath(message: MailboxMessage): string {
+    const runId = safeSegment(message.runId, 'runId')
+    const messageId = safeSegment(message.messageId, 'messageId')
+    return join(this.rootDir, 'mailbox-message-locks', runId, `${messageId}.json`)
   }
 
   private async listAll(): Promise<MailboxMessage[]> {
@@ -160,4 +216,19 @@ export class FileMailboxStore implements MailboxStore {
     const digest = createHash('sha256').update(agentId).digest('hex')
     return join(this.rootDir, 'mailbox-claims', `${digest}.json`)
   }
+}
+
+function preserveMailboxProgress(existing: MailboxMessage, incoming: MailboxMessage): MailboxMessage {
+  if (mailboxStatusRank(existing.status) >= mailboxStatusRank(incoming.status)) return existing
+  return incoming
+}
+
+function mailboxStatusRank(status: MailboxMessage['status']): number {
+  return {
+    queued: 0,
+    delivered: 1,
+    failed: 1,
+    aborted: 1,
+    completed: 2
+  }[status]
 }

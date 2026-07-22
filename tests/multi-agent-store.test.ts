@@ -13,6 +13,14 @@ describe('multi-agent runtime stores', () => {
     const runStore: MultiAgentRunStore = {
       save: async (run) => { runs.push(run) },
       load: async (runId) => runs.find((run) => run.runId === runId),
+      update: async (runId, mutate) => {
+        const current = runs.find((run) => run.runId === runId)
+        if (!current) throw new Error(`MultiAgentRun not found: ${runId}`)
+        const next = await mutate(current)
+        const index = runs.findIndex((run) => run.runId === runId)
+        runs[index] = next
+        return next
+      },
       listByThread: async (threadId) => runs.filter((run) => run.threadId === threadId),
       delete: async (runId) => {
         const index = runs.findIndex((run) => run.runId === runId)
@@ -68,6 +76,45 @@ describe.each([
 
       await created.runs.delete('mar_1')
       expect(await created.runs.load('mar_1')).toBeUndefined()
+    } finally {
+      if ('root' in created) await rm(created.root, { recursive: true, force: true })
+    }
+  })
+
+  it('serializes concurrent run updates through the store', async () => {
+    const created = await factory()
+    try {
+      await created.runs.save(baseRun())
+
+      await Promise.all([
+        created.runs.update('mar_1', async (run) => ({
+          ...run,
+          agentRuns: [...run.agentRuns, {
+            agentRunId: 'agent_run_a',
+            agentId: 'agent_a',
+            nodeId: 'node_a',
+            status: 'queued',
+            startedAt: '2026-07-21T00:00:01.000Z',
+            updatedAt: '2026-07-21T00:00:01.000Z'
+          }]
+        })),
+        created.runs.update('mar_1', async (run) => ({
+          ...run,
+          agentRuns: [...run.agentRuns, {
+            agentRunId: 'agent_run_b',
+            agentId: 'agent_b',
+            nodeId: 'node_b',
+            status: 'queued',
+            startedAt: '2026-07-21T00:00:02.000Z',
+            updatedAt: '2026-07-21T00:00:02.000Z'
+          }]
+        }))
+      ])
+
+      expect((await created.runs.load('mar_1'))?.agentRuns.map((agentRun) => agentRun.agentId).sort()).toEqual([
+        'agent_a',
+        'agent_b'
+      ])
     } finally {
       if ('root' in created) await rm(created.root, { recursive: true, force: true })
     }
@@ -157,6 +204,21 @@ describe('file multi-agent store persistence behavior', () => {
       ])
 
       expect(claimed.filter(Boolean)).toHaveLength(1)
+      expect(await mailbox.listForRun('mar_1')).toMatchObject([{ messageId: 'msg_1', status: 'delivered' }])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not let a late file mailbox enqueue downgrade a delivered message', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-multi-agent-'))
+    const mailbox = new FileMailboxStore(root)
+    try {
+      await mailbox.enqueue(baseMessage())
+      expect(await mailbox.claimNext('researcher')).toMatchObject({ messageId: 'msg_1', status: 'delivered' })
+
+      await mailbox.enqueue(baseMessage())
+
       expect(await mailbox.listForRun('mar_1')).toMatchObject([{ messageId: 'msg_1', status: 'delivered' }])
     } finally {
       await rm(root, { recursive: true, force: true })

@@ -86,8 +86,22 @@ export class EventedV2MultiAgentRuntime {
     targetAgentId: string
     prompt: string
   }): Promise<MultiAgentRun> {
-    const current = await this.options.runs.load(input.runId)
-    if (!current) throw new Error(`MultiAgentRun not found: ${input.runId}`)
+    let pendingMessage: MailboxMessage | undefined
+    const next = await this.options.runs.update(input.runId, async (current) => {
+      const result = await this.applyHandoff(current, input)
+      pendingMessage = result.message
+      return result.run
+    })
+    if (pendingMessage) await this.options.mailbox.enqueue(pendingMessage)
+    return next
+  }
+
+  private async applyHandoff(current: MultiAgentRun, input: {
+    runId: string
+    sourceAgentId: string
+    targetAgentId: string
+    prompt: string
+  }): Promise<{ run: MultiAgentRun, message?: MailboxMessage }> {
     if (current.graphId !== this.graph.graphId) {
       throw new Error(`MultiAgentRun graph mismatch: ${current.graphId} !== ${this.graph.graphId}`)
     }
@@ -97,17 +111,33 @@ export class EventedV2MultiAgentRuntime {
       message.payload.prompt === input.prompt &&
       ['queued', 'delivered', 'completed'].includes(message.status)
     )
+    const idempotencyKey = handoffIdempotencyKey({
+      graphId: current.graphId,
+      runId: current.runId,
+      sourceAgentId: input.sourceAgentId,
+      targetAgentId: input.targetAgentId,
+      prompt: input.prompt
+    })
+    const envelopeId = existingMessage?.envelopeId ?? `env_${idempotencyKey}`
     const activeNode = requireGraphNode(this.graph, current.activeNodeId)
     const activeStackAgentId = current.activeAgentStack.at(-1)
     if (
-      existingMessage &&
       activeNode.kind === 'agent' &&
       activeNode.agentId === input.targetAgentId &&
       activeStackAgentId === input.targetAgentId
     ) {
-      const next = MultiAgentRunSchema.parse(current)
-      await this.options.runs.save(next)
-      return next
+      const deliveredEventExists = current.events.some((event) =>
+        event.type === 'handoff_delivered' &&
+        event.agentId === input.targetAgentId &&
+        event.envelopeId === envelopeId
+      )
+      if (existingMessage || deliveredEventExists) {
+        const run = MultiAgentRunSchema.parse(current)
+        return {
+          run,
+          message: existingMessage ? undefined : this.createHandoffMessage(run, input, envelopeId)
+        }
+      }
     }
     if (activeNode.kind !== 'agent') throw new Error(`Handoff active node must be agent: ${activeNode.id}`)
     if (activeNode.agentId !== input.sourceAgentId) {
@@ -131,39 +161,6 @@ export class EventedV2MultiAgentRuntime {
       throw new Error(`Handoff accepted target mismatch: ${targetNode.agentId} !== ${input.targetAgentId}`)
     }
     const now = this.options.nowIso()
-    const idempotencyKey = handoffIdempotencyKey({
-      graphId: current.graphId,
-      runId: current.runId,
-      sourceAgentId: input.sourceAgentId,
-      targetAgentId: input.targetAgentId,
-      prompt: input.prompt
-    })
-    const envelopeId = existingMessage?.envelopeId ?? `env_${idempotencyKey}`
-    if (!existingMessage) {
-      const envelope = TaskEnvelopeSchema.parse({
-        envelopeId,
-        kind: 'handoff',
-        sourceAgentId: input.sourceAgentId,
-        targetAgentId: input.targetAgentId,
-        threadId: current.threadId,
-        turnId: current.turnId,
-        parentRunId: current.runId,
-        payload: { prompt: input.prompt },
-        createdAt: now
-      })
-      const message: MailboxMessage = MailboxMessageSchema.parse({
-        messageId: `msg_${idempotencyKey}`,
-        envelopeId: envelope.envelopeId,
-        runId: current.runId,
-        fromAgentId: input.sourceAgentId,
-        toAgentId: input.targetAgentId,
-        status: 'queued',
-        payload: envelope.payload,
-        createdAt: now,
-        updatedAt: now
-      })
-      await this.options.mailbox.enqueue(message)
-    }
     const hasTargetAgentRun = current.agentRuns.some((agentRun) =>
       agentRun.agentId === targetNode.agentId && agentRun.nodeId === targetNode.id
     )
@@ -212,8 +209,40 @@ export class EventedV2MultiAgentRuntime {
       ],
       updatedAt: now
     })
-    await this.options.runs.save(next)
-    return next
+    return {
+      run: next,
+      message: existingMessage ? undefined : this.createHandoffMessage(next, input, envelopeId)
+    }
+  }
+
+  private createHandoffMessage(run: MultiAgentRun, input: {
+    sourceAgentId: string
+    targetAgentId: string
+    prompt: string
+  }, envelopeId: string): MailboxMessage {
+    const now = this.options.nowIso()
+    const envelope = TaskEnvelopeSchema.parse({
+      envelopeId,
+      kind: 'handoff',
+      sourceAgentId: input.sourceAgentId,
+      targetAgentId: input.targetAgentId,
+      threadId: run.threadId,
+      turnId: run.turnId,
+      parentRunId: run.runId,
+      payload: { prompt: input.prompt },
+      createdAt: now
+    })
+    return MailboxMessageSchema.parse({
+      messageId: `msg_${envelopeId.replace(/^env_/, '')}`,
+      envelopeId: envelope.envelopeId,
+      runId: run.runId,
+      fromAgentId: input.sourceAgentId,
+      toAgentId: input.targetAgentId,
+      status: 'queued',
+      payload: envelope.payload,
+      createdAt: now,
+      updatedAt: now
+    })
   }
 
   private async withRunLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {

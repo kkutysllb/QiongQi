@@ -1,5 +1,8 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
+import { FileMailboxStore, FileMultiAgentRunStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
 import type { AgentGraph, MultiAgentRun } from '@qiongqi/contracts'
 import { EventedV2MultiAgentRuntime, defaultManagerSpecialistGraph } from '@qiongqi/loop'
 import type { MultiAgentRunStore } from '@qiongqi/ports'
@@ -160,8 +163,8 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(await runs.load(run.runId)).toEqual(run)
   })
 
-  it('recovers a handoff after mailbox enqueue succeeds but run save fails once', async () => {
-    const runs = new FailSecondSaveOnceRunStore()
+  it('does not expose a mailbox message when the run update fails', async () => {
+    const runs = new FailFirstUpdateAfterMutateRunStore()
     const mailbox = new InMemoryMailboxStore()
     const runtime = new EventedV2MultiAgentRuntime({
       runs,
@@ -182,7 +185,38 @@ describe('EventedV2MultiAgentRuntime', () => {
       sourceAgentId: 'manager',
       targetAgentId: 'researcher',
       prompt: 'Summarize the current evented loop.'
-    })).rejects.toThrow('save failed once')
+    })).rejects.toThrow('update failed once')
+
+    expect(await mailbox.listForRun(run.runId)).toEqual([])
+    expect(await runs.load(run.runId)).toEqual(run)
+  })
+
+  it('recovers a handoff after run update succeeds but mailbox enqueue fails once', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new FailFirstEnqueueMailboxStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph: defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' }),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+
+    await expect(runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize the current evented loop.'
+    })).rejects.toThrow('enqueue failed once')
+
+    expect(await mailbox.listForRun(run.runId)).toEqual([])
+    expect((await runs.load(run.runId))?.activeAgentStack).toEqual(['manager', 'researcher'])
 
     const next = await runtime.handoff({
       runId: run.runId,
@@ -197,6 +231,40 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(next.activeAgentStack).toEqual(['manager', 'researcher'])
     expect(next.agentRuns.filter((agentRun) => agentRun.agentId === 'researcher')).toHaveLength(1)
     expect(next.events.filter((event) => event.type === 'handoff_delivered')).toHaveLength(1)
+  })
+
+  it('does not requeue a handoff message that another worker already claimed', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph: defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' }),
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize the current evented loop.'
+    })
+    expect(await mailbox.claimNext('researcher')).toMatchObject({ status: 'delivered' })
+
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize the current evented loop.'
+    })
+
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'delivered' }])
   })
 
   it('keeps concurrent identical handoffs idempotent for the same run', async () => {
@@ -239,6 +307,60 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(saved?.events.filter((event) => event.type === 'handoff_delivered')).toHaveLength(1)
   })
 
+  it('keeps file-backed handoffs atomic across runtime instances', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-evented-v2-runtime-'))
+    const runs = new FileMultiAgentRunStore(root)
+    const mailbox = new FileMailboxStore(root)
+    const graph = defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' })
+    const runtimeA = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const runtimeB = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    try {
+      const run = await runtimeA.start({
+        threadId: 'thread_1',
+        turnId: 'turn_1',
+        workspaceKey: 'workspace_1',
+        prompt: 'Research evented v2.'
+      })
+
+      await Promise.all([
+        runtimeA.handoff({
+          runId: run.runId,
+          sourceAgentId: 'manager',
+          targetAgentId: 'researcher',
+          prompt: 'Summarize the current evented loop.'
+        }),
+        runtimeB.handoff({
+          runId: run.runId,
+          sourceAgentId: 'manager',
+          targetAgentId: 'researcher',
+          prompt: 'Summarize the current evented loop.'
+        })
+      ])
+
+      const messages = await mailbox.listForRun(run.runId)
+      const saved = await runs.load(run.runId)
+      expect(messages).toHaveLength(1)
+      expect(saved?.activeAgentStack).toEqual(['manager', 'researcher'])
+      expect(saved?.agentRuns.filter((agentRun) => agentRun.agentId === 'researcher')).toHaveLength(1)
+      expect(saved?.events.filter((event) => event.type === 'handoff_requested')).toHaveLength(1)
+      expect(saved?.events.filter((event) => event.type === 'handoff_delivered')).toHaveLength(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('returns a compact trace for observability', async () => {
     const runtime = new EventedV2MultiAgentRuntime({
       runs: new InMemoryMultiAgentRunStore(),
@@ -277,12 +399,27 @@ function nextId(): (prefix: string) => string {
   return (prefix) => `${prefix}_${++seq}`
 }
 
-class FailSecondSaveOnceRunStore extends InMemoryMultiAgentRunStore implements MultiAgentRunStore {
-  private saves = 0
+class FailFirstUpdateAfterMutateRunStore extends InMemoryMultiAgentRunStore implements MultiAgentRunStore {
+  private updates = 0
 
-  async save(run: MultiAgentRun): Promise<void> {
-    this.saves += 1
-    if (this.saves === 2) throw new Error('save failed once')
-    await super.save(run)
+  async update(runId: string, mutate: (current: MultiAgentRun) => MultiAgentRun | Promise<MultiAgentRun>): Promise<MultiAgentRun> {
+    this.updates += 1
+    if (this.updates === 1) {
+      const current = await this.load(runId)
+      if (!current) throw new Error(`MultiAgentRun not found: ${runId}`)
+      await mutate(current)
+      throw new Error('update failed once')
+    }
+    return super.update(runId, mutate)
+  }
+}
+
+class FailFirstEnqueueMailboxStore extends InMemoryMailboxStore {
+  private enqueues = 0
+
+  async enqueue(message: Parameters<InMemoryMailboxStore['enqueue']>[0]): Promise<void> {
+    this.enqueues += 1
+    if (this.enqueues === 1) throw new Error('enqueue failed once')
+    return super.enqueue(message)
   }
 }
