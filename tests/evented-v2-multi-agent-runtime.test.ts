@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { FileMailboxStore, FileMultiAgentRunStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
 import type { AgentGraph, MultiAgentRun } from '@qiongqi/contracts'
 import { EventedV2AgentWorker, EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, defaultManagerSpecialistGraph } from '@qiongqi/loop'
-import type { MultiAgentRunStore } from '@qiongqi/ports'
+import type { LeaseFence, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
 
 describe('EventedV2MultiAgentRuntime', () => {
   it('starts a durable multi-agent run without changing single-agent behavior', async () => {
@@ -527,6 +527,31 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(saved?.events.map((event) => event.type)).toContain('run_completed')
   })
 
+  it('uses store lease fencing when completing an agent task', async () => {
+    const runs = new FenceRequiredMultiAgentRunStore()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new InMemoryMailboxStore(),
+      graph: defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' }),
+      ids: nextId(),
+      nowIso: fixedClock(),
+      leaseHolderId: 'worker_a',
+      leaseTtlMs: 60_000
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Use a fenced update.'
+    })
+
+    await runtime.completeAgentTask({ runId: run.runId, agentId: 'manager', condition: 'handoff' })
+
+    expect(runs.acquireCalls).toEqual([{ runId: run.runId, holderId: 'worker_a', ttlMs: 60_000 }])
+    expect(runs.updateFences).toHaveLength(1)
+    expect(runs.releaseCalls).toEqual([{ runId: run.runId, holderId: 'worker_a' }])
+  })
+
   it('suspends the run when graph advancement reaches an external wait node', async () => {
     const runs = new InMemoryMultiAgentRunStore()
     const runtime = new EventedV2MultiAgentRuntime({
@@ -847,6 +872,32 @@ class FailFirstUpdateAfterMutateRunStore extends InMemoryMultiAgentRunStore impl
       throw new Error('update failed once')
     }
     return super.update(runId, mutate)
+  }
+}
+
+class FenceRequiredMultiAgentRunStore extends InMemoryMultiAgentRunStore {
+  readonly acquireCalls: Array<{ runId: string; holderId: string; ttlMs: number }> = []
+  readonly releaseCalls: Array<{ runId: string; holderId: string }> = []
+  readonly updateFences: LeaseFence[] = []
+
+  override async acquireLease(runId: string, holderId: string, ttlMs: number): Promise<{ acquired: boolean; expiresAt?: string; fence?: LeaseFence }> {
+    this.acquireCalls.push({ runId, holderId, ttlMs })
+    return super.acquireLease(runId, holderId, ttlMs)
+  }
+
+  override async releaseLease(runId: string, holderId: string, fence?: LeaseFence): Promise<void> {
+    this.releaseCalls.push({ runId, holderId })
+    return super.releaseLease(runId, holderId, fence)
+  }
+
+  override async update(
+    runId: string,
+    mutate: (current: MultiAgentRun) => MultiAgentRun | Promise<MultiAgentRun>,
+    options: MultiAgentRunUpdateOptions = {}
+  ): Promise<MultiAgentRun> {
+    if (!options.fence) throw new Error('test store requires a lease fence')
+    this.updateFences.push(options.fence)
+    return super.update(runId, mutate, options)
   }
 }
 

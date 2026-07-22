@@ -121,6 +121,62 @@ describe.each([
     }
   })
 
+  it('enforces run lease fencing for stale cross-worker updates', async () => {
+    const created = await factory()
+    try {
+      await created.runs.save(baseRun())
+
+      const first = await created.runs.acquireLease?.('mar_1', 'worker_a', 60_000)
+      expect(first).toMatchObject({ acquired: true })
+      expect(first?.fence).toBeDefined()
+      const blocked = await created.runs.acquireLease?.('mar_1', 'worker_b', 60_000)
+      expect(blocked).toMatchObject({ acquired: false })
+
+      await created.runs.update('mar_1', (run) => ({
+        ...run,
+        status: 'suspended',
+        updatedAt: '2026-07-21T00:00:01.000Z'
+      }), { fence: first?.fence })
+
+      await created.runs.releaseLease?.('mar_1', 'worker_a', first?.fence)
+      const second = await created.runs.acquireLease?.('mar_1', 'worker_b', 60_000)
+      expect(second).toMatchObject({ acquired: true })
+      expect(second?.fence?.epoch).toBeGreaterThan(first?.fence?.epoch ?? 0)
+
+      await expect(created.runs.update('mar_1', (run) => ({
+        ...run,
+        status: 'completed',
+        updatedAt: '2026-07-21T00:00:02.000Z'
+      }), { fence: first?.fence })).rejects.toThrow(/stale lease fence/i)
+    } finally {
+      if ('root' in created) await rm(created.root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects compare-and-swap updates with a stale run version', async () => {
+    const created = await factory()
+    try {
+      await created.runs.save(baseRun())
+      const initialVersion = await created.runs.loadVersion?.('mar_1')
+      expect(initialVersion).toBe(0)
+
+      await created.runs.update('mar_1', (run) => ({
+        ...run,
+        status: 'suspended',
+        updatedAt: '2026-07-21T00:00:01.000Z'
+      }), { expectedVersion: initialVersion })
+
+      expect(await created.runs.loadVersion?.('mar_1')).toBe(1)
+      await expect(created.runs.update('mar_1', (run) => ({
+        ...run,
+        status: 'completed',
+        updatedAt: '2026-07-21T00:00:02.000Z'
+      }), { expectedVersion: initialVersion })).rejects.toThrow(/version/i)
+    } finally {
+      if ('root' in created) await rm(created.root, { recursive: true, force: true })
+    }
+  })
+
   it('lists runs with pending outbox intents for reconciliation', async () => {
     const created = await factory()
     try {

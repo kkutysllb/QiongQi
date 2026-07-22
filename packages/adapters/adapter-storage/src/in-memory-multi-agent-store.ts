@@ -1,27 +1,87 @@
 import { MailboxMessageSchema, MultiAgentRunSchema, type MailboxMessage, type MultiAgentRun } from '@qiongqi/contracts'
-import type { MailboxStore, MultiAgentRunStore } from '@qiongqi/ports'
+import type { LeaseFence, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
+import { randomUUID } from 'node:crypto'
+
+type RunLease = { holderId: string; expiresAt: number; epoch: number; token: string }
 
 export class InMemoryMultiAgentRunStore implements MultiAgentRunStore {
   private readonly runs = new Map<string, MultiAgentRun>()
   private readonly runLocks = new Map<string, Promise<void>>()
+  private readonly versions = new Map<string, number>()
+  private readonly leases = new Map<string, RunLease>()
+  private readonly leaseEpochs = new Map<string, number>()
 
   async save(run: MultiAgentRun): Promise<void> {
     const parsed = MultiAgentRunSchema.parse(run)
-    this.runs.set(parsed.runId, parsed)
+    await this.withRunLock(parsed.runId, async () => {
+      this.runs.set(parsed.runId, parsed)
+      if (!this.versions.has(parsed.runId)) this.versions.set(parsed.runId, 0)
+    })
   }
 
   async load(runId: string): Promise<MultiAgentRun | undefined> {
     return this.runs.get(runId)
   }
 
-  async update(runId: string, mutate: (current: MultiAgentRun) => MultiAgentRun | Promise<MultiAgentRun>): Promise<MultiAgentRun> {
+  async update(
+    runId: string,
+    mutate: (current: MultiAgentRun) => MultiAgentRun | Promise<MultiAgentRun>,
+    options: MultiAgentRunUpdateOptions = {}
+  ): Promise<MultiAgentRun> {
     return this.withRunLock(runId, async () => {
       const current = this.runs.get(runId)
       if (!current) throw new Error(`MultiAgentRun not found: ${runId}`)
+      this.assertFence(runId, options.fence)
+      const currentVersion = this.versions.get(runId) ?? 0
+      if (options.expectedVersion !== undefined && options.expectedVersion !== currentVersion) {
+        throw new Error(`MultiAgentRun version mismatch: expected ${options.expectedVersion}, got ${currentVersion}`)
+      }
       const next = MultiAgentRunSchema.parse(await mutate(current))
       if (next.runId !== runId) throw new Error(`MultiAgentRun update cannot change runId: ${next.runId} !== ${runId}`)
       this.runs.set(runId, next)
+      this.versions.set(runId, currentVersion + 1)
       return next
+    })
+  }
+
+  async loadVersion(runId: string): Promise<number | undefined> {
+    return this.runs.has(runId) ? (this.versions.get(runId) ?? 0) : undefined
+  }
+
+  async acquireLease(runId: string, holderId: string, ttlMs: number): Promise<{ acquired: boolean; expiresAt?: string; fence?: LeaseFence }> {
+    return this.withRunLock(runId, async () => {
+      const now = Date.now()
+      const current = this.leases.get(runId)
+      if (current && current.expiresAt > now && current.holderId !== holderId) return { acquired: false }
+      if (current && current.expiresAt > now && current.holderId === holderId) {
+        return { acquired: true, expiresAt: new Date(current.expiresAt).toISOString(), fence: leaseFence(current) }
+      }
+      const epoch = (this.leaseEpochs.get(runId) ?? current?.epoch ?? 0) + 1
+      const expiresAt = now + Math.max(1, Math.floor(ttlMs))
+      const lease: RunLease = { holderId, expiresAt, epoch, token: randomUUID() }
+      this.leaseEpochs.set(runId, epoch)
+      this.leases.set(runId, lease)
+      return { acquired: true, expiresAt: new Date(expiresAt).toISOString(), fence: leaseFence(lease) }
+    })
+  }
+
+  async renewLease(runId: string, holderId: string, fenceOrTtl: LeaseFence | number, ttlMs?: number): Promise<boolean> {
+    return this.withRunLock(runId, async () => {
+      const current = this.leases.get(runId)
+      const fence = typeof fenceOrTtl === 'number' ? undefined : fenceOrTtl
+      const effectiveTtl = typeof fenceOrTtl === 'number' ? fenceOrTtl : ttlMs
+      if (!current || !effectiveTtl || current.holderId !== holderId || (fence && !sameFence(current, fence)) || current.expiresAt <= Date.now()) {
+        return false
+      }
+      current.expiresAt = Date.now() + Math.max(1, Math.floor(effectiveTtl))
+      return true
+    })
+  }
+
+  async releaseLease(runId: string, holderId: string, fence?: LeaseFence): Promise<void> {
+    await this.withRunLock(runId, async () => {
+      const current = this.leases.get(runId)
+      if (current?.holderId === holderId && (!fence || sameFence(current, fence))) this.leases.delete(runId)
     })
   }
 
@@ -38,7 +98,19 @@ export class InMemoryMultiAgentRunStore implements MultiAgentRunStore {
   }
 
   async delete(runId: string): Promise<void> {
-    this.runs.delete(runId)
+    await this.withRunLock(runId, async () => {
+      this.runs.delete(runId)
+      this.versions.delete(runId)
+      this.leases.delete(runId)
+    })
+  }
+
+  private assertFence(runId: string, fence?: LeaseFence): void {
+    if (!fence) return
+    const current = this.leases.get(runId)
+    if (!current || current.expiresAt <= Date.now() || !sameFence(current, fence)) {
+      throw new Error('MultiAgentRun update rejected by stale lease fence')
+    }
   }
 
   private async withRunLock<T>(runId: string, operation: () => Promise<T>): Promise<T> {
@@ -59,6 +131,14 @@ export class InMemoryMultiAgentRunStore implements MultiAgentRunStore {
       if (this.runLocks.get(runId) === current) this.runLocks.delete(runId)
     }
   }
+}
+
+function leaseFence(lease: RunLease): LeaseFence {
+  return { holderId: lease.holderId, epoch: lease.epoch, token: lease.token }
+}
+
+function sameFence(lease: RunLease, fence: LeaseFence): boolean {
+  return lease.holderId === fence.holderId && lease.epoch === fence.epoch && lease.token === fence.token
 }
 
 export class InMemoryMailboxStore implements MailboxStore {

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   MailboxMessageSchema,
   MultiAgentRunSchema,
@@ -8,7 +8,7 @@ import {
   type MultiAgentOutboxIntent,
   type MultiAgentRun
 } from '@qiongqi/contracts'
-import type { MailboxStore, MultiAgentRunStore } from '@qiongqi/ports'
+import type { LeaseFence, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
 import { nextNodeForCondition, requireGraphNode, validateAgentGraph } from './multi-agent-graph.js'
 
 export type EventedV2MultiAgentRuntimeOptions = {
@@ -17,6 +17,8 @@ export type EventedV2MultiAgentRuntimeOptions = {
   graph: AgentGraph
   ids: (prefix: string) => string
   nowIso: () => string
+  leaseHolderId?: string
+  leaseTtlMs?: number
 }
 
 export type EventedV2OutboxReconcilerFlushResult = {
@@ -135,9 +137,11 @@ export class EventedV2OutboxReconciler {
 export class EventedV2MultiAgentRuntime {
   private readonly graph: AgentGraph
   private readonly runLocks = new Map<string, Promise<void>>()
+  private readonly leaseHolderId: string
 
   constructor(private readonly options: EventedV2MultiAgentRuntimeOptions) {
     this.graph = validateAgentGraph(options.graph)
+    this.leaseHolderId = options.leaseHolderId ?? `evented_v2:${randomUUID()}`
   }
 
   async start(input: {
@@ -191,7 +195,8 @@ export class EventedV2MultiAgentRuntime {
     targetAgentId: string
     prompt: string
   }): Promise<MultiAgentRun> {
-    return this.withRunLock(input.runId, () => this.handoffUnlocked(input))
+    return this.withRunLock(input.runId, () =>
+      this.withRunMutationLease(input.runId, (fence) => this.handoffUnlocked(input, fence)))
   }
 
   private async handoffUnlocked(input: {
@@ -199,9 +204,13 @@ export class EventedV2MultiAgentRuntime {
     sourceAgentId: string
     targetAgentId: string
     prompt: string
-  }): Promise<MultiAgentRun> {
-    const next = await this.options.runs.update(input.runId, (current) => this.applyHandoff(current, input))
-    return this.flushPendingOutboxUnlocked(next.runId)
+  }, fence?: LeaseFence): Promise<MultiAgentRun> {
+    const next = await this.options.runs.update(
+      input.runId,
+      (current) => this.applyHandoff(current, input),
+      updateOptions(fence)
+    )
+    return this.flushPendingOutboxUnlocked(next.runId, fence)
   }
 
   private applyHandoff(current: MultiAgentRun, input: {
@@ -366,7 +375,8 @@ export class EventedV2MultiAgentRuntime {
   }
 
   async flushPendingOutbox(runId: string): Promise<MultiAgentRun> {
-    return this.withRunLock(runId, () => this.flushPendingOutboxUnlocked(runId))
+    return this.withRunLock(runId, () =>
+      this.withRunMutationLease(runId, (fence) => this.flushPendingOutboxUnlocked(runId, fence)))
   }
 
   async completeAgentTask(input: {
@@ -375,7 +385,8 @@ export class EventedV2MultiAgentRuntime {
     condition?: string
     summary?: string
   }): Promise<MultiAgentRun> {
-    return this.withRunLock(input.runId, async () => this.options.runs.update(input.runId, (current) => {
+    return this.withRunLock(input.runId, () => this.withRunMutationLease(input.runId, async (fence) =>
+      this.options.runs.update(input.runId, (current) => {
       const activeNode = requireGraphNode(this.graph, current.activeNodeId)
       if (activeNode.kind !== 'agent') throw new Error(`Active node must be agent to complete task: ${activeNode.id}`)
       if (activeNode.agentId !== input.agentId) {
@@ -410,7 +421,7 @@ export class EventedV2MultiAgentRuntime {
         updatedAt: now
       })
       return this.enterGraphNode(withCompletedAgent, nextNodeId)
-    }))
+    }, updateOptions(fence))))
   }
 
   async completeExternalNode(input: {
@@ -419,7 +430,8 @@ export class EventedV2MultiAgentRuntime {
     condition: string
     payload?: Record<string, unknown>
   }): Promise<MultiAgentRun> {
-    return this.withRunLock(input.runId, async () => this.options.runs.update(input.runId, (current) => {
+    return this.withRunLock(input.runId, () => this.withRunMutationLease(input.runId, async (fence) =>
+      this.options.runs.update(input.runId, (current) => {
       const activeNode = requireGraphNode(this.graph, current.activeNodeId)
       if (activeNode.id !== input.nodeId) {
         throw new Error(`External node completion mismatch: ${activeNode.id} !== ${input.nodeId}`)
@@ -442,7 +454,7 @@ export class EventedV2MultiAgentRuntime {
         updatedAt: now
       })
       return this.enterGraphNode(withCompletedNode, nextNodeId)
-    }))
+    }, updateOptions(fence))))
   }
 
   async flushAllPendingOutbox(): Promise<MultiAgentRun[]> {
@@ -454,13 +466,17 @@ export class EventedV2MultiAgentRuntime {
     return flushed
   }
 
-  private async flushPendingOutboxUnlocked(runId: string): Promise<MultiAgentRun> {
+  private async flushPendingOutboxUnlocked(runId: string, fence?: LeaseFence): Promise<MultiAgentRun> {
     const current = await this.options.runs.load(runId)
     if (!current) throw new Error(`MultiAgentRun not found: ${runId}`)
     let latest = MultiAgentRunSchema.parse(current)
     for (const intent of latest.outbox.filter((candidate) => candidate.status === 'pending')) {
       if (intent.kind === 'mailbox_enqueue') await this.options.mailbox.enqueue(intent.message)
-      latest = await this.options.runs.update(runId, (run) => this.markOutboxPublished(run, intent.outboxId))
+      latest = await this.options.runs.update(
+        runId,
+        (run) => this.markOutboxPublished(run, intent.outboxId),
+        updateOptions(fence)
+      )
     }
     return latest
   }
@@ -610,11 +626,43 @@ export class EventedV2MultiAgentRuntime {
     }
   }
 
+  private async withRunMutationLease<T>(runId: string, operation: (fence?: LeaseFence) => Promise<T>): Promise<T> {
+    if (!this.options.runs.acquireLease || !this.options.runs.releaseLease) return operation()
+    const holderId = this.leaseHolderId
+    const ttlMs = this.options.leaseTtlMs ?? 30_000
+    const lease = await this.acquireRunMutationLease(runId, holderId, ttlMs)
+    if (!lease.acquired || !lease.fence) throw new Error(`MultiAgentRun lease unavailable: ${runId}`)
+    try {
+      return await operation(lease.fence)
+    } finally {
+      await this.options.runs.releaseLease(runId, holderId, lease.fence)
+    }
+  }
+
+  private async acquireRunMutationLease(runId: string, holderId: string, ttlMs: number): Promise<{
+    acquired: boolean
+    expiresAt?: string
+    fence?: LeaseFence
+  }> {
+    if (!this.options.runs.acquireLease) return { acquired: true }
+    const deadline = Date.now() + ttlMs
+    for (;;) {
+      const lease = await this.options.runs.acquireLease(runId, holderId, ttlMs)
+      if (lease.acquired) return lease
+      if (Date.now() >= deadline) return lease
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+
   async trace(runId: string): Promise<string[]> {
     const run = await this.options.runs.load(runId)
     if (!run) throw new Error(`MultiAgentRun not found: ${runId}`)
     return run.events.map((event) => `${event.type}:${event.agentId ?? event.nodeId ?? 'runtime'}`)
   }
+}
+
+function updateOptions(fence: LeaseFence | undefined): MultiAgentRunUpdateOptions | undefined {
+  return fence ? { fence } : undefined
 }
 
 function latestAgentRunIndex(run: MultiAgentRun, agentId: string, nodeId: string): number {

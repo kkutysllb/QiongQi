@@ -631,7 +631,9 @@ The runtime now selects `kernel_v3` by default. `classic`, `evented`, and `event
 
 **P0 completed scope**: `EventedV2AgentWorker` can claim mailbox tasks, run an injected agent handler, submit the agent result, and complete the mailbox message. `EventedV2MultiAgentRuntime.completeAgentTask()` advances the declarative graph by edge condition. The interpreter handles `agent` / `terminate` / `join` / `retry`; `wait` / `tool` / `judge` suspend as external execution nodes and resume through `completeExternalNode()`. The HTTP runtime factory wires reconciler start/stop/isRunning lifecycle from config. This gives `evented_v2` the generic P0 multi-Agent runtime skeleton.
 
-**Real backlog**: cross-instance lease / store-native CAS, timeline and metrics APIs, declarative graph/agent binding config, remote Agent execution, and production shadow/canary rollout remain next. `createPromptSubscriber` is still a placeholder; peer-style orchestration is a future direction (the honest annotation on Proposition ① in §1.2).
+**P1-A transaction progress**: `MultiAgentRunStore` now exposes optional run lease, fencing token, `loadVersion()`, and `expectedVersion` CAS capabilities. The in-memory and file stores implement epoch fencing and reject stale fenced writes. When a store supports leases, `EventedV2MultiAgentRuntime` automatically wraps handoff, agent completion, external node completion, and outbox flush in acquire -> fenced update -> release. Remaining P1-A hardening includes long-running heartbeat/renew, lease metrics, and store-native batch transaction helpers.
+
+**Real backlog**: timeline and metrics APIs, declarative graph/agent binding config, remote Agent execution, and production shadow/canary rollout remain next. `createPromptSubscriber` is still a placeholder; peer-style orchestration is a future direction (the honest annotation on Proposition ① in §1.2).
 
 ### 4.5 AgentCard / PeerRegistry / A2A Protocol
 
