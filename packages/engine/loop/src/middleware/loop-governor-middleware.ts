@@ -28,7 +28,7 @@ export function loopGovernorMiddleware(): RuntimeMiddleware {
       })
       const stateCommand = { type: 'set-middleware-state' as const, id: 'loop-governor', state: { version: 1, data: decision.state } }
       if (decision.action === 'terminate') {
-        return { commands: [stateCommand, { type: 'terminate', outcome: { status: 'degraded', reason: 'loop_capped', retryable: true, details: { governorReason: decision.reason } } }] }
+        return { commands: [stateCommand, { type: 'terminate', outcome: { status: 'degraded', reason: 'loop_capped', retryable: false, details: { governorReason: decision.reason } } }] }
       }
       if (decision.action === 'checkpoint') {
         return { commands: [stateCommand, { type: 'jump', nodeId: 'progress-checkpoint', condition: 'next', reason: decision.reason ?? 'governor checkpoint' }] }
