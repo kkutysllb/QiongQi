@@ -19,6 +19,7 @@ import {
   MODEL_ENDPOINT_FORMATS,
   normalizeModelEndpointFormat
 } from './model-endpoint-format.js'
+import { AgentGraphSchema } from './multi-agent-runtime.js'
 
 export const QIONGQI_CONFIG_FILENAME = 'config.json'
 export const DEFAULT_QIONGQI_MODEL = 'deepseek-v4-pro'
@@ -133,6 +134,7 @@ export const RuntimeTuningConfigSchema = z
       enabled: z.boolean().optional(),
       intervalMs: PositiveInt.optional()
     }).strict().optional(),
+    eventedV2AgentGraph: AgentGraphSchema.optional(),
     modelStreamIdleTimeoutMs: PositiveInt.optional(),
     toolStorm: z
       .object({

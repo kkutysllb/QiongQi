@@ -71,6 +71,7 @@
 - **`EventedV2MultiAgentRuntime` 的 handoff 使用 durable outbox** —— run 事务提交 `handoff_requested` / `handoff_delivered` 与 `mailbox_enqueue` intent；提交后再投递 mailbox，并把 outbox 标记为 `published`。
 - **`flushPendingOutbox(runId)` / `flushAllPendingOutbox()` 是可重入恢复入口** —— 若进程在 run 提交后、mailbox enqueue 前/后崩溃，新的 runtime 实例可以重放 pending intent；`MultiAgentRunStore.listWithPendingOutbox()` 负责发现待恢复 run；`MailboxStore.enqueue` 对同一 message 保持幂等且不会把 delivered/completed 降级回 queued。
 - **`EventedV2MultiAgentRuntime` 的 graph interpreter 是 condition 驱动** —— `completeAgentTask()` 完成 active agent node 后按 edge condition 推进；`agent` / `terminate` / `join` / `retry` 在 runtime 内解释；`wait` / `tool` / `judge` 作为外部执行节点进入 `suspended`，再由 `completeExternalNode()` 按 condition 恢复。
+- **`evented_v2` graph 可由 runtime config 声明** —— HTTP runtime factory 会优先使用 `runtime.eventedV2AgentGraph`，该字段复用 `AgentGraphSchema` 并经 `validateAgentGraph()` 校验；未配置时才回退到内置 manager-specialist graph。
 - **`EventedV2MultiAgentRuntime` 自动使用 store lease/CAS 能力** —— 当 `MultiAgentRunStore` 实现 `acquireLease` / `releaseLease` 时，handoff、agent completion、external node completion 与 outbox flush 都会以 fencing token 调用 `update(..., { fence })`；store 还可通过 `loadVersion()` + `expectedVersion` 提供 CAS。
 - **`EventedV2MultiAgentRuntime` 的观测面是 projection-only** —— `timeline(runId)` 只读取 run 并调用 `buildEventedV2RunTimeline()`；`metrics()` 通过 `MultiAgentRunStore.listAll()` 聚合所有 run，不改变运行状态，也不依赖业务 UI。
 - **`EventedV2AgentWorker` 是 agent 执行适配层** —— runtime 不绑定具体模型/工具执行策略；worker 只负责任务领取、handler 调用、结果提交与 mailbox 完成，handler 由 server/worker 进程注入。
@@ -94,6 +95,7 @@
 - `EventedV2MultiAgentRuntime uses store lease fencing when completing agent tasks`
 - `EventedV2MultiAgentRuntime returns projected timeline and aggregate metrics for management observability`
 - `buildEventedV2RunTimeline` / `buildEventedV2RunMetrics` project run timeline and aggregate status/agent/outbox metrics`
+- `RuntimeTuningConfigSchema` accepts declarative `eventedV2AgentGraph` and the runtime factory starts runs from that configured graph`
 - `MultiAgentRunStore rejects stale lease fences and stale compare-and-swap versions`
 - `EventedV2OutboxReconciler starts from runtime config and stops during runtime shutdown`
 - `InflightTracker.run registers before, guarantees end() in finally`

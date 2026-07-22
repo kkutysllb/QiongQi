@@ -110,4 +110,89 @@ describe('runtime factory evented_v2 multi-agent wiring', () => {
       await rm(dataDir, { recursive: true, force: true })
     }
   })
+
+  it('loads the evented_v2 agent graph from runtime config', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
+    const runtime = await createQiongqiServeRuntime({
+      host: '127.0.0.1',
+      port: 0,
+      dataDir,
+      runtimeToken: 'tok',
+      apiKey: 'test-key',
+      baseUrl: 'http://localhost',
+      model: 'test-model',
+      approvalPolicy: 'never',
+      sandboxMode: 'danger-full-access',
+      tokenEconomyMode: false,
+      insecure: true,
+      orchestrationMode: 'evented_v2',
+      runtime: {
+        eventedV2AgentGraph: {
+          version: 1,
+          graphId: 'planner_wait_graph',
+          startNodeId: 'planner',
+          nodes: [
+            { id: 'planner', kind: 'agent', agentId: 'planner' },
+            { id: 'wait_approval', kind: 'wait', waitFor: 'approval' }
+          ],
+          edges: [
+            { from: 'planner', to: 'wait_approval', condition: 'completed' }
+          ]
+        }
+      }
+    })
+    try {
+      const run = await runtime.multiAgentRuntime?.start({
+        threadId: 'thread_1',
+        turnId: 'turn_1',
+        workspaceKey: 'workspace_1',
+        prompt: 'Use the configured graph.'
+      })
+
+      expect(run).toMatchObject({
+        graphId: 'planner_wait_graph',
+        activeNodeId: 'planner',
+        activeAgentStack: ['planner']
+      })
+    } finally {
+      await runtime.shutdown?.()
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects an invalid evented_v2 agent graph from runtime config', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
+    try {
+      await expect(createQiongqiServeRuntime({
+        host: '127.0.0.1',
+        port: 0,
+        dataDir,
+        runtimeToken: 'tok',
+        apiKey: 'test-key',
+        baseUrl: 'http://localhost',
+        model: 'test-model',
+        approvalPolicy: 'never',
+        sandboxMode: 'danger-full-access',
+        tokenEconomyMode: false,
+        insecure: true,
+        orchestrationMode: 'evented_v2',
+        runtime: {
+          eventedV2AgentGraph: {
+            version: 1,
+            graphId: 'invalid_graph',
+            startNodeId: 'planner',
+            nodes: [
+              { id: 'planner', kind: 'agent', agentId: 'planner' },
+              { id: 'done', kind: 'terminate' }
+            ],
+            edges: [
+              { from: 'planner', to: 'missing', condition: 'completed' }
+            ]
+          }
+        }
+      })).rejects.toThrow('AgentGraph edge points to unknown node: planner -> missing')
+    } finally {
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
 })

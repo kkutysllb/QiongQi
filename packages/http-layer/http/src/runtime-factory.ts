@@ -45,6 +45,7 @@ import {
   ModelProposalRunner,
   PromptBuilder,
   defaultManagerSpecialistGraph,
+  validateAgentGraph,
   resolveRuntimeRolloutMode,
   ToolRuntimeV3,
   type OrchestrationMode
@@ -61,6 +62,7 @@ import type { TurnItem } from '@qiongqi/contracts'
 import { makeApprovalItem, makeUserInputItem } from '@qiongqi/domain'
 import {
   AgentCardSchema,
+  type AgentGraph,
   type AgentCard,
   type SkillSummary
 } from '@qiongqi/contracts'
@@ -233,6 +235,18 @@ export function orchestrationModeForRuntimeOptions(
   return resolveRuntimeRolloutMode({
     configured,
     enabled: explicitlyRequestedKernel || rollout?.enabled !== false
+  })
+}
+
+export function eventedV2AgentGraphForRuntimeOptions(
+  options: Pick<QiongqiServeRuntimeOptions, 'runtime' | 'agentName'>
+): AgentGraph {
+  if (options.runtime?.eventedV2AgentGraph) {
+    return validateAgentGraph(options.runtime.eventedV2AgentGraph)
+  }
+  return defaultManagerSpecialistGraph({
+    managerAgentId: options.agentName ?? 'Qiongqi',
+    specialistAgentId: 'specialist'
   })
 }
 
@@ -1554,10 +1568,7 @@ async function assembleRuntime(input: {
     ? new EventedV2MultiAgentRuntime({
         runs: new FileMultiAgentRunStore(join(options.dataDir, 'threads')),
         mailbox: new FileMailboxStore(join(options.dataDir, 'threads')),
-        graph: defaultManagerSpecialistGraph({
-          managerAgentId: options.agentName ?? 'Qiongqi',
-          specialistAgentId: 'specialist'
-        }),
+        graph: eventedV2AgentGraphForRuntimeOptions(options),
         ids: (prefixName: string) => core.ids.next(prefixName),
         nowIso: core.nowIso
       })

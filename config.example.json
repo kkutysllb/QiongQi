@@ -46,6 +46,25 @@
     "summaryMaxTokens": 1200,
     "summaryInputMaxBytes": 98304
   },
+  "runtime": {
+    "orchestrationMode": "kernel_v3",
+    "eventedV2OutboxReconciler": {
+      "enabled": false,
+      "intervalMs": 1000
+    },
+    "eventedV2AgentGraph": {
+      "version": 1,
+      "graphId": "planner_wait_graph",
+      "startNodeId": "planner",
+      "nodes": [
+        { "id": "planner", "kind": "agent", "agentId": "planner", "label": "Planner" },
+        { "id": "wait_approval", "kind": "wait", "waitFor": "approval" }
+      ],
+      "edges": [
+        { "from": "planner", "to": "wait_approval", "condition": "completed" }
+      ]
+    }
+  },
   "models": {
     "profiles": {
       "provider-model-name": {

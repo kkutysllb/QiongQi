@@ -45,6 +45,39 @@ describe('contracts', () => {
     expect(runtime.eventedV2OutboxReconciler).toEqual({ enabled: true, intervalMs: 10_000 })
   })
 
+  it('parses a declarative evented v2 agent graph runtime tuning', () => {
+    const runtime = RuntimeTuningConfigSchema.parse({
+      eventedV2AgentGraph: {
+        version: 1,
+        graphId: 'planner_wait_graph',
+        startNodeId: 'planner',
+        nodes: [
+          { id: 'planner', kind: 'agent', agentId: 'planner' },
+          { id: 'wait_approval', kind: 'wait', waitFor: 'approval' }
+        ],
+        edges: [
+          { from: 'planner', to: 'wait_approval', condition: 'completed' }
+        ]
+      }
+    })
+
+    expect(runtime.eventedV2AgentGraph?.graphId).toBe('planner_wait_graph')
+    expect(runtime.eventedV2AgentGraph?.startNodeId).toBe('planner')
+  })
+
+  it('rejects malformed declarative evented v2 agent graph runtime tuning', () => {
+    expect(() => RuntimeTuningConfigSchema.parse({
+      eventedV2AgentGraph: {
+        version: 1,
+        graphId: 'bad_graph',
+        startNodeId: 'planner',
+        nodes: [
+          { id: 'planner', kind: 'agent' }
+        ]
+      }
+    })).toThrow()
+  })
+
   it('defaults explicit skill activations for legacy turn records', () => {
     const turn = TurnSchema.parse({
       id: 'turn_legacy',
