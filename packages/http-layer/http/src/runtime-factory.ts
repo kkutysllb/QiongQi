@@ -12,7 +12,7 @@ import { FileAttachmentStore } from '@qiongqi/attachments'
 import { InMemoryApprovalGate } from '@qiongqi/adapter-storage'
 import { InMemoryUserInputGate } from '@qiongqi/adapter-storage'
 import { InMemoryEventBus } from '@qiongqi/adapter-storage'
-import { FileEffectResultStore, FileSessionStore, FileTaskStateStore, FileThreadStore, FileRunEventStore, FileRunStateStore } from '@qiongqi/adapter-storage'
+import { FileEffectResultStore, FileSessionStore, FileTaskStateStore, FileThreadStore, FileRunEventStore, FileRunStateStore, FileMailboxStore, FileMultiAgentRunStore } from '@qiongqi/adapter-storage'
 import { HybridSessionStore, HybridThreadStore } from '@qiongqi/adapter-storage'
 import {
   DynamicRoutedModelCompatClient,
@@ -39,9 +39,11 @@ import type { ApprovalPolicy, SandboxMode } from '@qiongqi/contracts'
 import {
   createKernelV3NodeHandlers,
   EffectCommitCoordinator,
+  EventedV2MultiAgentRuntime,
   KernelV3TurnRunner,
   ModelProposalRunner,
   PromptBuilder,
+  defaultManagerSpecialistGraph,
   resolveRuntimeRolloutMode,
   ToolRuntimeV3,
   type OrchestrationMode
@@ -1547,6 +1549,18 @@ async function assembleRuntime(input: {
           })
         })
       : new TurnOrchestrator(orchOpts)
+  const multiAgentRuntime = orchestrationMode === 'evented_v2'
+    ? new EventedV2MultiAgentRuntime({
+        runs: new FileMultiAgentRunStore(join(options.dataDir, 'threads')),
+        mailbox: new FileMailboxStore(join(options.dataDir, 'threads')),
+        graph: defaultManagerSpecialistGraph({
+          managerAgentId: options.agentName ?? 'Qiongqi',
+          specialistAgentId: 'specialist'
+        }),
+        ids: (prefixName: string) => core.ids.next(prefixName),
+        nowIso: core.nowIso
+      })
+    : undefined
   const currentCapabilities = () => {
     const config = configStore.snapshot?.() ?? qiongqiConfigFromRuntimeOptions(options)
     const effectiveCapabilities = withRuntimeMountedSkillRoots(
@@ -1617,6 +1631,7 @@ async function assembleRuntime(input: {
     usageService: core.usageService,
     authService: core.authService,
     userDataStore: core.userDataStore,
+    ...(multiAgentRuntime ? { multiAgentRuntime } : {}),
     eventBus: core.eventBus,
     sessionStore: core.sessionStore,
     events: core.events,
