@@ -614,17 +614,20 @@ The key decoupling from Stage 1.3. **Goal**: decouple the model client from hard
 
 **Adding a new vendor's pricing**: implement `PricingProvider` and register it with `Composite`; no client modification needed.
 
-### 4.4 OrchestrationMode: Kernel v3 with classic/evented compatibility
+### 4.4 OrchestrationMode: classic / evented_v2 / kernel_v3
 
-The runtime now selects `kernel_v3` by default. `classic` and `evented`/`evented_v2` remain explicit compatibility modes via `QiongqiServeRuntimeOptions.orchestrationMode`.
+The runtime now selects `kernel_v3` by default. `classic`, `evented`, and `evented_v2` remain explicit compatibility modes via `QiongqiServeRuntimeOptions.orchestrationMode`; `evented` normalizes to `evented_v2`.
 
 | Mode | Orchestrator | Crash recovery | Use case |
 |------|--------------|----------------|----------|
 | `kernel_v3` | durable kernel loop with checkpoints and idempotent effects | yes | default production mode |
+| `evented_v2` | `EventedTurnOrchestrator` + `LoopRunner`, with `EventedV2MultiAgentRuntime` for durable run / mailbox / handoff / outbox flush | yes (`LoopRun` / `TurnStateV2` plus multi-agent `run.events` / `outbox` / `trace()`) | multi-Agent graph foundation, handoff, cross-Agent trace |
 | `classic` | `TurnOrchestrator` (explicit step advancement) | none | explicit compatibility fallback |
-| `evented` | `EventedTurnOrchestrator` + `LoopRunner` (declarative phase interpretation) | yes (`FileTurnStateStore` persists `LoopRun` / `TurnStateV2`, with `TurnStateV1` upgrade on load) | critical workflows, long turns |
+| `evented` | legacy alias normalized to `evented_v2` | same as `evented_v2` | legacy config compatibility |
 
 **Shared policy**: the classic path keeps using `runOrchestratorStep`; the evented path interprets `LoopPlan.phases` through `LoopRunner` (build-prompt → run-model → decide → evaluate → dispatch-tools), publishes rich events such as `prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`, and appends them to `LoopRun.events`. `runStepViaEventBus` is retained only as a compatibility API.
+
+**Stage 2 run transaction progress**: `EventedV2MultiAgentRuntime.handoff()` writes handoff events and a `mailbox_enqueue` outbox intent in the same `MultiAgentRunStore.update()` transaction. After the run commit, it publishes the mailbox message and marks the outbox intent as `published`. If a process crashes after run commit and before/after mailbox publish, another runtime instance can call `flushPendingOutbox(runId)` to replay pending intents. Production multi-worker deployment still needs an external scheduler/reconciler to scan pending outbox entries and call flush.
 
 **Real backlog**: `createPromptSubscriber` is still a placeholder; peer-style orchestration is a future direction (the honest annotation on Proposition ① in §1.2).
 

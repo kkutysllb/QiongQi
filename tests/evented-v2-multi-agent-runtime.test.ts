@@ -217,6 +217,7 @@ describe('EventedV2MultiAgentRuntime', () => {
 
     expect(await mailbox.listForRun(run.runId)).toEqual([])
     expect((await runs.load(run.runId))?.activeAgentStack).toEqual(['manager', 'researcher'])
+    expect((await runs.load(run.runId))?.outbox).toMatchObject([{ kind: 'mailbox_enqueue', status: 'pending' }])
 
     const next = await runtime.handoff({
       runId: run.runId,
@@ -231,6 +232,55 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(next.activeAgentStack).toEqual(['manager', 'researcher'])
     expect(next.agentRuns.filter((agentRun) => agentRun.agentId === 'researcher')).toHaveLength(1)
     expect(next.events.filter((event) => event.type === 'handoff_delivered')).toHaveLength(1)
+    expect((await runs.load(run.runId))?.outbox).toMatchObject([{ kind: 'mailbox_enqueue', status: 'published' }])
+  })
+
+  it('flushes pending outbox handoffs from a new runtime instance after enqueue failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-evented-v2-runtime-'))
+    const runs = new FileMultiAgentRunStore(root)
+    const graph = defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' })
+    const runtimeA = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new FailFirstEnqueueFileMailboxStore(root),
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const runtimeB = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new FileMailboxStore(root),
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    try {
+      const run = await runtimeA.start({
+        threadId: 'thread_1',
+        turnId: 'turn_1',
+        workspaceKey: 'workspace_1',
+        prompt: 'Research evented v2.'
+      })
+
+      await expect(runtimeA.handoff({
+        runId: run.runId,
+        sourceAgentId: 'manager',
+        targetAgentId: 'researcher',
+        prompt: 'Summarize the current evented loop.'
+      })).rejects.toThrow('enqueue failed once')
+
+      expect(await new FileMailboxStore(root).listForRun(run.runId)).toEqual([])
+      expect((await runs.load(run.runId))?.outbox).toMatchObject([{ kind: 'mailbox_enqueue', status: 'pending' }])
+
+      const recovered = await runtimeB.flushPendingOutbox(run.runId)
+
+      expect(await new FileMailboxStore(root).listForRun(run.runId)).toMatchObject([
+        { fromAgentId: 'manager', toAgentId: 'researcher', status: 'queued' }
+      ])
+      expect(recovered.outbox).toMatchObject([{ kind: 'mailbox_enqueue', status: 'published' }])
+      expect((await runs.load(run.runId))?.outbox).toMatchObject([{ kind: 'mailbox_enqueue', status: 'published' }])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('does not requeue a handoff message that another worker already claimed', async () => {
@@ -418,6 +468,16 @@ class FailFirstEnqueueMailboxStore extends InMemoryMailboxStore {
   private enqueues = 0
 
   async enqueue(message: Parameters<InMemoryMailboxStore['enqueue']>[0]): Promise<void> {
+    this.enqueues += 1
+    if (this.enqueues === 1) throw new Error('enqueue failed once')
+    return super.enqueue(message)
+  }
+}
+
+class FailFirstEnqueueFileMailboxStore extends FileMailboxStore {
+  private enqueues = 0
+
+  async enqueue(message: Parameters<FileMailboxStore['enqueue']>[0]): Promise<void> {
     this.enqueues += 1
     if (this.enqueues === 1) throw new Error('enqueue failed once')
     return super.enqueue(message)

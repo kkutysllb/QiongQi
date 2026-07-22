@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   AgentGraphSchema,
   MailboxMessageSchema,
+  MultiAgentOutboxIntentSchema,
   MultiAgentRunSchema,
   TaskEnvelopeSchema
 } from '@qiongqi/contracts'
@@ -66,6 +67,7 @@ describe('multi-agent runtime contracts', () => {
         updatedAt: '2026-07-21T00:00:00.000Z'
       }],
       events: [],
+      outbox: [],
       retryCounters: {},
       budgets: { stepsUsed: 0, toolCallsUsed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
       createdAt: '2026-07-21T00:00:00.000Z',
@@ -73,6 +75,30 @@ describe('multi-agent runtime contracts', () => {
     })
 
     expect(run.agentRuns[0]?.agentId).toBe('manager')
+  })
+
+  it('parses a pending mailbox enqueue outbox intent for recovery', () => {
+    const intent = MultiAgentOutboxIntentSchema.parse({
+      outboxId: 'outbox_1',
+      kind: 'mailbox_enqueue',
+      status: 'pending',
+      message: {
+        messageId: 'msg_1',
+        envelopeId: 'env_1',
+        runId: 'mar_1',
+        fromAgentId: 'manager',
+        toAgentId: 'researcher',
+        status: 'queued',
+        payload: { prompt: 'Summarize existing runtime modes.' },
+        createdAt: '2026-07-21T00:00:00.000Z',
+        updatedAt: '2026-07-21T00:00:00.000Z'
+      },
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z'
+    })
+
+    expect(intent.kind).toBe('mailbox_enqueue')
+    expect(intent.status).toBe('pending')
   })
 
   it('parses a mailbox message correlated to an envelope', () => {

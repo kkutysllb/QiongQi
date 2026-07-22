@@ -240,6 +240,7 @@ function baseRun(): MultiAgentRun {
     branchStatus: {},
     agentRuns: [],
     events: [],
+    outbox: [],
     retryCounters: {},
     budgets: { stepsUsed: 0, toolCallsUsed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 },
     createdAt: '2026-07-21T00:00:00.000Z',

@@ -5,6 +5,7 @@ import {
   TaskEnvelopeSchema,
   type AgentGraph,
   type MailboxMessage,
+  type MultiAgentOutboxIntent,
   type MultiAgentRun
 } from '@qiongqi/contracts'
 import type { MailboxStore, MultiAgentRunStore } from '@qiongqi/ports'
@@ -86,31 +87,19 @@ export class EventedV2MultiAgentRuntime {
     targetAgentId: string
     prompt: string
   }): Promise<MultiAgentRun> {
-    let pendingMessage: MailboxMessage | undefined
-    const next = await this.options.runs.update(input.runId, async (current) => {
-      const result = await this.applyHandoff(current, input)
-      pendingMessage = result.message
-      return result.run
-    })
-    if (pendingMessage) await this.options.mailbox.enqueue(pendingMessage)
-    return next
+    const next = await this.options.runs.update(input.runId, (current) => this.applyHandoff(current, input))
+    return this.flushPendingOutboxUnlocked(next.runId)
   }
 
-  private async applyHandoff(current: MultiAgentRun, input: {
+  private applyHandoff(current: MultiAgentRun, input: {
     runId: string
     sourceAgentId: string
     targetAgentId: string
     prompt: string
-  }): Promise<{ run: MultiAgentRun, message?: MailboxMessage }> {
+  }): MultiAgentRun {
     if (current.graphId !== this.graph.graphId) {
       throw new Error(`MultiAgentRun graph mismatch: ${current.graphId} !== ${this.graph.graphId}`)
     }
-    const existingMessage = (await this.options.mailbox.listForRun(current.runId)).find((message) =>
-      message.fromAgentId === input.sourceAgentId &&
-      message.toAgentId === input.targetAgentId &&
-      message.payload.prompt === input.prompt &&
-      ['queued', 'delivered', 'completed'].includes(message.status)
-    )
     const idempotencyKey = handoffIdempotencyKey({
       graphId: current.graphId,
       runId: current.runId,
@@ -118,7 +107,7 @@ export class EventedV2MultiAgentRuntime {
       targetAgentId: input.targetAgentId,
       prompt: input.prompt
     })
-    const envelopeId = existingMessage?.envelopeId ?? `env_${idempotencyKey}`
+    const envelopeId = `env_${idempotencyKey}`
     const activeNode = requireGraphNode(this.graph, current.activeNodeId)
     const activeStackAgentId = current.activeAgentStack.at(-1)
     if (
@@ -131,12 +120,9 @@ export class EventedV2MultiAgentRuntime {
         event.agentId === input.targetAgentId &&
         event.envelopeId === envelopeId
       )
-      if (existingMessage || deliveredEventExists) {
+      if (deliveredEventExists) {
         const run = MultiAgentRunSchema.parse(current)
-        return {
-          run,
-          message: existingMessage ? undefined : this.createHandoffMessage(run, input, envelopeId)
-        }
+        return this.ensureHandoffOutboxIntent(run, input, envelopeId)
       }
     }
     if (activeNode.kind !== 'agent') throw new Error(`Handoff active node must be agent: ${activeNode.id}`)
@@ -209,10 +195,7 @@ export class EventedV2MultiAgentRuntime {
       ],
       updatedAt: now
     })
-    return {
-      run: next,
-      message: existingMessage ? undefined : this.createHandoffMessage(next, input, envelopeId)
-    }
+    return this.ensureHandoffOutboxIntent(next, input, envelopeId)
   }
 
   private createHandoffMessage(run: MultiAgentRun, input: {
@@ -241,6 +224,56 @@ export class EventedV2MultiAgentRuntime {
       status: 'queued',
       payload: envelope.payload,
       createdAt: now,
+      updatedAt: now
+    })
+  }
+
+  private ensureHandoffOutboxIntent(run: MultiAgentRun, input: {
+    sourceAgentId: string
+    targetAgentId: string
+    prompt: string
+  }, envelopeId: string): MultiAgentRun {
+    const existing = run.outbox.find((intent) => intent.message.envelopeId === envelopeId)
+    if (existing) return MultiAgentRunSchema.parse(run)
+    const now = this.options.nowIso()
+    const message = this.createHandoffMessage(run, input, envelopeId)
+    const intent: MultiAgentOutboxIntent = {
+      outboxId: `outbox_${envelopeId.replace(/^env_/, '')}`,
+      kind: 'mailbox_enqueue',
+      status: 'pending',
+      message,
+      createdAt: now,
+      updatedAt: now
+    }
+    return MultiAgentRunSchema.parse({
+      ...run,
+      outbox: [...run.outbox, intent],
+      updatedAt: now
+    })
+  }
+
+  async flushPendingOutbox(runId: string): Promise<MultiAgentRun> {
+    return this.withRunLock(runId, () => this.flushPendingOutboxUnlocked(runId))
+  }
+
+  private async flushPendingOutboxUnlocked(runId: string): Promise<MultiAgentRun> {
+    const current = await this.options.runs.load(runId)
+    if (!current) throw new Error(`MultiAgentRun not found: ${runId}`)
+    let latest = MultiAgentRunSchema.parse(current)
+    for (const intent of latest.outbox.filter((candidate) => candidate.status === 'pending')) {
+      if (intent.kind === 'mailbox_enqueue') await this.options.mailbox.enqueue(intent.message)
+      latest = await this.options.runs.update(runId, (run) => this.markOutboxPublished(run, intent.outboxId))
+    }
+    return latest
+  }
+
+  private markOutboxPublished(run: MultiAgentRun, outboxId: string): MultiAgentRun {
+    const now = this.options.nowIso()
+    return MultiAgentRunSchema.parse({
+      ...run,
+      outbox: run.outbox.map((intent) => intent.outboxId === outboxId
+        ? { ...intent, status: 'published', updatedAt: now, publishedAt: intent.publishedAt ?? now }
+        : intent),
       updatedAt: now
     })
   }

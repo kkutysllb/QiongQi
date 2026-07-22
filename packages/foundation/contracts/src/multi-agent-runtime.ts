@@ -127,6 +127,30 @@ export const MultiAgentEventSchema = z.object({
 }).strict()
 export type MultiAgentEvent = z.infer<typeof MultiAgentEventSchema>
 
+export const MailboxMessageSchema = z.object({
+  messageId: NonEmptyString,
+  envelopeId: NonEmptyString,
+  runId: NonEmptyString,
+  fromAgentId: NonEmptyString,
+  toAgentId: NonEmptyString,
+  status: z.enum(['queued', 'delivered', 'completed', 'failed', 'aborted']),
+  payload: z.object({ prompt: NonEmptyString }).passthrough(),
+  createdAt: NonEmptyString,
+  updatedAt: NonEmptyString
+}).strict()
+export type MailboxMessage = z.infer<typeof MailboxMessageSchema>
+
+export const MultiAgentOutboxIntentSchema = z.object({
+  outboxId: NonEmptyString,
+  kind: z.literal('mailbox_enqueue'),
+  status: z.enum(['pending', 'published']),
+  message: MailboxMessageSchema,
+  createdAt: NonEmptyString,
+  updatedAt: NonEmptyString,
+  publishedAt: NonEmptyString.optional()
+}).strict()
+export type MultiAgentOutboxIntent = z.infer<typeof MultiAgentOutboxIntentSchema>
+
 export const MultiAgentRunSchema = z.object({
   version: z.literal(1),
   runId: NonEmptyString,
@@ -143,22 +167,10 @@ export const MultiAgentRunSchema = z.object({
   ).default({}),
   agentRuns: z.array(AgentRunSchema).default([]),
   events: z.array(MultiAgentEventSchema).default([]),
+  outbox: z.array(MultiAgentOutboxIntentSchema).default([]),
   retryCounters: z.record(NonEmptyString, z.number().int().nonnegative()).default({}),
   budgets: BudgetStateSchema,
   createdAt: NonEmptyString,
   updatedAt: NonEmptyString
 }).strict()
 export type MultiAgentRun = z.infer<typeof MultiAgentRunSchema>
-
-export const MailboxMessageSchema = z.object({
-  messageId: NonEmptyString,
-  envelopeId: NonEmptyString,
-  runId: NonEmptyString,
-  fromAgentId: NonEmptyString,
-  toAgentId: NonEmptyString,
-  status: z.enum(['queued', 'delivered', 'completed', 'failed', 'aborted']),
-  payload: z.object({ prompt: NonEmptyString }).passthrough(),
-  createdAt: NonEmptyString,
-  updatedAt: NonEmptyString
-}).strict()
-export type MailboxMessage = z.infer<typeof MailboxMessageSchema>
