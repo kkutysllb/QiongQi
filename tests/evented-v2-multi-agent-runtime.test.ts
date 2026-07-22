@@ -1239,10 +1239,66 @@ describe('EventedV2RemoteAgentScheduler', () => {
     expect(cleared).toBe('timer_1')
     expect(errors).toHaveLength(1)
   })
+
+  it('reports supervision metrics for remote agent polling', async () => {
+    let callback: (() => void | Promise<void>) | undefined
+    const scheduler = new EventedV2RemoteAgentScheduler({
+      workerId: 'worker_a',
+      worker: {
+        processNext: async ({ agentId }) => {
+          if (agentId === 'researcher') throw new Error('peer unavailable')
+          return { processed: true, messageId: 'msg_2' }
+        }
+      },
+      agentIds: ['researcher', 'writer'],
+      intervalMs: 1000,
+      nowIso: sequenceClock([
+        '2026-07-21T00:00:00.000Z',
+        '2026-07-21T00:00:01.000Z',
+        '2026-07-21T00:00:02.000Z'
+      ]),
+      setInterval: (fn) => {
+        callback = fn
+        return 'timer_1'
+      },
+      clearInterval: () => undefined
+    })
+
+    scheduler.start()
+    await callback?.()
+
+    expect(scheduler.snapshot()).toMatchObject({
+      workerId: 'worker_a',
+      status: 'running',
+      health: 'degraded',
+      agentIds: ['researcher', 'writer'],
+      agentsConfigured: 2,
+      flushesTotal: 1,
+      messagesProcessedTotal: 1,
+      errorsTotal: 1,
+      consecutiveErrors: 1,
+      lastMessageIds: ['msg_2'],
+      lastFlushStartedAt: '2026-07-21T00:00:00.000Z',
+      lastFlushFinishedAt: '2026-07-21T00:00:01.000Z',
+      lastHeartbeatAt: '2026-07-21T00:00:01.000Z'
+    })
+
+    scheduler.stop()
+
+    expect(scheduler.snapshot()).toMatchObject({
+      status: 'stopped',
+      health: 'stopped'
+    })
+  })
 })
 
 function fixedClock(): () => string {
   return () => '2026-07-21T00:00:00.000Z'
+}
+
+function sequenceClock(values: string[]): () => string {
+  let index = 0
+  return () => values[Math.min(index++, values.length - 1)] ?? values[values.length - 1] ?? '2026-07-21T00:00:00.000Z'
 }
 
 function nextId(): (prefix: string) => string {

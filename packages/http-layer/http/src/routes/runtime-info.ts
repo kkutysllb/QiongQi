@@ -55,6 +55,7 @@ async function buildRuntimeMetrics(runtime: ServerRuntime) {
   const usage = runtime.usageService.total()
   const tasks = await runtime.a2aTaskStore?.list().catch(() => []) ?? []
   const eventedV2 = runtime.multiAgentRuntime ? await runtime.multiAgentRuntime.metrics() : undefined
+  const eventedV2RemoteScheduler = runtime.multiAgentRemoteScheduler?.snapshot()
   const byStatus: Record<string, number> = {}
   for (const task of tasks) {
     byStatus[task.status] = (byStatus[task.status] ?? 0) + 1
@@ -86,6 +87,7 @@ async function buildRuntimeMetrics(runtime: ServerRuntime) {
       byStatus
     },
     ...(eventedV2 ? { eventedV2 } : {}),
+    ...(eventedV2RemoteScheduler ? { eventedV2RemoteScheduler } : {}),
     storage
   }
 }
@@ -128,6 +130,20 @@ function formatPrometheusMetrics(metrics: Awaited<ReturnType<typeof buildRuntime
       lines.push(`qiongqi_evented_v2_agent_runs_total{status="${status}"} ${metrics.eventedV2.agentRuns.byStatus[status] ?? 0}`)
     }
     lines.push(`qiongqi_evented_v2_agent_runs_total ${metrics.eventedV2.agentRuns.total}`)
+  }
+  if (metrics.eventedV2RemoteScheduler) {
+    lines.push('# HELP qiongqi_evented_v2_remote_scheduler_running Evented v2 remote scheduler running state.')
+    lines.push('# TYPE qiongqi_evented_v2_remote_scheduler_running gauge')
+    lines.push(`qiongqi_evented_v2_remote_scheduler_running ${metrics.eventedV2RemoteScheduler.status === 'running' ? 1 : 0}`)
+    lines.push('# HELP qiongqi_evented_v2_remote_scheduler_flushes_total Evented v2 remote scheduler flushes.')
+    lines.push('# TYPE qiongqi_evented_v2_remote_scheduler_flushes_total counter')
+    lines.push(`qiongqi_evented_v2_remote_scheduler_flushes_total ${metrics.eventedV2RemoteScheduler.flushesTotal}`)
+    lines.push('# HELP qiongqi_evented_v2_remote_scheduler_messages_processed_total Evented v2 remote scheduler processed mailbox messages.')
+    lines.push('# TYPE qiongqi_evented_v2_remote_scheduler_messages_processed_total counter')
+    lines.push(`qiongqi_evented_v2_remote_scheduler_messages_processed_total ${metrics.eventedV2RemoteScheduler.messagesProcessedTotal}`)
+    lines.push('# HELP qiongqi_evented_v2_remote_scheduler_errors_total Evented v2 remote scheduler polling errors.')
+    lines.push('# TYPE qiongqi_evented_v2_remote_scheduler_errors_total counter')
+    lines.push(`qiongqi_evented_v2_remote_scheduler_errors_total ${metrics.eventedV2RemoteScheduler.errorsTotal}`)
   }
   lines.push('# HELP qiongqi_storage_degraded Storage degraded state, 1 when degraded.')
   lines.push('# TYPE qiongqi_storage_degraded gauge')

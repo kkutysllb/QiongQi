@@ -104,7 +104,24 @@ export type EventedV2RemoteAgentSchedulerFlushResult = {
   finishedAt: string
 }
 
+export type EventedV2RemoteAgentSchedulerSnapshot = {
+  workerId: string
+  status: 'running' | 'stopped'
+  health: 'healthy' | 'degraded' | 'stopped'
+  agentIds: string[]
+  agentsConfigured: number
+  flushesTotal: number
+  messagesProcessedTotal: number
+  errorsTotal: number
+  consecutiveErrors: number
+  lastMessageIds: string[]
+  lastFlushStartedAt?: string
+  lastFlushFinishedAt?: string
+  lastHeartbeatAt?: string
+}
+
 export type EventedV2RemoteAgentSchedulerOptions = {
+  workerId?: string
   worker: Pick<EventedV2RemoteAgentWorker, 'processNext'>
   agentIds: string[]
   intervalMs: number
@@ -197,6 +214,14 @@ export class EventedV2RemoteAgentWorker {
 export class EventedV2RemoteAgentScheduler {
   private timer: unknown
   private inFlight: Promise<EventedV2RemoteAgentSchedulerFlushResult> | undefined
+  private flushesTotal = 0
+  private messagesProcessedTotal = 0
+  private errorsTotal = 0
+  private consecutiveErrors = 0
+  private lastMessageIds: string[] = []
+  private lastFlushStartedAt: string | undefined
+  private lastFlushFinishedAt: string | undefined
+  private lastHeartbeatAt: string | undefined
 
   constructor(private readonly options: EventedV2RemoteAgentSchedulerOptions) {
     if (!Number.isFinite(options.intervalMs) || options.intervalMs <= 0) {
@@ -208,7 +233,9 @@ export class EventedV2RemoteAgentScheduler {
     if (this.timer) return
     const setTimer = this.options.setInterval ?? setInterval
     this.timer = setTimer(() => {
-      void this.flushOnce().catch((error) => this.options.onError?.(error))
+      return this.flushOnce()
+        .then(() => undefined)
+        .catch((error) => this.options.onError?.(error))
     }, this.options.intervalMs)
   }
 
@@ -226,6 +253,25 @@ export class EventedV2RemoteAgentScheduler {
     return Boolean(this.timer)
   }
 
+  snapshot(): EventedV2RemoteAgentSchedulerSnapshot {
+    const status = this.isRunning() ? 'running' : 'stopped'
+    return {
+      workerId: this.options.workerId ?? 'evented_v2_remote_scheduler',
+      status,
+      health: status === 'stopped' ? 'stopped' : this.consecutiveErrors > 0 ? 'degraded' : 'healthy',
+      agentIds: [...this.options.agentIds],
+      agentsConfigured: this.options.agentIds.length,
+      flushesTotal: this.flushesTotal,
+      messagesProcessedTotal: this.messagesProcessedTotal,
+      errorsTotal: this.errorsTotal,
+      consecutiveErrors: this.consecutiveErrors,
+      lastMessageIds: [...this.lastMessageIds],
+      ...(this.lastFlushStartedAt !== undefined ? { lastFlushStartedAt: this.lastFlushStartedAt } : {}),
+      ...(this.lastFlushFinishedAt !== undefined ? { lastFlushFinishedAt: this.lastFlushFinishedAt } : {}),
+      ...(this.lastHeartbeatAt !== undefined ? { lastHeartbeatAt: this.lastHeartbeatAt } : {})
+    }
+  }
+
   async flushOnce(): Promise<EventedV2RemoteAgentSchedulerFlushResult> {
     if (this.inFlight) return this.inFlight
     this.inFlight = this.flushUnlocked()
@@ -237,8 +283,10 @@ export class EventedV2RemoteAgentScheduler {
 
   private async flushUnlocked(): Promise<EventedV2RemoteAgentSchedulerFlushResult> {
     const startedAt = this.options.nowIso()
+    this.lastFlushStartedAt = startedAt
     const messageIds: string[] = []
     let messagesProcessed = 0
+    let errors = 0
     for (const agentId of this.options.agentIds) {
       try {
         const result = await this.options.worker.processNext({ agentId })
@@ -247,16 +295,25 @@ export class EventedV2RemoteAgentScheduler {
           if (result.messageId) messageIds.push(result.messageId)
         }
       } catch (error) {
+        errors += 1
+        this.errorsTotal += 1
         this.options.onError?.(error)
       }
     }
+    const finishedAt = this.options.nowIso()
+    this.flushesTotal += 1
+    this.messagesProcessedTotal += messagesProcessed
+    this.consecutiveErrors = errors > 0 ? this.consecutiveErrors + errors : 0
+    this.lastMessageIds = [...messageIds]
+    this.lastFlushFinishedAt = finishedAt
+    this.lastHeartbeatAt = finishedAt
     const result = {
       agentIds: [...this.options.agentIds],
       agentsChecked: this.options.agentIds.length,
       messagesProcessed,
       messageIds,
       startedAt,
-      finishedAt: this.options.nowIso()
+      finishedAt
     }
     this.options.onFlush?.(result)
     return result

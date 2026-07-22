@@ -16,7 +16,7 @@
 - **`EventedV2MultiAgentRuntime`** —— `evented_v2` 的多 Agent 编排 shell，当前支持 durable run、mailbox、manager-to-specialist handoff、agent task completion、外部 wait/tool/judge 节点恢复、run 内持久化 outbox + `flushPendingOutbox()` / `flushAllPendingOutbox()` 恢复投递，以及 `timeline()` / `metrics()` 只读管理投影
 - **`EventedV2AgentWorker`** —— 通用 agent task worker，负责从 mailbox claim task、运行注入的 agent handler、提交结果并 complete mailbox
 - **`EventedV2OutboxReconciler`** —— 可嵌入 worker / server lifecycle 的周期性 outbox flush 外壳，提供 `flushOnce()` / `start()` / `stop()` / `isRunning()` 与 flush 结果回调
-- **`EventedV2RemoteAgentScheduler`** —— 可嵌入 worker / server lifecycle 的周期性 remote agent polling 外壳，按配置的 agent 列表调用 remote worker，并隔离单 agent 错误
+- **`EventedV2RemoteAgentScheduler`** —— 可嵌入 worker / server lifecycle 的周期性 remote agent polling 外壳，按配置的 agent 列表调用 remote worker，隔离单 agent 错误，并通过 `snapshot()` 暴露 supervisor 指标
 - **`LoopPlan` / `LoopRunner` / `LoopEvaluator`** —— 声明式 phase spec、phase 解释器与确定性评估/重试策略
 - **`runOrchestratorStep`** —— classic 路径的共享 step 实现
 - **`TurnEventBus`** —— 进程内 pub/sub 事件总线（`on(kind, fn)` / `emit`）
@@ -36,7 +36,7 @@
 | `buildEventedV2RunTimeline` / `buildEventedV2RunMetrics` | function | `evented-v2-observability.ts` | 将 `MultiAgentRun` 投影为 timeline，或将 run 列表聚合为 status / agent-run / outbox 指标 |
 | `EventedV2AgentWorker` | class | `evented-v2-multi-agent-runtime.ts` | claim mailbox task、执行 agent handler、提交 agent 结果并 complete mailbox |
 | `EventedV2OutboxReconciler` | class | `evented-v2-multi-agent-runtime.ts` | 周期性调用 `flushAllPendingOutbox()`；提供 `start` / `stop` / `isRunning` / `onFlush` / `onError` 生命周期与观测 hook |
-| `EventedV2RemoteAgentScheduler` | class | `evented-v2-multi-agent-runtime.ts` | 周期性轮询配置的 remote agent mailbox；逐 agent 调用 worker、隔离错误并汇总 processed message |
+| `EventedV2RemoteAgentScheduler` | class | `evented-v2-multi-agent-runtime.ts` | 周期性轮询配置的 remote agent mailbox；逐 agent 调用 worker、隔离错误、汇总 processed message，并通过 `snapshot()` 暴露 workerId / health / flush / message / error / heartbeat |
 | `LoopPlan` / `LoopRun` | type | `loop-plan.ts` | 声明式 phase spec + 可序列化运行日志 |
 | `defaultLoopPlan` | function | `loop-plan.ts` | 默认 phase 序列与 step budget |
 | `LoopRunner` | class | `loop-runner.ts` | 按 `LoopPlan.phases` 解释 build/run/decide/evaluate/dispatch |
@@ -76,7 +76,7 @@
 - **`evented_v2` graph 可由 runtime config 声明** —— HTTP runtime factory 会优先使用 `runtime.eventedV2AgentGraph`，该字段复用 `AgentGraphSchema` 并经 `validateAgentGraph()` 校验；未配置时才回退到内置 manager-specialist graph。
 - **`EventedV2RemoteAgentWorker` 是远程 agent 执行适配层** —— HTTP runtime factory 可通过 `runtime.eventedV2AgentPeers` 绑定 `agentId -> AgentCard.id`，并通过 `runtime.eventedV2RemoteAgent.timeoutMs` / `leaseTtlMs` 配置远程调用超时与 mailbox claim lease；worker 从 mailbox claim 任务后调用共享的 `PeerRegistry.invokePeer()`，再把 `PeerArtifact.status` 映射为 graph condition 推进 run，`PeerArtifact.artifacts` 会进入 `agentRuns[].peerArtifact` 与 timeline。
 - **`EventedV2RemoteAgentWorker` 支持声明式补偿 condition** —— 默认把 peer outcome 映射为 `completed` / `failed` / `aborted`；配置 `runtime.eventedV2RemoteAgent.compensation.statusConditions` 后，可把 `failed` / `aborted` 映射为 `remote_failed`、`fallback` 等 graph condition，由 AgentGraph 决定 retry、fallback、terminate 或人工介入。
-- **`EventedV2RemoteAgentScheduler` 是远程 worker 的调度外壳** —— HTTP runtime factory 可通过 `runtime.eventedV2RemoteAgent.scheduler.enabled` 自动启动，并通过 `scheduler.intervalMs` 配置轮询间隔；scheduler 按 peer binding 的 agent 列表调用 worker，单 agent 错误进入 `onError`，不会阻断同批其他 agent。
+- **`EventedV2RemoteAgentScheduler` 是远程 worker 的调度外壳** —— HTTP runtime factory 可通过 `runtime.eventedV2RemoteAgent.scheduler.enabled` 自动启动，并通过 `scheduler.intervalMs` 配置轮询间隔；scheduler 按 peer binding 的 agent 列表调用 worker，单 agent 错误进入 `onError`，不会阻断同批其他 agent；`snapshot()` 会投影 workerId、running/stopped、health、flush/message/error 计数与 heartbeat 时间，供 HTTP runtime metrics 与 Prometheus 导出。
 - **`EventedV2MultiAgentRuntime` 自动使用 store lease/CAS 能力** —— 当 `MultiAgentRunStore` 实现 `acquireLease` / `releaseLease` 时，handoff、agent completion、external node completion 与 outbox flush 都会以 fencing token 调用 `update(..., { fence })`；store 还可通过 `loadVersion()` + `expectedVersion` 提供 CAS。
 - **`EventedV2MultiAgentRuntime` 的观测面是 projection-only** —— `timeline(runId)` 只读取 run 并调用 `buildEventedV2RunTimeline()`；`metrics()` 通过 `MultiAgentRunStore.listAll()` 聚合所有 run，不改变运行状态，也不依赖业务 UI。
 - **`EventedV2AgentWorker` 是 agent 执行适配层** —— runtime 不绑定具体模型/工具执行策略；worker 只负责任务领取、handler 调用、结果提交与 mailbox 完成，handler 由 server/worker 进程注入。
@@ -107,7 +107,7 @@
 - `MailboxStore leases delivered messages and rejects stale mailbox claim fences on completion`
 - `MultiAgentRunStore rejects stale lease fences and stale compare-and-swap versions`
 - `EventedV2OutboxReconciler starts from runtime config and stops during runtime shutdown`
-- `EventedV2RemoteAgentScheduler starts from runtime config, isolates per-agent polling errors, and stops during runtime shutdown`
+- `EventedV2RemoteAgentScheduler starts from runtime config, isolates per-agent polling errors, reports supervision metrics through snapshot/Prometheus, and stops during runtime shutdown`
 - `EventedV2RemoteAgentWorker maps peer outcomes through configured compensation conditions before advancing AgentGraph`
 - `InflightTracker.run registers before, guarantees end() in finally`
 - `InflightTracker.abortAll returns id+reason markers for tool cleanup`

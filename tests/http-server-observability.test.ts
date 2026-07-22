@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { dispatchRequest, startNodeHttpServer } from '@qiongqi/http'
 import { InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
-import { EventedV2MultiAgentRuntime, defaultManagerSpecialistGraph } from '@qiongqi/loop'
+import { EventedV2MultiAgentRuntime, EventedV2RemoteAgentScheduler, defaultManagerSpecialistGraph } from '@qiongqi/loop'
 import { buildHarness, readJson } from './http-server-test-harness.js'
 
 describe('HTTP observability', () => {
@@ -214,6 +214,56 @@ describe('HTTP observability', () => {
     expect(text).toContain('qiongqi_evented_v2_runs_total{status="running"} 1')
     expect(text).toContain('qiongqi_evented_v2_outbox_pending 0')
     expect(text).toContain('qiongqi_evented_v2_agent_runs_total{status="running"} 1')
+  })
+
+  it('includes evented v2 remote scheduler supervision metrics', async () => {
+    const h = buildHarness()
+    const scheduler = new EventedV2RemoteAgentScheduler({
+      workerId: 'worker_metrics',
+      worker: {
+        processNext: async ({ agentId }) => ({
+          processed: agentId === 'researcher',
+          messageId: agentId === 'researcher' ? 'msg_1' : undefined
+        })
+      },
+      agentIds: ['researcher', 'writer'],
+      intervalMs: 1000,
+      nowIso: () => '2026-07-21T00:00:00.000Z'
+    })
+    h.runtime.multiAgentRemoteScheduler = scheduler
+    await scheduler.flushOnce()
+
+    const json = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/runtime/metrics', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+    const prometheus = await dispatchRequest(
+      h.router,
+      new Request('http://localhost/v1/runtime/metrics?format=prometheus', {
+        headers: { authorization: 'Bearer tok-1' }
+      })
+    )
+
+    expect(json.status).toBe(200)
+    expect(await readJson(json)).toMatchObject({
+      eventedV2RemoteScheduler: {
+        workerId: 'worker_metrics',
+        status: 'stopped',
+        health: 'stopped',
+        agentsConfigured: 2,
+        flushesTotal: 1,
+        messagesProcessedTotal: 1,
+        errorsTotal: 0
+      }
+    })
+    expect(prometheus.status).toBe(200)
+    const text = await prometheus.text()
+    expect(text).toContain('qiongqi_evented_v2_remote_scheduler_running 0')
+    expect(text).toContain('qiongqi_evented_v2_remote_scheduler_flushes_total 1')
+    expect(text).toContain('qiongqi_evented_v2_remote_scheduler_messages_processed_total 1')
+    expect(text).toContain('qiongqi_evented_v2_remote_scheduler_errors_total 0')
   })
 })
 

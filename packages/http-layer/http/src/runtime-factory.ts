@@ -1586,6 +1586,8 @@ async function assembleRuntime(input: {
   const eventedV2AgentPeerBindings = eventedV2AgentPeers && Object.keys(eventedV2AgentPeers).length > 0
     ? eventedV2AgentPeers
     : undefined
+  const eventedV2RemoteAgentConfig = options.runtime?.eventedV2RemoteAgent
+  const eventedV2RemoteAgentWorkerId = eventedV2RemoteAgentConfig?.workerId ?? `evented_v2_remote_${process.pid}`
   const multiAgentRemoteWorker = multiAgentRuntime && multiAgentMailbox && multiAgentRuns && eventedV2AgentPeerBindings
     ? new EventedV2RemoteAgentWorker({
         runtime: multiAgentRuntime,
@@ -1593,16 +1595,16 @@ async function assembleRuntime(input: {
         runs: multiAgentRuns,
         peerInvoker: tools.peerRegistry,
         agentPeers: eventedV2AgentPeerBindings,
-        ...(options.runtime?.eventedV2RemoteAgent?.compensation !== undefined
-          ? { compensationPolicy: options.runtime.eventedV2RemoteAgent.compensation }
+        ...(eventedV2RemoteAgentConfig?.compensation !== undefined
+          ? { compensationPolicy: eventedV2RemoteAgentConfig.compensation }
           : {}),
-        ...(options.runtime?.eventedV2RemoteAgent?.timeoutMs !== undefined
-          ? { timeoutMs: options.runtime.eventedV2RemoteAgent.timeoutMs }
+        ...(eventedV2RemoteAgentConfig?.timeoutMs !== undefined
+          ? { timeoutMs: eventedV2RemoteAgentConfig.timeoutMs }
           : {}),
-        ...(options.runtime?.eventedV2RemoteAgent?.leaseTtlMs !== undefined
+        ...(eventedV2RemoteAgentConfig?.leaseTtlMs !== undefined
           ? {
-              leaseTtlMs: options.runtime.eventedV2RemoteAgent.leaseTtlMs,
-              workerId: options.runtime.eventedV2RemoteAgent.workerId ?? `evented_v2_remote_${process.pid}`
+              leaseTtlMs: eventedV2RemoteAgentConfig.leaseTtlMs,
+              workerId: eventedV2RemoteAgentWorkerId
             }
           : {})
       })
@@ -1624,6 +1626,7 @@ async function assembleRuntime(input: {
   const eventedV2RemoteAgentSchedulerConfig = options.runtime?.eventedV2RemoteAgent?.scheduler
   const multiAgentRemoteScheduler = multiAgentRemoteWorker && eventedV2AgentPeerBindings
     ? new EventedV2RemoteAgentScheduler({
+        workerId: eventedV2RemoteAgentWorkerId,
         worker: multiAgentRemoteWorker,
         agentIds: Object.keys(eventedV2AgentPeerBindings),
         intervalMs: eventedV2RemoteAgentSchedulerConfig?.intervalMs ?? 1000,
