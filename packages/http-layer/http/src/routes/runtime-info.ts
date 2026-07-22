@@ -55,6 +55,7 @@ async function buildRuntimeMetrics(runtime: ServerRuntime) {
   const usage = runtime.usageService.total()
   const tasks = await runtime.a2aTaskStore?.list().catch(() => []) ?? []
   const eventedV2 = runtime.multiAgentRuntime ? await runtime.multiAgentRuntime.metrics() : undefined
+  const eventedV2Rollout = runtime.eventedV2Rollout?.snapshot()
   const eventedV2RemoteScheduler = runtime.multiAgentRemoteScheduler?.snapshot()
   const eventedV2Workers = runtime.multiAgentWorkerRegistry
     ? buildEventedV2WorkerRegistryMetrics(await runtime.multiAgentWorkerRegistry.list({ nowIso: runtime.nowIso() }))
@@ -90,6 +91,7 @@ async function buildRuntimeMetrics(runtime: ServerRuntime) {
       byStatus
     },
     ...(eventedV2 ? { eventedV2 } : {}),
+    ...(eventedV2Rollout ? { eventedV2Rollout } : {}),
     ...(eventedV2RemoteScheduler ? { eventedV2RemoteScheduler } : {}),
     ...(eventedV2Workers ? { eventedV2Workers } : {}),
     storage
@@ -134,6 +136,28 @@ function formatPrometheusMetrics(metrics: Awaited<ReturnType<typeof buildRuntime
       lines.push(`qiongqi_evented_v2_agent_runs_total{status="${status}"} ${metrics.eventedV2.agentRuns.byStatus[status] ?? 0}`)
     }
     lines.push(`qiongqi_evented_v2_agent_runs_total ${metrics.eventedV2.agentRuns.total}`)
+  }
+  if (metrics.eventedV2Rollout) {
+    lines.push('# HELP qiongqi_evented_v2_rollout_fallback_active Evented v2 rollout fallback circuit state.')
+    lines.push('# TYPE qiongqi_evented_v2_rollout_fallback_active gauge')
+    lines.push(`qiongqi_evented_v2_rollout_fallback_active ${metrics.eventedV2Rollout.fallbackActive ? 1 : 0}`)
+    lines.push('# HELP qiongqi_evented_v2_rollout_failure_rate Evented v2 rollout recent failure rate.')
+    lines.push('# TYPE qiongqi_evented_v2_rollout_failure_rate gauge')
+    lines.push(`qiongqi_evented_v2_rollout_failure_rate ${metrics.eventedV2Rollout.failureRate}`)
+    lines.push('# HELP qiongqi_evented_v2_rollout_recent_runs Evented v2 rollout recent runs tracked in the fallback window.')
+    lines.push('# TYPE qiongqi_evented_v2_rollout_recent_runs gauge')
+    lines.push(`qiongqi_evented_v2_rollout_recent_runs ${metrics.eventedV2Rollout.total}`)
+    lines.push('# HELP qiongqi_evented_v2_rollout_recent_failures Evented v2 rollout recent failed or aborted runs.')
+    lines.push('# TYPE qiongqi_evented_v2_rollout_recent_failures gauge')
+    lines.push(`qiongqi_evented_v2_rollout_recent_failures ${metrics.eventedV2Rollout.failures}`)
+    lines.push('# HELP qiongqi_evented_v2_rollout_consecutive_failures Evented v2 rollout consecutive failed or aborted runs.')
+    lines.push('# TYPE qiongqi_evented_v2_rollout_consecutive_failures gauge')
+    lines.push(`qiongqi_evented_v2_rollout_consecutive_failures ${metrics.eventedV2Rollout.consecutiveFailures}`)
+    lines.push('# HELP qiongqi_evented_v2_rollout_decisions_total Evented v2 rollout decisions by reason.')
+    lines.push('# TYPE qiongqi_evented_v2_rollout_decisions_total counter')
+    for (const [reason, value] of Object.entries(metrics.eventedV2Rollout.decisions).sort(([left], [right]) => left.localeCompare(right))) {
+      lines.push(`qiongqi_evented_v2_rollout_decisions_total{reason="${reason}"} ${value ?? 0}`)
+    }
   }
   if (metrics.eventedV2RemoteScheduler) {
     lines.push('# HELP qiongqi_evented_v2_remote_scheduler_running Evented v2 remote scheduler running state.')

@@ -49,6 +49,7 @@ import type { ApprovalPolicy, SandboxMode } from '@qiongqi/contracts'
 import {
   createKernelV3NodeHandlers,
   EffectCommitCoordinator,
+  EventedV2RolloutController,
   EventedV2MultiAgentRuntime,
   EventedV2OutboxReconciler,
   EventedV2RemoteAgentScheduler,
@@ -58,8 +59,11 @@ import {
   PromptBuilder,
   defaultManagerSpecialistGraph,
   validateAgentGraph,
+  resolveEventedV2RolloutMode,
   resolveRuntimeRolloutMode,
   ToolRuntimeV3,
+  type EventedV2FallbackReason,
+  type EventedV2RolloutDecision,
   type OrchestrationMode
 } from '@qiongqi/loop'
 import type {
@@ -235,9 +239,16 @@ export type QiongqiServeHandle = NodeHttpServerHandle & {
 }
 
 export function orchestrationModeForRuntimeOptions(
-  options: Pick<QiongqiServeRuntimeOptions, 'orchestrationMode' | 'runtime'>
+  options: Pick<QiongqiServeRuntimeOptions, 'orchestrationMode' | 'runtime'>,
+  context: {
+    threadId?: string
+    forcedFallback?: { active: boolean; reason?: EventedV2FallbackReason }
+  } = {}
 ): OrchestrationMode {
   const rollout = options.runtime?.kernelRollout
+  if (!options.orchestrationMode && !options.runtime?.orchestrationMode && options.runtime?.eventedV2Rollout) {
+    return eventedV2RolloutDecisionForRuntimeOptions(options, context).primaryMode
+  }
   const configured = options.orchestrationMode
     ?? options.runtime?.orchestrationMode
     ?? rollout?.defaultMode
@@ -247,6 +258,20 @@ export function orchestrationModeForRuntimeOptions(
   return resolveRuntimeRolloutMode({
     configured,
     enabled: explicitlyRequestedKernel || rollout?.enabled !== false
+  })
+}
+
+export function eventedV2RolloutDecisionForRuntimeOptions(
+  options: Pick<QiongqiServeRuntimeOptions, 'runtime'>,
+  context: {
+    threadId?: string
+    forcedFallback?: { active: boolean; reason?: EventedV2FallbackReason }
+  } = {}
+): EventedV2RolloutDecision {
+  return resolveEventedV2RolloutMode({
+    policy: options.runtime?.eventedV2Rollout,
+    threadId: context.threadId,
+    forcedFallback: context.forcedFallback
   })
 }
 
@@ -260,6 +285,35 @@ export function eventedV2AgentGraphForRuntimeOptions(
     managerAgentId: options.agentName ?? 'Qiongqi',
     specialistAgentId: 'specialist'
   })
+}
+
+type RuntimeTurnRunner = {
+  runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'>
+}
+
+function loopForOrchestrationMode(
+  mode: OrchestrationMode,
+  loops: {
+    classic?: RuntimeTurnRunner
+    eventedV2?: RuntimeTurnRunner
+    kernelV3?: RuntimeTurnRunner
+  }
+): RuntimeTurnRunner {
+  if (mode === 'evented_v2' || mode === 'evented') {
+    if (!loops.eventedV2) throw new Error('evented_v2 rollout selected but evented_v2 runner is not configured')
+    return loops.eventedV2
+  }
+  if (mode === 'kernel_v3') {
+    if (!loops.kernelV3) throw new Error('evented_v2 rollout selected kernel_v3 fallback but kernel_v3 runner is not configured')
+    return loops.kernelV3
+  }
+  if (!loops.classic) throw new Error('evented_v2 rollout selected classic fallback but classic runner is not configured')
+  return loops.classic
+}
+
+function nowMsFromIso(nowIso: () => string): number {
+  const parsed = Date.parse(nowIso())
+  return Number.isFinite(parsed) ? parsed : Date.now()
 }
 
 // ---------------------------------------------------------------------------
@@ -1505,9 +1559,25 @@ async function assembleRuntime(input: {
     ...(tokenEconomy ? { tokenEconomy } : {}),
     ...(options.runtime ? { runtime: options.runtime } : {})
   })
+  const eventedV2RolloutPolicy = !options.orchestrationMode && !options.runtime?.orchestrationMode
+    ? options.runtime?.eventedV2Rollout
+    : undefined
+  const eventedV2RolloutController = eventedV2RolloutPolicy
+    ? new EventedV2RolloutController({
+        policy: eventedV2RolloutPolicy,
+        nowMs: () => nowMsFromIso(core.nowIso)
+      })
+    : undefined
   const orchestrationMode = orchestrationModeForRuntimeOptions(options)
+  const eventedV2RolloutMayUseEvented = eventedV2RolloutPolicy?.stage === 'shadow'
+    || eventedV2RolloutPolicy?.stage === 'canary'
+    || eventedV2RolloutPolicy?.stage === 'default'
+  const eventedV2FallbackMode = eventedV2RolloutPolicy?.fallbackMode ?? 'kernel_v3'
+  const needsEventedV2Loop = orchestrationMode === 'evented_v2' || eventedV2RolloutMayUseEvented
+  const needsClassicLoop = orchestrationMode === 'classic' || (eventedV2RolloutPolicy && eventedV2FallbackMode === 'classic')
+  const needsKernelV3Loop = orchestrationMode === 'kernel_v3' || (eventedV2RolloutPolicy && eventedV2FallbackMode === 'kernel_v3')
   const runtimeV3Root = join(options.dataDir, 'threads')
-  const runtimeV3Events = orchestrationMode === 'kernel_v3' ? new FileRunEventStore(runtimeV3Root, { requireFence: true }) : undefined
+  const runtimeV3Events = needsKernelV3Loop ? new FileRunEventStore(runtimeV3Root, { requireFence: true }) : undefined
   const toolRuntime = runtimeV3Events
     ? new ToolRuntimeV3({ toolHost: tools.toolHost, effects: new EffectCommitCoordinator({ events: runtimeV3Events, results: new FileEffectResultStore(runtimeV3Root), nowIso: core.nowIso }) })
     : undefined
@@ -1547,7 +1617,7 @@ async function assembleRuntime(input: {
     },
     ...(toolRuntime ? { toolRuntime } : {})
   }
-  const loop = orchestrationMode === 'evented_v2'
+  const eventedV2Loop = needsEventedV2Loop
     ? new EventedTurnOrchestrator(
         orchOpts,
         new FileTurnStateStore(join(options.dataDir, 'threads')),
@@ -1555,35 +1625,62 @@ async function assembleRuntime(input: {
         defaultLoopPlan(),
         defaultLoopEvaluator
       )
-    : orchestrationMode === 'kernel_v3'
-      ? createKernelV3TurnRunner({
-          options,
-          core,
-          model,
-          modelClient: scopedModelClient,
-          tools,
-          prefix,
-          tokenEconomy,
-          runtimeV3Root,
-          events: runtimeV3Events ?? new FileRunEventStore(runtimeV3Root),
-          toolRuntime: toolRuntime ?? new ToolRuntimeV3({
-            toolHost: tools.toolHost,
-            effects: new EffectCommitCoordinator({
-              events: runtimeV3Events ?? new FileRunEventStore(runtimeV3Root),
-              results: new FileEffectResultStore(runtimeV3Root),
-              nowIso: core.nowIso
-            })
+    : undefined
+  const kernelV3Loop = needsKernelV3Loop
+    ? createKernelV3TurnRunner({
+        options,
+        core,
+        model,
+        modelClient: scopedModelClient,
+        tools,
+        prefix,
+        tokenEconomy,
+        runtimeV3Root,
+        events: runtimeV3Events ?? new FileRunEventStore(runtimeV3Root),
+        toolRuntime: toolRuntime ?? new ToolRuntimeV3({
+          toolHost: tools.toolHost,
+          effects: new EffectCommitCoordinator({
+            events: runtimeV3Events ?? new FileRunEventStore(runtimeV3Root),
+            results: new FileEffectResultStore(runtimeV3Root),
+            nowIso: core.nowIso
           })
         })
-      : new TurnOrchestrator(orchOpts)
+      })
+    : undefined
+  const classicLoop = needsClassicLoop ? new TurnOrchestrator(orchOpts) : undefined
+  const loop = eventedV2RolloutController
+    ? {
+        runTurn: async (threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> => {
+          const decision = eventedV2RolloutController.decide({ threadId })
+          eventedV2RolloutController.recordDecision(decision)
+          const selected = loopForOrchestrationMode(decision.primaryMode, {
+            classic: classicLoop,
+            eventedV2: eventedV2Loop,
+            kernelV3: kernelV3Loop
+          })
+          try {
+            const status = await selected.runTurn(threadId, turnId)
+            if (decision.primaryMode === 'evented_v2') eventedV2RolloutController.recordOutcome(status)
+            return status
+          } catch (error) {
+            if (decision.primaryMode === 'evented_v2') eventedV2RolloutController.recordOutcome('failed')
+            throw error
+          }
+        }
+      }
+    : loopForOrchestrationMode(orchestrationMode, {
+        classic: classicLoop,
+        eventedV2: eventedV2Loop,
+        kernelV3: kernelV3Loop
+      })
   const multiAgentRoot = join(options.dataDir, 'threads')
-  const multiAgentRuns = orchestrationMode === 'evented_v2'
+  const multiAgentRuns = needsEventedV2Loop
     ? new FileMultiAgentRunStore(multiAgentRoot)
     : undefined
-  const multiAgentMailbox = orchestrationMode === 'evented_v2'
+  const multiAgentMailbox = needsEventedV2Loop
     ? new FileMailboxStore(multiAgentRoot)
     : undefined
-  const multiAgentWorkerRegistry = orchestrationMode === 'evented_v2'
+  const multiAgentWorkerRegistry = needsEventedV2Loop
     ? new FileEventedV2WorkerRegistryStore(multiAgentRoot)
     : undefined
   const multiAgentRuntime = multiAgentRuns && multiAgentMailbox
@@ -1732,6 +1829,7 @@ async function assembleRuntime(input: {
     ...(multiAgentWorkerRegistry ? { multiAgentWorkerRegistry } : {}),
     ...(multiAgentRemoteWorker ? { multiAgentRemoteWorker } : {}),
     ...(multiAgentRemoteScheduler ? { multiAgentRemoteScheduler } : {}),
+    ...(eventedV2RolloutController ? { eventedV2Rollout: eventedV2RolloutController } : {}),
     eventBus: core.eventBus,
     sessionStore: core.sessionStore,
     events: core.events,

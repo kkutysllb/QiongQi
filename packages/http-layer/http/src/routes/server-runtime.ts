@@ -26,7 +26,7 @@ import type { AuthService } from '../auth-service.js'
 import type { QiongqiConfig } from '@qiongqi/contracts'
 import type { UserDataStore } from '../user-data-store.js'
 import type { PeerRegistry } from '@qiongqi/delegation'
-import type { EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, EventedV2RemoteAgentScheduler, EventedV2RemoteAgentWorker } from '@qiongqi/loop'
+import type { EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, EventedV2RemoteAgentScheduler, EventedV2RemoteAgentWorker, EventedV2RolloutController } from '@qiongqi/loop'
 import type { EventedV2WorkerRegistryStore } from '@qiongqi/ports'
 
 export type RuntimeToolDiagnostics = {
@@ -84,6 +84,7 @@ export type ServerRuntime = {
   multiAgentWorkerRegistry?: EventedV2WorkerRegistryStore
   multiAgentRemoteWorker?: EventedV2RemoteAgentWorker
   multiAgentRemoteScheduler?: EventedV2RemoteAgentScheduler
+  eventedV2Rollout?: EventedV2RolloutController
   runTurn(threadId: string, turnId: string): Promise<'completed' | 'failed' | 'aborted'> | void
   cancelA2ATaskTurn?(input: { threadId: string; turnId: string }): Promise<void> | void
   runReview?(input: {

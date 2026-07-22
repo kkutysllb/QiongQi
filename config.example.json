@@ -48,6 +48,20 @@
   },
   "runtime": {
     "orchestrationMode": "kernel_v3",
+    "eventedV2Rollout": {
+      "stage": "off",
+      "canaryPercent": 0,
+      "shadowSamplePercent": 0,
+      "fallbackMode": "kernel_v3",
+      "autoFallback": {
+        "enabled": false,
+        "windowSize": 20,
+        "minRuns": 5,
+        "failureRateThreshold": 0.5,
+        "consecutiveFailures": 3,
+        "cooldownMs": 60000
+      }
+    },
     "eventedV2OutboxReconciler": {
       "enabled": false,
       "intervalMs": 1000

@@ -72,6 +72,40 @@ describe('contracts', () => {
     })
   })
 
+  it('parses evented v2 rollout runtime tuning', () => {
+    const runtime = RuntimeTuningConfigSchema.parse({
+      eventedV2Rollout: {
+        stage: 'canary',
+        canaryPercent: 25,
+        fallbackMode: 'kernel_v3',
+        shadowSamplePercent: 10,
+        autoFallback: {
+          enabled: true,
+          windowSize: 20,
+          minRuns: 5,
+          failureRateThreshold: 0.4,
+          consecutiveFailures: 3,
+          cooldownMs: 60_000
+        }
+      }
+    })
+
+    expect(runtime.eventedV2Rollout).toEqual({
+      stage: 'canary',
+      canaryPercent: 25,
+      fallbackMode: 'kernel_v3',
+      shadowSamplePercent: 10,
+      autoFallback: {
+        enabled: true,
+        windowSize: 20,
+        minRuns: 5,
+        failureRateThreshold: 0.4,
+        consecutiveFailures: 3,
+        cooldownMs: 60_000
+      }
+    })
+  })
+
   it('parses a declarative evented v2 agent graph runtime tuning', () => {
     const runtime = RuntimeTuningConfigSchema.parse({
       eventedV2AgentPeers: { researcher: 'peer_researcher' },

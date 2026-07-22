@@ -26,6 +26,7 @@ export const DEFAULT_QIONGQI_MODEL = 'deepseek-v4-pro'
 
 const PositiveInt = z.number().int().positive()
 const PositiveRatio = z.number().positive().max(1)
+const NonNegativeRatio = z.number().min(0).max(1)
 const NonEmptyString = z.string().trim().min(1)
 
 export const ModelContextCompactionProfileConfigSchema = z
@@ -130,6 +131,20 @@ export const RuntimeTuningConfigSchema = z
       enabled: z.boolean().optional(),
       defaultMode: z.enum(['classic', 'kernel_v3']).optional(),
       fallbackBeforeEffect: z.boolean().optional()
+    }).strict().optional(),
+    eventedV2Rollout: z.object({
+      stage: z.enum(['off', 'shadow', 'canary', 'default']).optional(),
+      canaryPercent: z.number().int().min(0).max(100).optional(),
+      shadowSamplePercent: z.number().int().min(0).max(100).optional(),
+      fallbackMode: z.enum(['classic', 'kernel_v3']).optional(),
+      autoFallback: z.object({
+        enabled: z.boolean().optional(),
+        windowSize: PositiveInt.optional(),
+        minRuns: PositiveInt.optional(),
+        failureRateThreshold: NonNegativeRatio.optional(),
+        consecutiveFailures: PositiveInt.optional(),
+        cooldownMs: PositiveInt.optional()
+      }).strict().optional()
     }).strict().optional(),
     eventedV2OutboxReconciler: z.object({
       enabled: z.boolean().optional(),

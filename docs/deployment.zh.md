@@ -48,6 +48,7 @@ curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
 ```
 
 JSON 指标用于调试和控制面；Prometheus text 指标用于抓取。当前导出 token/cache usage、A2A task 状态计数和 `qiongqi_storage_degraded`。
+当启用 `evented_v2` multi-agent runtime、remote scheduler 或 worker registry 时，同一端点还会导出 evented_v2 run/agent/outbox、remote scheduler、worker online/expired 指标；`/v1/runtime/evented-v2/metrics` 提供 JSON 管理面聚合。
 
 Prometheus scrape 示例：
 
@@ -132,6 +133,53 @@ pnpm qiongqi serve --config ./config.json
 docker compose up --build
 curl http://127.0.0.1:8899/ready
 ```
+
+## evented_v2 Worker Pool 部署计划
+
+生产编排系统可以先生成稳定 JSON 部署计划，再由 Kubernetes、systemd、Nomad 或 CI 模板消费：
+
+```bash
+qiongqi worker \
+  --deployment-plan \
+  --json \
+  --config ./config.json \
+  --pool-size auto \
+  --restart-backoff-ms 1000 \
+  --max-restarts 5
+```
+
+输出包含父 supervisor 命令、每个 shard child worker 命令，以及 `/health`、`/ready`、`/v1/runtime/metrics?format=prometheus`、`/v1/runtime/evented-v2/metrics` 等探针/指标路径。`--pool-size auto` 会按 `runtime.eventedV2AgentPeers` 数量规划 shard，最少 1 个 worker。
+
+## evented_v2 灰度
+
+`runtime.eventedV2Rollout` 是 evented_v2 从验证到生产的灰度入口：
+
+```json
+{
+  "runtime": {
+    "eventedV2Rollout": {
+      "stage": "shadow",
+      "canaryPercent": 0,
+      "shadowSamplePercent": 10,
+      "fallbackMode": "kernel_v3",
+      "autoFallback": {
+        "enabled": true,
+        "windowSize": 20,
+        "minRuns": 5,
+        "failureRateThreshold": 0.5,
+        "consecutiveFailures": 3,
+        "cooldownMs": 60000
+      }
+    }
+  }
+}
+```
+
+- `off`：保持 fallback mode，默认 `kernel_v3`。
+- `shadow`：主路径仍走 fallback mode，同时在 run 级决策中标记 `evented_v2` shadow intent，供控制面采样、离线比对或后续隔离双跑使用。
+- `canary`：按 `threadId` 稳定 hash 与 `canaryPercent` 在 run 级选择 `evented_v2` 或 fallback mode。
+- `default`：将 `evented_v2` 作为主运行时模式。
+- `autoFallback`：对 evented_v2 主路径记录最近运行窗口；失败率、连续失败达到阈值后进入冷却期，后续 run 自动压回 `fallbackMode`。`/v1/runtime/metrics` 与 Prometheus 会暴露 `eventedV2Rollout` / `qiongqi_evented_v2_rollout_*` 指标。
 
 ## A2A 本地跨实例验证
 

@@ -47,7 +47,7 @@ curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
   "http://127.0.0.1:8899/v1/runtime/metrics?format=prometheus"
 ```
 
-JSON metrics are intended for diagnostics and control planes; Prometheus text is intended for scraping. The current exporter includes token/cache usage, A2A task status counts, and `qiongqi_storage_degraded`.
+JSON metrics are intended for diagnostics and control planes; Prometheus text is intended for scraping. The exporter includes token/cache usage, A2A task status counts, and `qiongqi_storage_degraded`. When an `evented_v2` multi-agent runtime, remote scheduler, or worker registry is mounted, the same endpoint also exports evented_v2 run/agent/outbox, remote scheduler, and worker online/expired metrics; `/v1/runtime/evented-v2/metrics` exposes the JSON management aggregate.
 
 Prometheus scrape example:
 
@@ -132,6 +132,53 @@ Local container smoke test:
 docker compose up --build
 curl http://127.0.0.1:8899/ready
 ```
+
+## evented_v2 Worker Pool Deployment Plan
+
+Production orchestration systems can generate a stable JSON plan first, then feed it into Kubernetes, systemd, Nomad, or CI templates:
+
+```bash
+qiongqi worker \
+  --deployment-plan \
+  --json \
+  --config ./config.json \
+  --pool-size auto \
+  --restart-backoff-ms 1000 \
+  --max-restarts 5
+```
+
+The output includes the parent supervisor command, each shard child-worker command, and probe/metrics paths such as `/health`, `/ready`, `/v1/runtime/metrics?format=prometheus`, and `/v1/runtime/evented-v2/metrics`. `--pool-size auto` sizes shards from `runtime.eventedV2AgentPeers`, with at least one worker.
+
+## evented_v2 Rollout
+
+`runtime.eventedV2Rollout` is the evented_v2 gate from validation to production:
+
+```json
+{
+  "runtime": {
+    "eventedV2Rollout": {
+      "stage": "shadow",
+      "canaryPercent": 0,
+      "shadowSamplePercent": 10,
+      "fallbackMode": "kernel_v3",
+      "autoFallback": {
+        "enabled": true,
+        "windowSize": 20,
+        "minRuns": 5,
+        "failureRateThreshold": 0.5,
+        "consecutiveFailures": 3,
+        "cooldownMs": 60000
+      }
+    }
+  }
+}
+```
+
+- `off`: keep the fallback mode, defaulting to `kernel_v3`.
+- `shadow`: keep the primary path on the fallback mode while marking an `evented_v2` shadow intent at run-decision time for control-plane sampling, offline comparison, or future isolated dual runs.
+- `canary`: select `evented_v2` or the fallback mode per run/thread with a stable `threadId` hash and `canaryPercent`.
+- `default`: make `evented_v2` the primary runtime mode.
+- `autoFallback`: tracks recent evented_v2 primary outcomes; when failure-rate or consecutive-failure thresholds trip, later runs are forced back to `fallbackMode` for the cooldown window. `/v1/runtime/metrics` and Prometheus expose `eventedV2Rollout` / `qiongqi_evented_v2_rollout_*` metrics.
 
 ## A2A Local Cross-instance Verification
 

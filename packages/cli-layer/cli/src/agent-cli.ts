@@ -62,6 +62,7 @@ Exec options:
 Worker options:
   --once                     Flush outbox and remote-agent mailboxes once, then exit
   --plan                     Print worker pool shard topology without starting workers
+  --deployment-plan          Print production worker deployment commands and probes
   --pool-size <n>            Number of worker shards to start or plan
   --restart-backoff-ms <n>   Worker pool child restart backoff in milliseconds
   --max-restarts <n>         Max child restarts per shard before pool exits
@@ -142,6 +143,20 @@ export async function runAgentCommand(
 async function runWorker(argv: readonly string[], io: CliIo): Promise<number> {
   const parsed = parseSharedOptions(argv, io)
   if (!parsed.ok) return writeParseError(parsed, io, 'qiongqi worker')
+  if (hasFlag(argv, 'deployment-plan')) {
+    const plan = buildWorkerPoolPlan(parsed.options, argv)
+    if (!plan.ok) {
+      io.stderr.write(`qiongqi worker: ${plan.message}\n`)
+      return ServeExitCode.config
+    }
+    const deploymentPlan = buildWorkerDeploymentPlan(argv, plan.value)
+    if (parsed.json) {
+      io.stdout.write(JSON.stringify(deploymentPlan) + '\n')
+    } else {
+      io.stdout.write(formatWorkerDeploymentPlan(deploymentPlan))
+    }
+    return ServeExitCode.ok
+  }
   if (hasFlag(argv, 'plan')) {
     const plan = buildWorkerPoolPlan(parsed.options, argv)
     if (!plan.ok) {
@@ -475,6 +490,18 @@ type SharedOptionsResult =
 
 type WorkerShard = { index: number; count: number; agentIds: string[] }
 type WorkerPoolPlan = { mode: 'worker_pool_plan'; poolSize: number; shards: WorkerShard[] }
+type WorkerDeploymentPlan = {
+  mode: 'worker_deployment_plan'
+  supervisor: { command: string[] }
+  workers: Array<{ shard: WorkerShard; command: string[] }>
+  probes: {
+    livenessPath: string
+    readinessPath: string
+    metricsPath: string
+    prometheusMetricsPath: string
+    eventedV2MetricsPath: string
+  }
+}
 
 function parseSharedOptions(argv: readonly string[], io: CliIo): SharedOptionsResult {
   const parsed = parseServeOptionsSafe(argv, io.env ?? {})
@@ -598,6 +625,38 @@ function formatWorkerPoolRunning(plan: WorkerPoolPlan): string {
   return `${lines.join('\n')}\n`
 }
 
+function buildWorkerDeploymentPlan(argv: readonly string[], plan: WorkerPoolPlan): WorkerDeploymentPlan {
+  return {
+    mode: 'worker_deployment_plan',
+    supervisor: {
+      command: ['qiongqi', 'worker', ...stripWorkerDeploymentPlanFlags(argv)]
+    },
+    workers: plan.shards.map((shard) => ({
+      shard,
+      command: ['qiongqi', 'worker', ...stripWorkerSupervisorFlags(argv), '--shard-index', String(shard.index), '--shard-count', String(shard.count)]
+    })),
+    probes: {
+      livenessPath: '/health',
+      readinessPath: '/ready',
+      metricsPath: '/v1/runtime/metrics',
+      prometheusMetricsPath: '/v1/runtime/metrics?format=prometheus',
+      eventedV2MetricsPath: '/v1/runtime/evented-v2/metrics'
+    }
+  }
+}
+
+function formatWorkerDeploymentPlan(plan: WorkerDeploymentPlan): string {
+  const lines = [
+    'qiongqi worker deployment plan:',
+    `  supervisor: ${plan.supervisor.command.join(' ')}`
+  ]
+  for (const worker of plan.workers) {
+    lines.push(`  worker shard ${worker.shard.index}/${worker.shard.count}: ${worker.command.join(' ')}`)
+  }
+  lines.push(`  probes: ${plan.probes.livenessPath}, ${plan.probes.readinessPath}, ${plan.probes.prometheusMetricsPath}`)
+  return `${lines.join('\n')}\n`
+}
+
 function workerChildArgs(argv: readonly string[], shard: WorkerShard): string[] {
   return [
     process.argv[1] ?? 'qiongqi',
@@ -619,9 +678,21 @@ function spawnWorkerProcess(io: CliIo, args: string[], shard: WorkerShard): Work
 }
 
 function stripWorkerSupervisorFlags(argv: readonly string[]): string[] {
-  const stripped: string[] = []
   const removeValueFlags = new Set(['pool-size', 'worker-pool-size', 'restart-backoff-ms', 'worker-restart-backoff-ms', 'max-restarts', 'worker-max-restarts', 'shard-index', 'worker-shard-index', 'shard-count', 'worker-shard-count'])
-  const removeBooleanFlags = new Set(['plan', 'json'])
+  const removeBooleanFlags = new Set(['plan', 'deployment-plan', 'json'])
+  return stripFlags(argv, removeValueFlags, removeBooleanFlags)
+}
+
+function stripWorkerDeploymentPlanFlags(argv: readonly string[]): string[] {
+  return stripFlags(argv, new Set(), new Set(['deployment-plan', 'json']))
+}
+
+function stripFlags(
+  argv: readonly string[],
+  removeValueFlags: ReadonlySet<string>,
+  removeBooleanFlags: ReadonlySet<string>
+): string[] {
+  const stripped: string[] = []
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]
     if (!token.startsWith('--')) {
