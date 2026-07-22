@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { FileMailboxStore, FileMultiAgentRunStore, InMemoryMailboxStore, InMemoryMultiAgentRunStore } from '@qiongqi/adapter-storage'
-import type { AgentGraph, MultiAgentRun } from '@qiongqi/contracts'
-import { EventedV2AgentWorker, EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, defaultManagerSpecialistGraph } from '@qiongqi/loop'
+import type { AgentGraph, MultiAgentRun, PeerArtifact, PeerTask } from '@qiongqi/contracts'
+import { EventedV2AgentWorker, EventedV2MultiAgentRuntime, EventedV2OutboxReconciler, EventedV2RemoteAgentWorker, defaultManagerSpecialistGraph } from '@qiongqi/loop'
 import type { LeaseFence, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
 
 describe('EventedV2MultiAgentRuntime', () => {
@@ -564,6 +564,99 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(saved?.events.map((event) => event.type)).toContain('run_completed')
   })
 
+  it('invokes a remote peer for a queued agent task and advances the run', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const peer = new RecordingPeerInvoker()
+    const graph = defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' })
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2RemoteAgentWorker({
+      runtime,
+      mailbox,
+      runs,
+      peerInvoker: peer,
+      agentPeers: { researcher: 'peer_researcher' }
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: '/workspace/project',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    const result = await worker.processNext({ agentId: 'researcher' })
+
+    const saved = await runs.load(run.runId)
+    expect(result).toMatchObject({ processed: true, runId: run.runId, peerCardId: 'peer_researcher' })
+    expect(peer.calls).toEqual([{
+      cardId: 'peer_researcher',
+      task: {
+        prompt: 'Summarize current loop.',
+        workspace: '/workspace/project',
+        label: 'evented_v2:researcher'
+      }
+    }])
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'completed' }])
+    expect(saved).toMatchObject({ status: 'completed', activeNodeId: 'done' })
+    expect(saved?.agentRuns.find((agentRun) => agentRun.agentId === 'researcher')).toMatchObject({
+      status: 'completed',
+      summary: 'Remote research complete.'
+    })
+  })
+
+  it('leaves a remote agent task delivered when the peer invocation fails before completion', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const graph = defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' })
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2RemoteAgentWorker({
+      runtime,
+      mailbox,
+      runs,
+      peerInvoker: {
+        invokePeer: async () => {
+          throw new Error('remote unavailable')
+        }
+      },
+      agentPeers: { researcher: 'peer_researcher' }
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    await expect(worker.processNext({ agentId: 'researcher' })).rejects.toThrow('remote unavailable')
+
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'delivered' }])
+    expect(await runs.load(run.runId)).toMatchObject({ status: 'running', activeNodeId: 'researcher' })
+  })
+
   it('uses store lease fencing when completing an agent task', async () => {
     const runs = new FenceRequiredMultiAgentRunStore()
     const runtime = new EventedV2MultiAgentRuntime({
@@ -955,5 +1048,18 @@ class FailFirstEnqueueFileMailboxStore extends FileMailboxStore {
     this.enqueues += 1
     if (this.enqueues === 1) throw new Error('enqueue failed once')
     return super.enqueue(message)
+  }
+}
+
+class RecordingPeerInvoker {
+  readonly calls: Array<{ cardId: string; task: PeerTask }> = []
+
+  async invokePeer(cardId: string, task: PeerTask): Promise<PeerArtifact> {
+    this.calls.push({ cardId, task })
+    return {
+      peerCardId: cardId,
+      status: 'completed',
+      summary: 'Remote research complete.'
+    }
   }
 }

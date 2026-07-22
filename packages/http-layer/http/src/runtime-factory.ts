@@ -41,6 +41,7 @@ import {
   EffectCommitCoordinator,
   EventedV2MultiAgentRuntime,
   EventedV2OutboxReconciler,
+  EventedV2RemoteAgentWorker,
   KernelV3TurnRunner,
   ModelProposalRunner,
   PromptBuilder,
@@ -1564,13 +1565,33 @@ async function assembleRuntime(input: {
           })
         })
       : new TurnOrchestrator(orchOpts)
-  const multiAgentRuntime = orchestrationMode === 'evented_v2'
+  const multiAgentRoot = join(options.dataDir, 'threads')
+  const multiAgentRuns = orchestrationMode === 'evented_v2'
+    ? new FileMultiAgentRunStore(multiAgentRoot)
+    : undefined
+  const multiAgentMailbox = orchestrationMode === 'evented_v2'
+    ? new FileMailboxStore(multiAgentRoot)
+    : undefined
+  const multiAgentRuntime = multiAgentRuns && multiAgentMailbox
     ? new EventedV2MultiAgentRuntime({
-        runs: new FileMultiAgentRunStore(join(options.dataDir, 'threads')),
-        mailbox: new FileMailboxStore(join(options.dataDir, 'threads')),
+        runs: multiAgentRuns,
+        mailbox: multiAgentMailbox,
         graph: eventedV2AgentGraphForRuntimeOptions(options),
         ids: (prefixName: string) => core.ids.next(prefixName),
         nowIso: core.nowIso
+      })
+    : undefined
+  const eventedV2AgentPeers = options.runtime?.eventedV2AgentPeers
+  const eventedV2AgentPeerBindings = eventedV2AgentPeers && Object.keys(eventedV2AgentPeers).length > 0
+    ? eventedV2AgentPeers
+    : undefined
+  const multiAgentRemoteWorker = multiAgentRuntime && multiAgentMailbox && multiAgentRuns && eventedV2AgentPeerBindings
+    ? new EventedV2RemoteAgentWorker({
+        runtime: multiAgentRuntime,
+        mailbox: multiAgentMailbox,
+        runs: multiAgentRuns,
+        peerInvoker: tools.peerRegistry,
+        agentPeers: eventedV2AgentPeerBindings
       })
     : undefined
   const eventedV2OutboxReconcilerConfig = options.runtime?.eventedV2OutboxReconciler
@@ -1657,8 +1678,10 @@ async function assembleRuntime(input: {
     usageService: core.usageService,
     authService: core.authService,
     userDataStore: core.userDataStore,
+    peerRegistry: tools.peerRegistry,
     ...(multiAgentRuntime ? { multiAgentRuntime } : {}),
     ...(multiAgentOutboxReconciler ? { multiAgentOutboxReconciler } : {}),
+    ...(multiAgentRemoteWorker ? { multiAgentRemoteWorker } : {}),
     eventBus: core.eventBus,
     sessionStore: core.sessionStore,
     events: core.events,

@@ -6,7 +6,9 @@ import {
   type AgentGraph,
   type MailboxMessage,
   type MultiAgentOutboxIntent,
-  type MultiAgentRun
+  type MultiAgentRun,
+  type PeerArtifact,
+  type PeerTask
 } from '@qiongqi/contracts'
 import type { LeaseFence, MailboxStore, MultiAgentRunStore, MultiAgentRunUpdateOptions } from '@qiongqi/ports'
 import { nextNodeForCondition, requireGraphNode, validateAgentGraph } from './multi-agent-graph.js'
@@ -64,6 +66,23 @@ export type EventedV2AgentWorkerProcessResult = {
   messageId?: string
 }
 
+export type EventedV2PeerInvoker = {
+  invokePeer(cardId: string, task: PeerTask, signal: AbortSignal): Promise<PeerArtifact>
+}
+
+export type EventedV2RemoteAgentWorkerOptions = {
+  runtime: Pick<EventedV2MultiAgentRuntime, 'completeAgentTask'>
+  mailbox: MailboxStore
+  runs?: Pick<MultiAgentRunStore, 'load'>
+  peerInvoker: EventedV2PeerInvoker
+  agentPeers: Record<string, string>
+}
+
+export type EventedV2RemoteAgentWorkerProcessResult = EventedV2AgentWorkerProcessResult & {
+  peerCardId?: string
+  peerStatus?: PeerArtifact['status']
+}
+
 export class EventedV2AgentWorker {
   constructor(private readonly options: EventedV2AgentWorkerOptions) {}
 
@@ -82,6 +101,42 @@ export class EventedV2AgentWorker {
     })
     await this.options.mailbox.complete(message.messageId)
     return { processed: true, runId: message.runId, messageId: message.messageId }
+  }
+}
+
+export class EventedV2RemoteAgentWorker {
+  constructor(private readonly options: EventedV2RemoteAgentWorkerOptions) {}
+
+  async processNext(input: {
+    agentId: string
+    signal?: AbortSignal
+  }): Promise<EventedV2RemoteAgentWorkerProcessResult> {
+    const message = await this.options.mailbox.claimNext(input.agentId)
+    if (!message) return { processed: false }
+    const peerCardId = this.options.agentPeers[input.agentId]
+    if (!peerCardId) throw new Error(`No peer binding configured for evented_v2 agent: ${input.agentId}`)
+    const run = await this.options.runs?.load(message.runId)
+    const signal = input.signal ?? new AbortController().signal
+    const task: PeerTask = {
+      prompt: promptFromMailboxMessage(message),
+      ...(run?.workspaceKey ? { workspace: run.workspaceKey } : {}),
+      label: `evented_v2:${input.agentId}`
+    }
+    const artifact = await this.options.peerInvoker.invokePeer(peerCardId, task, signal)
+    await this.options.runtime.completeAgentTask({
+      runId: message.runId,
+      agentId: input.agentId,
+      condition: conditionFromPeerArtifact(artifact),
+      summary: artifact.summary ?? artifact.error
+    })
+    await this.options.mailbox.complete(message.messageId)
+    return {
+      processed: true,
+      runId: message.runId,
+      messageId: message.messageId,
+      peerCardId,
+      peerStatus: artifact.status
+    }
   }
 }
 
@@ -679,6 +734,19 @@ export class EventedV2MultiAgentRuntime {
 
 function updateOptions(fence: LeaseFence | undefined): MultiAgentRunUpdateOptions | undefined {
   return fence ? { fence } : undefined
+}
+
+function promptFromMailboxMessage(message: MailboxMessage): string {
+  const prompt = message.payload.prompt
+  return typeof prompt === 'string' && prompt.trim() ? prompt : JSON.stringify(message.payload)
+}
+
+function conditionFromPeerArtifact(artifact: PeerArtifact): string {
+  return {
+    completed: 'completed',
+    failed: 'failed',
+    aborted: 'aborted'
+  }[artifact.status]
 }
 
 function latestAgentRunIndex(run: MultiAgentRun, agentId: string, nodeId: string): number {

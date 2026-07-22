@@ -63,6 +63,9 @@
       "edges": [
         { "from": "planner", "to": "wait_approval", "condition": "completed" }
       ]
+    },
+    "eventedV2AgentPeers": {
+      "specialist": "peer_specialist"
     }
   },
   "models": {

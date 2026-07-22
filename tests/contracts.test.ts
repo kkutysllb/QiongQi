@@ -47,6 +47,7 @@ describe('contracts', () => {
 
   it('parses a declarative evented v2 agent graph runtime tuning', () => {
     const runtime = RuntimeTuningConfigSchema.parse({
+      eventedV2AgentPeers: { researcher: 'peer_researcher' },
       eventedV2AgentGraph: {
         version: 1,
         graphId: 'planner_wait_graph',
@@ -63,6 +64,7 @@ describe('contracts', () => {
 
     expect(runtime.eventedV2AgentGraph?.graphId).toBe('planner_wait_graph')
     expect(runtime.eventedV2AgentGraph?.startNodeId).toBe('planner')
+    expect(runtime.eventedV2AgentPeers).toEqual({ researcher: 'peer_researcher' })
   })
 
   it('rejects malformed declarative evented v2 agent graph runtime tuning', () => {

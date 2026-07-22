@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createQiongqiServeRuntime } from '@qiongqi/http'
+import type { AgentCard } from '@qiongqi/contracts'
 
 type RuntimeOptions = Parameters<typeof createQiongqiServeRuntime>[0]
 
@@ -160,6 +161,69 @@ describe('runtime factory evented_v2 multi-agent wiring', () => {
     }
   })
 
+  it('mounts a remote agent worker from evented_v2 peer bindings', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
+    const runtime = await createQiongqiServeRuntime({
+      host: '127.0.0.1',
+      port: 0,
+      dataDir,
+      runtimeToken: 'tok',
+      apiKey: 'test-key',
+      baseUrl: 'http://localhost',
+      model: 'test-model',
+      approvalPolicy: 'never',
+      sandboxMode: 'danger-full-access',
+      tokenEconomyMode: false,
+      insecure: true,
+      orchestrationMode: 'evented_v2',
+      runtime: {
+        eventedV2AgentPeers: { specialist: 'peer_specialist' }
+      }
+    })
+    try {
+      await runtime.peerRegistry?.registerLocal({
+        card: peerCard('peer_specialist'),
+        invoke: async (task) => ({
+          peerCardId: 'peer_specialist',
+          status: 'completed',
+          summary: `remote handled: ${task.prompt}`
+        })
+      })
+      const run = await runtime.multiAgentRuntime?.start({
+        threadId: 'thread_1',
+        turnId: 'turn_1',
+        workspaceKey: 'workspace_1',
+        prompt: 'Use remote specialist.'
+      })
+      expect(run).toBeDefined()
+      await runtime.multiAgentRuntime?.handoff({
+        runId: run!.runId,
+        sourceAgentId: 'Qiongqi',
+        targetAgentId: 'specialist',
+        prompt: 'Handle remotely.'
+      })
+
+      const result = await runtime.multiAgentRemoteWorker?.processNext({ agentId: 'specialist' })
+
+      expect(result).toMatchObject({ processed: true, peerCardId: 'peer_specialist' })
+      await expect(runtime.multiAgentRuntime?.timeline(run!.runId)).resolves.toMatchObject({
+        status: 'completed',
+        activeNodeId: 'done',
+        agentRuns: [
+          expect.objectContaining({ agentId: 'Qiongqi', status: 'running' }),
+          expect.objectContaining({
+            agentId: 'specialist',
+            status: 'completed',
+            summary: 'remote handled: Handle remotely.'
+          })
+        ]
+      })
+    } finally {
+      await runtime.shutdown?.()
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
   it('rejects an invalid evented_v2 agent graph from runtime config', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
     try {
@@ -196,3 +260,30 @@ describe('runtime factory evented_v2 multi-agent wiring', () => {
     }
   })
 })
+
+function peerCard(id: string): AgentCard {
+  return {
+    id,
+    url: 'http://peer.example.test',
+    name: id,
+    version: '0.0.0',
+    capabilities: {
+      mcp: { enabled: false, servers: {} },
+      web: { enabled: false, fetchEnabled: false, searchEnabled: false },
+      skills: { enabled: false },
+      subagents: { enabled: false, maxParallel: 0, maxChildRuns: 0 },
+      attachments: { enabled: false },
+      memory: { enabled: false }
+    },
+    skills: [],
+    model: {
+      provider: 'fake',
+      model: 'fake',
+      endpointFormats: ['openai-chat-completions']
+    },
+    endpoints: {
+      agentCard: '/.well-known/agent-card.json',
+      a2a: '/a2a'
+    }
+  }
+}
