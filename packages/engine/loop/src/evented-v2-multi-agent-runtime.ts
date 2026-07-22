@@ -256,6 +256,15 @@ export class EventedV2MultiAgentRuntime {
     return this.withRunLock(runId, () => this.flushPendingOutboxUnlocked(runId))
   }
 
+  async flushAllPendingOutbox(): Promise<MultiAgentRun[]> {
+    const pending = await this.options.runs.listWithPendingOutbox()
+    const flushed: MultiAgentRun[] = []
+    for (const run of pending) {
+      flushed.push(await this.flushPendingOutbox(run.runId))
+    }
+    return flushed
+  }
+
   private async flushPendingOutboxUnlocked(runId: string): Promise<MultiAgentRun> {
     const current = await this.options.runs.load(runId)
     if (!current) throw new Error(`MultiAgentRun not found: ${runId}`)

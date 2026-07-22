@@ -95,6 +95,18 @@ export class FileMultiAgentRunStore implements MultiAgentRunStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }
 
+  async listWithPendingOutbox(): Promise<MultiAgentRun[]> {
+    const root = join(this.rootDir, 'multi-agent-runs')
+    const threadDirs = await readDirIfExists(root)
+    const all: MultiAgentRun[] = []
+    for (const threadDir of threadDirs) {
+      all.push(...await this.listByThread(threadDir))
+    }
+    return all
+      .filter((run) => run.outbox.some((intent) => intent.status === 'pending'))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
   async delete(runId: string): Promise<void> {
     const safeRunId = safeSegment(runId, 'runId')
     await withFileLock(this.runLockPath(safeRunId), async () => {

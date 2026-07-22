@@ -21,6 +21,7 @@ describe('multi-agent runtime stores', () => {
         runs[index] = next
         return next
       },
+      listWithPendingOutbox: async () => runs.filter((run) => run.outbox.some((intent) => intent.status === 'pending')),
       listByThread: async (threadId) => runs.filter((run) => run.threadId === threadId),
       delete: async (runId) => {
         const index = runs.findIndex((run) => run.runId === runId)
@@ -115,6 +116,18 @@ describe.each([
         'agent_a',
         'agent_b'
       ])
+    } finally {
+      if ('root' in created) await rm(created.root, { recursive: true, force: true })
+    }
+  })
+
+  it('lists runs with pending outbox intents for reconciliation', async () => {
+    const created = await factory()
+    try {
+      await created.runs.save(baseRun())
+      await created.runs.save(runWithPendingOutbox())
+
+      expect(await created.runs.listWithPendingOutbox()).toMatchObject([{ runId: 'mar_pending' }])
     } finally {
       if ('root' in created) await rm(created.root, { recursive: true, force: true })
     }
@@ -259,5 +272,20 @@ function baseMessage(): MailboxMessage {
     payload: { prompt: 'Research runtime design.' },
     createdAt: '2026-07-21T00:00:00.000Z',
     updatedAt: '2026-07-21T00:00:00.000Z'
+  }
+}
+
+function runWithPendingOutbox(): MultiAgentRun {
+  return {
+    ...baseRun(),
+    runId: 'mar_pending',
+    outbox: [{
+      outboxId: 'outbox_1',
+      kind: 'mailbox_enqueue',
+      status: 'pending',
+      message: { ...baseMessage(), runId: 'mar_pending' },
+      createdAt: '2026-07-21T00:00:00.000Z',
+      updatedAt: '2026-07-21T00:00:00.000Z'
+    }]
   }
 }

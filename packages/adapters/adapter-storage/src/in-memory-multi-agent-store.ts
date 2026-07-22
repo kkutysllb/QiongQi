@@ -31,6 +31,12 @@ export class InMemoryMultiAgentRunStore implements MultiAgentRunStore {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
   }
 
+  async listWithPendingOutbox(): Promise<MultiAgentRun[]> {
+    return [...this.runs.values()]
+      .filter((run) => run.outbox.some((intent) => intent.status === 'pending'))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  }
+
   async delete(runId: string): Promise<void> {
     this.runs.delete(runId)
   }

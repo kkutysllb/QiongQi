@@ -283,6 +283,48 @@ describe('EventedV2MultiAgentRuntime', () => {
     }
   })
 
+  it('flushes all pending outbox handoffs discovered from the run store', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qiongqi-evented-v2-runtime-'))
+    const runs = new FileMultiAgentRunStore(root)
+    const graph = defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' })
+    const runtimeA = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new FailFirstEnqueueFileMailboxStore(root),
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const runtimeB = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox: new FileMailboxStore(root),
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    try {
+      const run = await runtimeA.start({
+        threadId: 'thread_1',
+        turnId: 'turn_1',
+        workspaceKey: 'workspace_1',
+        prompt: 'Research evented v2.'
+      })
+      await expect(runtimeA.handoff({
+        runId: run.runId,
+        sourceAgentId: 'manager',
+        targetAgentId: 'researcher',
+        prompt: 'Summarize the current evented loop.'
+      })).rejects.toThrow('enqueue failed once')
+
+      const recovered = await runtimeB.flushAllPendingOutbox()
+
+      expect(recovered.map((candidate) => candidate.runId)).toEqual([run.runId])
+      expect(await new FileMailboxStore(root).listForRun(run.runId)).toMatchObject([{ status: 'queued' }])
+      expect(await runs.listWithPendingOutbox()).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('does not requeue a handoff message that another worker already claimed', async () => {
     const runs = new InMemoryMultiAgentRunStore()
     const mailbox = new InMemoryMailboxStore()

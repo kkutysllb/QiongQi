@@ -4,6 +4,7 @@ export interface MultiAgentRunStore {
   save(run: MultiAgentRun): Promise<void>
   load(runId: string): Promise<MultiAgentRun | undefined>
   update(runId: string, mutate: (current: MultiAgentRun) => MultiAgentRun | Promise<MultiAgentRun>): Promise<MultiAgentRun>
+  listWithPendingOutbox(): Promise<MultiAgentRun[]>
   listByThread(threadId: string): Promise<MultiAgentRun[]>
   delete(runId: string): Promise<void>
 }
