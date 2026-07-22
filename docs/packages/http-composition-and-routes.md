@@ -45,7 +45,7 @@
 | `health.ts` | `GET /health` + `GET /ready` |
 | `agent-card.ts` | `GET /.well-known/agent-card.json` |
 | `a2a.ts` | `POST /a2a` + Stage 4 端点 |
-| `runtime-info.ts` | `GET /v1/runtime/info` + `/tools` + `/metrics`，并在 Prometheus 输出中追加 evented_v2 run/agent/outbox 指标 |
+| `runtime-info.ts` | `GET /v1/runtime/info` + `/tools` + `/metrics`，并在 Prometheus 输出中追加 evented_v2 run/agent/outbox、remote scheduler、worker registry 与 rollout 指标 |
 | `skills.ts` | `GET /v1/skills` |
 | `attachments.ts` | `POST/GET /v1/attachments` |
 | `artifacts.ts` | `GET /v1/threads/:id/artifacts` + `GET /v1/threads/:id/artifacts/content?path=...` |
@@ -69,7 +69,7 @@
   1. `createCore()` —— 存储 + EventBus + Thread/Turn/Usage 服务
   2. `createModelAdapter()` —— `ModelCompatClient` + 能力
   3. `createToolMatrix()` —— CapabilityRegistry + LocalToolHost + Skills + Delegation + Memory + Web + MCP
-  4. `createAgent()` —— `TurnOrchestrator`（或 `EventedTurnOrchestrator` if `orchestrationMode='evented'`）组装
+  4. `createAgent()` —— 默认组装 `kernel_v3`；显式 `evented_v2` 或 `runtime.eventedV2Rollout` 会装配 evented_v2 multi-agent runtime，并在 run/thread 粒度按 rollout 决策选择 evented_v2 或 fallback runner
 - **`seedUsageCarryover` 必跑**：从 `sessionStore.loadEventsSince(threadId, 0)` 重建 `UsageCounter`，否则首次启动的 usage 数字为 0。
 - **`ServerRuntime.info()` 必跑**：用于 `QIONGQI_READY` 握手返回启动元信息。
 - **`createAgent` 与 preset 正交**：`createCodingAgent` / `createQiongqiServeRuntime` 是不同 `agentName` / `systemPrompt` / `pinnedConstraints` 注入；不引入新基类。
@@ -79,6 +79,7 @@
 - **ReviewService 独立**：`buildReadOnlyBuiltinLocalTools` + 独立 event bus / session store / thread store —— 不污染主线程状态。
 - **18 个 routes 顺序注册**：`buildRouter` 按文件顺序注册（agent-card 在 v1 之前）；先匹配的胜出。
 - **`/health` 不需鉴权**：`a2a.ts` 和 `health.ts` 是仅有的无 auth 端点。
+- **`kernel_v3` / `evented_v2` 分层**：`kernel_v3` 是默认生产执行核；`evented_v2` 是多 Agent 编排 runtime。`runtime.eventedV2Rollout` 在 HTTP runtime factory 内创建 run 级 controller，支持 shadow/canary/default 与 `autoFallback`。
 
 ### 4. 行为规约
 
@@ -167,5 +168,5 @@ const reviewStatus = await handle.runtime.runReview({
 
 - 架构文档：[`../architecture.zh.md#4-关键架构决策`](../architecture.zh.md#4-关键架构决策)（§4.1 Composition Root）
 - 消费方：`@qiongqi/cli/serve-entry.ts` 调用 `createCodingAgent` + `createHttpServer`
-- 源文件：[`runtime-factory.ts`](../../packages/http/src/runtime-factory.ts)、[`review-service.ts`](../../packages/http/src/review-service.ts)、[`routes/*.ts`](../../packages/http/src/routes/)
+- 源文件：[`runtime-factory.ts`](../../packages/http-layer/http/src/runtime-factory.ts)、[`review-service.ts`](../../packages/http-layer/http/src/review-service.ts)、[`routes/*.ts`](../../packages/http-layer/http/src/routes/)
 - 测试：[`../../tests/http-server.test.ts`](../../tests/http-server.test.ts)（37 个用例，覆盖所有 routes）

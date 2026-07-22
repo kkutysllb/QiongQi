@@ -1,6 +1,6 @@
 # @qiongqi/cli
 
-> `qiongqi` 命令行入口：`serve` / `run` / `chat` / `exec`。
+> `qiongqi` 命令行入口：`serve` / `run` / `chat` / `exec` / `worker`。
 > Layer 9 — 依赖：`@qiongqi/http`、`@qiongqi/contracts`、`@qiongqi/adapter-tools`、`@qiongqi/ports`、`@qiongqi/loop`、`@qiongqi/preset-coding`。
 
 ---
@@ -9,12 +9,13 @@
 
 ### 1. 职责
 
-`@qiongqi/cli` 是 Qiongqi 的**用户入口**。`qiongqi` 二进制（`./dist/serve-entry.js`）解析 argv 并分发到 4 个子命令：
+`@qiongqi/cli` 是 Qiongqi 的**用户入口**。`qiongqi` 二进制（`./dist/serve-entry.js`）解析 argv 并分发到 5 个子命令：
 
 - **`qiongqi serve`** —— 启动 HTTP/SSE 运行时（默认子命令）
 - **`qiongqi run <prompt>`** —— 单次 agent turn，stdout 流式输出
 - **`qiongqi chat`** —— TTY 交互式（`/exit` / `/quit` 退出）
 - **`qiongqi exec <tool>`** —— 直接调用工具（`--list-tools` / `--args <json>`）
+- **`qiongqi worker`** —— 不启动 HTTP server 的 evented_v2 worker 入口，驱动 outbox reconciler 与 remote agent scheduler；支持 `--once`、daemon、shard、pool supervisor 与 `--deployment-plan`
 
 ### 2. 公共 API
 
@@ -50,6 +51,7 @@
 - **环境变量优先列表**：`QIONGQI_API_KEY` / `QIONGQI_BASE_URL`（首选）+ 旧名 `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL`（兼容）。
 - **`run` 流式输出 `assistant_text_delta`**：实时写 stdout，不缓冲。
 - **`exec --list-tools` 列出所有可用工具**（用 in-memory runtime 构建）。
+- **`worker --deployment-plan` 不创建 runtime**：只输出稳定 supervisor 命令、shard worker 命令与 probe/metrics 路径，供生产编排模板消费。
 
 ### 4. 行为规约
 
@@ -67,6 +69,10 @@
 - `qiongqi run --json outputs structured events as JSON`
 - `qiongqi chat requires TTY; refuses to start in non-interactive mode`
 - `qiongqi exec --list-tools lists all available tools`
+- `qiongqi worker --once runs evented_v2 outbox and remote-agent scheduler flushes without starting the HTTP server`
+- `qiongqi worker --shard-index/--shard-count filters eventedV2AgentPeers before runtime creation for multi-worker agent sharding`
+- `qiongqi worker --pool-size starts a local worker supervisor and spawns one child worker per shard`
+- `qiongqi worker --deployment-plan prints production worker supervisor commands, shard worker commands, and probe paths without creating runtimes`
 
 ### 5. 使用示例
 
@@ -92,11 +98,20 @@ qiongqi chat --api-key "$KEY"
 # 6. 直接工具调用
 qiongqi exec --list-tools
 qiongqi exec read --args '{"path":"/work/README.md"}'
+
+# 7. evented_v2 worker 部署计划
+qiongqi worker \
+  --deployment-plan \
+  --json \
+  --config ./config.json \
+  --pool-size auto \
+  --restart-backoff-ms 1000 \
+  --max-restarts 5
 ```
 
 ### 6. 关联文档
 
 - 架构文档：[`../architecture.zh.md#3-包结构`](../architecture.zh.md#3-包结构)（§3.3 Layer 9 CLI 层）
 - 消费方：用户 / GUI 通过 `qiongqi` 二进制交互
-- 源文件：[`serve-entry.ts`](../../packages/cli/src/serve-entry.ts)、[`serve.ts`](../../packages/cli/src/serve.ts)、[`agent-cli.ts`](../../packages/cli/src/agent-cli.ts)、[`cli-options.ts`](../../packages/cli/src/cli-options.ts)、[`index.ts`](../../packages/cli/src/index.ts)
+- 源文件：[`serve-entry.ts`](../../packages/cli-layer/cli/src/serve-entry.ts)、[`serve.ts`](../../packages/cli-layer/cli/src/serve.ts)、[`agent-cli.ts`](../../packages/cli-layer/cli/src/agent-cli.ts)、[`cli-options.ts`](../../packages/cli-layer/cli/src/cli-options.ts)、[`index.ts`](../../packages/cli-layer/cli/src/index.ts)
 - 测试：[`../../tests/serve.test.ts`](../../tests/serve.test.ts)、[`../../tests/agent-cli.test.ts`](../../tests/agent-cli.test.ts)

@@ -45,7 +45,7 @@
 | [`skills.md`](./skills.md) | `@qiongqi/skills` | SkillRuntime + SkillPluginHost + Marketplace |
 | [`delegation-runtime.md`](./delegation-runtime.md) | `@qiongqi/delegation` | DelegationRuntime + ChildAgentExecutor |
 | [`delegation-registry.md`](./delegation-registry.md) | `@qiongqi/delegation` | PeerRegistry + SkillRegistry + TaskThreadMap |
-| [`loop-orchestrator.md`](./loop-orchestrator.md) | `@qiongqi/loop` | TurnOrchestrator + EventedTurnOrchestrator + TurnEventBus + InflightTracker + SteeringQueue |
+| [`loop-orchestrator.md`](./loop-orchestrator.md) | `@qiongqi/loop` | kernel_v3 默认生产核 + evented_v2 多 Agent runtime（AgentGraph / mailbox / outbox / remote scheduler / rollout）|
 | [`loop-prompt-and-context.md`](./loop-prompt-and-context.md) | `@qiongqi/loop` | PromptBuilder + ModelStepRunner + ContinuationPolicy + ContextCompactor + TokenEconomy + AutoModelRouter |
 | [`loop-tool-coordination.md`](./loop-tool-coordination.md) | `@qiongqi/loop` | ToolCallCoordinator + ToolStormBreaker + request-history-hygiene + history-healing |
 
@@ -54,8 +54,8 @@
 | 文档 | 包 | 核心内容 |
 |------|----|---------|
 | [`http-transport.md`](./http-transport.md) | `@qiongqi/http` | Router / SSE / Auth / Response / Node HTTP / A2A transport |
-| [`http-composition-and-routes.md`](./http-composition-and-routes.md) | `@qiongqi/http` | createAgent Composition Root + ReviewService + runtime / A2A / artifacts / memory / usage routes |
-| [`cli.md`](./cli.md) | `@qiongqi/cli` | qiongqi serve / run / chat / exec |
+| [`http-composition-and-routes.md`](./http-composition-and-routes.md) | `@qiongqi/http` | createAgent Composition Root + ReviewService + runtime / A2A / artifacts / memory / usage / evented_v2 metrics routes |
+| [`cli.md`](./cli.md) | `@qiongqi/cli` | qiongqi serve / run / chat / exec / worker / deployment-plan |
 | [`preset-coding.md`](./preset-coding.md) | `@qiongqi/preset-coding` | createCodingAgent + CODING_SYSTEM_PROMPT + CODING_PINNED_CONSTRAINTS |
 
 ## 文档结构

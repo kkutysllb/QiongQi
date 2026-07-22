@@ -42,13 +42,42 @@ Core goal: **maximize the ROI of every token.** Avoid duplicate tool schemas,
 runaway tool outputs, malformed history, invalid retries, and any stable prefix
 that could be cached but is missed.
 
-The current implementation includes classic / evented turn orchestration,
-declarative loop engineering (LoopRunner interprets LoopPlan phases and uses the Evaluator for bounded retry), HTTP/SSE APIs, A2A task lifecycle,
-Skill/MCP/Web/Memory/Delegation providers, attachments/artifacts, hybrid
-SQLite+JSONL storage, Prometheus metrics, structured access logs,
-OpenTelemetry HTTP tracing, and Post-P1 runtime governance such as tool
-result budgeting, bash command audit, virtual paths, and terminal-state
-guards.
+The current implementation includes classic / evented_v2 / kernel_v3
+orchestration modes, with `kernel_v3` as the default production execution
+kernel. `evented_v2` is the declarative Loop Engineering multi-agent runtime
+foundation: durable runs, AgentGraph, mailbox, run-local outbox, remote agent
+worker/scheduler, worker registry, timeline/metrics management, and a
+shadow/canary/fallback rollout loop. The production surface also includes
+HTTP/SSE APIs, A2A task lifecycle, Skill/MCP/Web/Memory/Delegation providers,
+attachments/artifacts, hybrid SQLite+JSONL storage, Prometheus metrics,
+structured access logs, OpenTelemetry HTTP tracing, and governance features
+such as tool result budgeting, bash command audit, virtual paths, and
+terminal-state guards.
+
+### Relationship Between evented_v2 and kernel_v3
+
+`kernel_v3` and `evented_v2` are not a simple old/new replacement pair. They
+serve different layers of orchestration:
+
+- `kernel_v3` is the default production execution kernel. It focuses on
+  deterministic single-run/turn execution: checkpoints, effect idempotency,
+  replay, lease/fence behavior, and provider-neutral tool handling.
+- `evented_v2` is the declarative multi-agent orchestration runtime. It focuses
+  on cross-agent graph progress: AgentGraph, handoff, mailbox, run-local
+  outbox, remote worker/scheduler, worker registry, timeline/metrics, and the
+  rollout control plane.
+- In production, `kernel_v3` remains the stable fallback baseline.
+  `evented_v2` takes on multi-agent traffic progressively through
+  `runtime.eventedV2Rollout` stages (`shadow` / `canary` / `default`) and can
+  automatically fall back through `fallbackMode: "kernel_v3"` plus
+  `autoFallback` when failure-rate or consecutive-failure thresholds trip.
+
+### Project Boundary
+
+The KWorks compatibility layer has been fully removed from this repository.
+Qiongqi remains a domain-neutral general Agent engine; product-specific
+adaptation belongs in external adapters, deployment configuration, or downstream
+projects, not in the core engine.
 
 ---
 
@@ -130,6 +159,30 @@ curl -H "Authorization: Bearer $QIONGQI_RUNTIME_TOKEN" \
 
 `/ready` exposes storage degraded state; `/v1/runtime/metrics` returns JSON by default and can also export Prometheus text for token/cache usage, A2A tasks, and storage diagnostics.
 
+### evented_v2 Production Workers and Rollout
+
+evented_v2 workers can run the outbox reconciler and remote-agent scheduler
+without starting an HTTP server. Production orchestration systems can first
+generate a stable JSON deployment plan:
+
+```bash
+qiongqi worker \
+  --deployment-plan \
+  --json \
+  --config ./config.json \
+  --pool-size auto \
+  --restart-backoff-ms 1000 \
+  --max-restarts 5
+```
+
+`runtime.eventedV2Rollout` supports:
+
+- `off`: keep the fallback mode, defaulting to `kernel_v3`.
+- `shadow`: keep the primary path on fallback while recording an evented_v2 shadow intent and decision metrics.
+- `canary`: route per run/thread with a stable `threadId` hash.
+- `default`: make evented_v2 the primary runtime mode.
+- `autoFallback`: automatically force traffic back to `kernel_v3` / `classic` based on recent failure rate, consecutive failures, and cooldown.
+
 ### Script Reference
 
 ```bash
@@ -137,9 +190,9 @@ pnpm -r run build          # Build all 18 packages
 pnpm run prepare:sqlite    # Build the better-sqlite3 native binding for the current Node ABI
 pnpm run verify:sqlite     # Verify the better-sqlite3 native binding for hybrid storage
 pnpm run verify:evented-a2a # Local fake-model two-instance evented + A2A verification
-pnpm test                  # Full test suite (71 files, 510 tests)
+pnpm test                  # Full test suite (current baseline: 124 files, 883 tests)
 pnpm test:unit             # Unit tests
-pnpm test:fast             # Fast test subset (70 files, 481 tests)
+pnpm test:fast             # Fast test subset
 ```
 
 ---
@@ -158,8 +211,8 @@ pnpm test:fast             # Fast test subset (70 files, 481 tests)
                      │
 ┌────────────────────▼────────────────────────────┐
 │              @qiongqi/loop                       │
-│  TurnOrchestrator · LoopRunner · LoopPlan        │
-│  PromptBuilder · Policy · Evaluator              │
+│  KernelV3 · EventedV2 · LoopRunner · LoopPlan    │
+│  AgentGraph · Mailbox · Outbox · Rollout         │
 │  ToolCallCoordinator · ContextCompactor          │
 └────────────────────┬────────────────────────────┘
                      │
@@ -192,7 +245,7 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 | `@qiongqi/domain` | Thread/Turn/Item/Event entities |
 | `@qiongqi/ports` | ModelClient/ToolHost/Stores interfaces |
 | `@qiongqi/cache` | LRU/TTL cache, immutable prefix |
-| `@qiongqi/loop` | TurnOrchestrator/LoopRunner/LoopPlan/PromptBuilder/Policy |
+| `@qiongqi/loop` | kernel_v3 / evented_v2 / classic orchestration, LoopRunner/LoopPlan, AgentGraph, mailbox/outbox, rollout |
 | `@qiongqi/services` | Thread/Turn/Usage services |
 | `@qiongqi/adapter-model` | Provider-neutral model compatibility client |
 | `@qiongqi/adapter-tools` | Built-in tools + MCP/Web/Memory/Delegation providers |
@@ -215,7 +268,10 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 ## ✨ Features
 
 ### 🔧 Agent Loop
-- **Declarative Loop Engineering**: the evented mode evolves into a declarative loop substrate — `LoopRunner` interprets the `LoopPlan` phase set (build-prompt → run-model → decide → optional evaluate → dispatch-tools); rich events (`prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`) are materialized and appended to a `LoopRun` audit log; a pluggable deterministic `LoopEvaluator` triggers bounded retry/reflection according to the phase retry budget; classic mode is retained as a regression anchor
+- **Kernel v3 default production kernel**: durable checkpoints, effect idempotency, and provider-neutral tool handling; this is the default production execution mode
+- **Declarative Loop Engineering**: evented_v2 evolves into a declarative loop substrate — `LoopRunner` interprets the `LoopPlan` phase set (build-prompt → run-model → decide → optional evaluate → dispatch-tools); rich events (`prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`) are materialized and appended to a `LoopRun` audit log; a pluggable deterministic `LoopEvaluator` triggers bounded retry/reflection according to the phase retry budget; classic mode is retained as a regression anchor
+- **evented_v2 multi-agent runtime**: declarative AgentGraph, durable runs, mailbox, run-local outbox, remote agent worker/scheduler, worker registry, and timeline/metrics management
+- **Production rollout loop**: `runtime.eventedV2Rollout` supports shadow/canary/default, routes at run/thread granularity, and uses `autoFallback` to force traffic back to the fallback mode
 - **Cache-first orchestration**: Immutable prompt prefix + TTL/LRU cache + inflight tracking
 - **Context compaction**: Soft/hard threshold-triggered summarization
 - **Token economy**: Compress tool descriptions and results
@@ -247,7 +303,8 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 │   └── qiongqi.png               # Project cover image
 ├── docs/                          # Technical docs (bilingual)
 │   ├── architecture.{zh,en}.md   # Unified architecture (philosophy + technical architecture + packages)
-│   ├── deployment.{zh,en}.md     # Production deployment, probes, metrics, OTel, A2A verification
+│   ├── deployment.{zh,en}.md     # Production deployment, probes, metrics, OTel, A2A, evented_v2 worker/rollout
+│   ├── evented-v2-runtime.{zh,en}.md # evented_v2 / kernel_v3 relationship, production enablement, remaining work
 │   ├── packages/                 # 27 per-package technical docs
 │   └── superpowers/plans/        # Runtime governance and external A2A plans
 ├── packages/                      # 18 @qiongqi/* packages (packages/<layer>/<package>)
@@ -262,7 +319,7 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 │   ├── http-layer/http/
 │   ├── cli-layer/cli/
 │   └── presets/preset-coding/
-├── tests/                         # Full test suite (71 files, 510 tests)
+├── tests/                         # Full test suite (current baseline: 124 files, 883 tests)
 ├── deploy/                        # Kubernetes manifests and Prometheus rules
 ├── .github/workflows/ci.yml       # CI: SQLite, typecheck, fast tests, build, A2A
 ├── scripts/                       # Migration and build helper scripts
@@ -282,6 +339,7 @@ Qiongqi uses a pnpm monorepo structure with 18 independent npm packages:
 | **Deployment** | [`docs/deployment.en.md`](./docs/deployment.en.md) |
 | **Package Dependencies** | [`docs/architecture.en.md#appendix-a-complete-dependency-table`](./docs/architecture.en.md) |
 | **Per-Package Docs** | [`docs/packages/`](./docs/packages/) |
+| **evented_v2 Runtime** | [`docs/evented-v2-runtime.en.md`](./docs/evented-v2-runtime.en.md) / [`中文`](./docs/evented-v2-runtime.zh.md) |
 | **External A2A Verification Plan** | [`docs/superpowers/plans/2026-06-23-external-a2a-interoperability.md`](./docs/superpowers/plans/2026-06-23-external-a2a-interoperability.md) |
 | **Runtime Governance Plan** | [`docs/superpowers/plans/2026-06-22-kk-oclaw-runtime-hardening.md`](./docs/superpowers/plans/2026-06-22-kk-oclaw-runtime-hardening.md) |
 | **CI / Delivery Assets** | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml), [`Dockerfile`](./Dockerfile), [`deploy/`](./deploy/) |
@@ -298,10 +356,12 @@ Qiongqi's four-stage architecture refactoring currently stands at:
 | **Stage 1** | SDK extraction + monorepo split | Complete |
 | **Stage 2** | AgentCard + AgentIdentity | Complete |
 | **Stage 3** | TurnOrchestrator event-driven | Complete |
-| **Stage 4** | A2A protocol endpoint | Nearly complete; awaiting external Agent cross-vendor interop verification |
+| **Stage 4** | A2A protocol endpoint | Local closed loop complete; external cross-vendor interop awaits a real counterpart |
 | **Post-P1** | Runtime governance + OpenTelemetry exporter | Complete |
 | **Loop Engineering** | Declarative loop substrate (LoopPlan/LoopRunner/Evaluator) | Complete |
-| **P2** | Real external A2A peer / cross-vendor interoperability | Awaiting external counterpart |
+| **evented_v2 Runtime** | Declarative AgentGraph + durable mailbox/outbox + remote worker/scheduler + timeline/metrics | Production foundation complete |
+| **Production Deployment and Rollout** | worker pool / deployment-plan / shadow-canary-fallback rollout | Baseline loop complete |
+| **Next Deepening** | isolated shadow dual-run diffing, standalone graph manifests, capability constraints, external interoperability | Future control-plane work |
 
 Detailed progress: see CHANGELOG commit history.
 

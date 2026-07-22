@@ -4,7 +4,8 @@
 >
 > **Document purpose**: A unified reference that fuses **design philosophy** and **technical architecture** — the load-bearing layer between `README` (entry point) and `PROGRESS` (changelog).
 >
-> **Version note**: This document reflects the 18-package, Stages 1–3 complete / Stage 4 nearly complete state as of 2026-06-22.
+> **Version note**: This document reflects the 2026-07-22 production runtime baseline: 18 npm packages, local closed loop for the four-stage architecture, `kernel_v3` as the default production execution kernel, and the `evented_v2` multi-agent runtime plus shadow/canary/fallback rollout loop implemented.
+> The KWorks compatibility layer has been fully removed; the Qiongqi core remains a domain-neutral general Agent engine.
 >
 > 中文版本：[`architecture.zh.md`](./architecture.zh.md)
 
@@ -617,7 +618,7 @@ The key decoupling from Stage 1.3. **Goal**: decouple the model client from hard
 
 ### 4.4 OrchestrationMode: classic / evented_v2 / kernel_v3
 
-The runtime now selects `kernel_v3` by default. `classic`, `evented`, and `evented_v2` remain explicit compatibility modes via `QiongqiServeRuntimeOptions.orchestrationMode`; `evented` normalizes to `evented_v2`.
+The runtime now selects `kernel_v3` by default. `kernel_v3` is the deterministic single-run/turn execution kernel: checkpoints, idempotent effects, replay, lease/fence behavior, and provider-neutral tool handling. `evented_v2` is the declarative multi-agent orchestration runtime above that layer: AgentGraph, handoff, mailbox, run-local outbox, remote worker/scheduler, worker registry, timeline/metrics, and rollout control. `classic`, `evented`, and `evented_v2` remain explicit compatibility modes via `QiongqiServeRuntimeOptions.orchestrationMode`; `evented` normalizes to `evented_v2`.
 
 | Mode | Orchestrator | Crash recovery | Use case |
 |------|--------------|----------------|----------|
@@ -626,7 +627,7 @@ The runtime now selects `kernel_v3` by default. `classic`, `evented`, and `event
 | `classic` | `TurnOrchestrator` (explicit step advancement) | none | explicit compatibility fallback |
 | `evented` | legacy alias normalized to `evented_v2` | same as `evented_v2` | legacy config compatibility |
 
-**Shared policy**: the classic path keeps using `runOrchestratorStep`; the evented path interprets `LoopPlan.phases` through `LoopRunner` (build-prompt → run-model → decide → evaluate → dispatch-tools), publishes rich events such as `prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`, and appends them to `LoopRun.events`. `runStepViaEventBus` is retained only as a compatibility API.
+**Layering policy**: `kernel_v3` is the default production execution kernel and fallback baseline. `evented_v2` provides the multi-agent orchestration shell and mounts the evented turn loop, multi-agent run store, mailbox/outbox, remote scheduler, and worker registry when selected. They cooperate through `runtime.eventedV2Rollout`: `shadow` keeps the primary path on fallback while recording an evented_v2 shadow intent; `canary` routes at run/thread granularity with a stable `threadId` hash; `default` makes evented_v2 the primary path; `autoFallback` forces later runs back to `fallbackMode` from recent evented_v2 failure windows. The classic path keeps using `runOrchestratorStep`; `LoopRunner` / `EventedTurnOrchestrator` interpret `LoopPlan.phases` (build-prompt → run-model → decide → evaluate → dispatch-tools), publish rich events such as `prompt:built` / `model:ran` / `decision` / `tools:dispatched` / `step:retry`, and append them to `LoopRun.events`. `runStepViaEventBus` is retained only as a compatibility API.
 
 **Stage 2 run transaction progress**: `EventedV2MultiAgentRuntime.handoff()` writes handoff events and a `mailbox_enqueue` outbox intent in the same `MultiAgentRunStore.update()` transaction. Agent / remote-agent completion writes a `mailbox_complete` outbox intent in the same run transaction. After the run commit, it publishes the mailbox message or completes the mailbox terminal status, then marks the outbox intent as `published`. If a process crashes after run commit and before/after mailbox publish or completion, another runtime instance can call `flushPendingOutbox(runId)` for one run, or use `MultiAgentRunStore.listWithPendingOutbox()` plus `flushAllPendingOutbox()` to discover and recover pending runs in batch. `MailboxStore.complete` is idempotent for replaying the same terminal status, while claim fences still reject late workers that try to overwrite a different terminal status. `EventedV2OutboxReconciler` now provides a periodic, stoppable, observable batch flush shell, and the `evented_v2` server runtime can auto-start it through `runtime.eventedV2OutboxReconciler.enabled`.
 
@@ -669,18 +670,20 @@ Why does Qiongqi treat cache as a first-class citizen?
 
 ## 5. Roadmap & Status
 
-Four-stage refactor plan, **as of 2026-06-22**:
+Four-stage refactor plan, **as of 2026-07-22**:
 
 | Stage | Goal | Status | Key Deliverables |
 |-------|------|--------|------------------|
 | **Stage 1** | SDK extraction + monorepo split | ✅ **Complete** | 18 packages + pnpm workspace + vitest aliases + Composition Root split + PricingProvider abstraction + CLI required-field validation |
 | **Stage 2** | AgentCard + AgentIdentity | ✅ **Complete** | AgentCard / PeerRegistry / SkillRegistry / TaskThreadMap + `GET /.well-known/agent-card.json` + `POST /a2a` + HttpPeerTransport + cross-instance A2A closed loop verification |
 | **Stage 3** | TurnOrchestrator event-driven | ✅ **Complete** | LoopPlan / LoopRunner / LoopRun(TurnStateV2) / FileTurnStateStore / EventedTurnOrchestrator / TurnEventBus + end-to-end kill -9 crash recovery verification |
-| **Stage 4** | A2A protocol endpoints | 🔄 **Nearly complete** | A2ATaskRecord / FileA2ATaskStore + async `POST /a2a/tasks` + synchronous compatible `POST /a2a` + `GET /a2a/tasks/:id` + interruptible `cancel` + `artifacts` + SSE `subscribe` + ArtifactSchema bridge. **Awaiting external Agent for cross-vendor interop verification** |
+| **Stage 4** | A2A protocol endpoints | ✅ **Local closed loop complete** | A2ATaskRecord / FileA2ATaskStore + async `POST /a2a/tasks` + synchronous compatible `POST /a2a` + `GET /a2a/tasks/:id` + interruptible `cancel` + `artifacts` + SSE `subscribe` + ArtifactSchema bridge. External cross-vendor interop still requires a real counterpart |
+| **evented_v2 Runtime** | Declarative multi-agent orchestration | ✅ **Production foundation complete** | AgentGraph + durable runs + mailbox/outbox + remote worker/scheduler + worker registry + timeline/metrics |
+| **Production Deployment and Rollout** | worker pool + rollout | ✅ **Baseline loop complete** | `qiongqi worker --deployment-plan` + run/thread-level shadow/canary/default + `autoFallback` |
 
 **Current verification baseline** (synchronized with `PROGRESS.zh.md`):
-- Full test suite: 484/484 ✅
-- Fast test suite: 455/455 ✅
+- Full test suite: 883/883 ✅ (124 files)
+- Fast test suite: script retained
 - Package build: 18/18 ✅
 - End-to-end (local evented A2A): ✅
 
@@ -882,9 +885,9 @@ Each package has two tsconfigs:
 ### Test
 
 ```bash
-pnpm test                  # Full test suite (65 files, 484 tests)
+pnpm test                  # Full test suite (current baseline: 124 files, 883 tests)
 pnpm test:unit             # Quick unit tests (cache / contracts / domain / ports)
-pnpm test:fast             # Quick subset (excluding builtin-tools)
+pnpm test:fast             # Fast subset
 ```
 
 Test files are centralized at the root `tests/` directory; the root `vitest.config.ts` manages aliases for all 18 packages.

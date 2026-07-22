@@ -134,6 +134,14 @@ docker compose up --build
 curl http://127.0.0.1:8899/ready
 ```
 
+## kernel_v3 与 evented_v2 的生产关系
+
+生产默认执行核是 `kernel_v3`。它承担单 run/turn 的确定性执行、checkpoint、effect idempotency 与 replay，是稳定 fallback 基线。
+
+`evented_v2` 不是 `kernel_v3` 的简单替代版本，而是多 Agent 编排运行时。它在 `kernel_v3` 稳定基线之上提供 AgentGraph、mailbox、run-local outbox、remote worker/scheduler、worker registry、timeline/metrics 和 rollout 控制面。生产启用 evented_v2 时推荐从 `runtime.eventedV2Rollout.stage="shadow"` 开始，再进入 `canary`，最后才切到 `default`。
+
+如果 `runtime.eventedV2Rollout.fallbackMode` 设为 `kernel_v3`，则 evented_v2 canary/default 主路径触发 `autoFallback` 后，后续 run 会自动退回 `kernel_v3`。这也是当前推荐的生产安全形态。
+
 ## evented_v2 Worker Pool 部署计划
 
 生产编排系统可以先生成稳定 JSON 部署计划，再由 Kubernetes、systemd、Nomad 或 CI 模板消费：

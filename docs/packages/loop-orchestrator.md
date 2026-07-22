@@ -1,6 +1,8 @@
 # @qiongqi/loop — Orchestrator
 
 > `TurnOrchestrator` + `EventedTurnOrchestrator` + `EventedV2MultiAgentRuntime` + `EventedV2OutboxReconciler` + `EventedV2RemoteAgentScheduler` + `LoopRunner` + `LoopPlan` + `LoopRun/TurnStateV2` + `TurnEventBus` + `InflightTracker` + `SteeringQueue` —— 回合编排器与多 Agent 编排 shell（classic / evented / evented_v2 / kernel_v3）。
+
+`kernel_v3` 与 `evented_v2` 是分层关系，不是简单替代关系：`kernel_v3` 是默认生产执行核，负责单 run/turn 的 checkpoint、effect idempotency、replay、lease/fence 与 provider-neutral tool handling；`evented_v2` 是声明式多 Agent 编排 runtime，负责 AgentGraph、handoff、mailbox、run-local outbox、remote worker/scheduler、worker registry、timeline/metrics 与 rollout 控制。HTTP runtime factory 可通过 `runtime.eventedV2Rollout` 在 run/thread 粒度把流量从 `kernel_v3` fallback 基线逐步引入 `evented_v2`，并在健康窗口触发时自动回退。
 > Layer 4 — 依赖：`@qiongqi/contracts`、`@qiongqi/domain`、`@qiongqi/ports`、`@qiongqi/cache`、`@qiongqi/services`（type-only）、`@qiongqi/adapter-tools`、`@qiongqi/adapter-model`、`@qiongqi/attachments`、`@qiongqi/skills`、`@qiongqi/memory`。
 
 ---
@@ -178,5 +180,5 @@ const drained = steering.drain() // ['Actually, focus on the security issues']
 
 - 架构文档：[`../architecture.zh.md#4-关键架构决策`](../architecture.zh.md#4-关键架构决策)（§4.4 OrchestrationMode：classic / evented_v2 / kernel_v3）
 - 消费方：`@qiongqi/http` 的 `createAgent` 选择 classic / evented / evented_v2 / kernel_v3；`@qiongqi/delegation` 的 `ChildAgentExecutor` 装配独立 orchestrator
-- 源文件：[`turn-orchestrator.ts`](../../packages/loop/src/turn-orchestrator.ts)、[`evented-turn-orchestrator.ts`](../../packages/loop/src/evented-turn-orchestrator.ts)、[`loop-plan.ts`](../../packages/loop/src/loop-plan.ts)、[`loop-runner.ts`](../../packages/loop/src/loop-runner.ts)、[`loop-evaluator.ts`](../../packages/loop/src/loop-evaluator.ts)、[`turn-event-bus.ts`](../../packages/loop/src/turn-event-bus.ts)、[`turn-event-types.ts`](../../packages/loop/src/turn-event-types.ts)、[`turn-state-store.ts`](../../packages/loop/src/turn-state-store.ts)、[`inflight-tracker.ts`](../../packages/loop/src/inflight-tracker.ts)、[`steering-queue.ts`](../../packages/loop/src/steering-queue.ts)
+- 源文件：[`turn-orchestrator.ts`](../../packages/engine/loop/src/turn-orchestrator.ts)、[`evented-turn-orchestrator.ts`](../../packages/engine/loop/src/evented-turn-orchestrator.ts)、[`loop-plan.ts`](../../packages/engine/loop/src/loop-plan.ts)、[`loop-runner.ts`](../../packages/engine/loop/src/loop-runner.ts)、[`loop-evaluator.ts`](../../packages/engine/loop/src/loop-evaluator.ts)、[`turn-event-bus.ts`](../../packages/engine/loop/src/turn-event-bus.ts)、[`turn-event-types.ts`](../../packages/engine/loop/src/turn-event-types.ts)、[`turn-state-store.ts`](../../packages/engine/loop/src/turn-state-store.ts)、[`inflight-tracker.ts`](../../packages/engine/loop/src/inflight-tracker.ts)、[`steering-queue.ts`](../../packages/engine/loop/src/steering-queue.ts)
 - 验证脚本：[`../../scripts/verify-crash-recovery.mjs`](../../scripts/verify-crash-recovery.mjs)（端到端崩溃恢复）

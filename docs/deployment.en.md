@@ -133,6 +133,23 @@ docker compose up --build
 curl http://127.0.0.1:8899/ready
 ```
 
+## Production Relationship Between kernel_v3 and evented_v2
+
+The default production execution kernel is `kernel_v3`. It handles
+deterministic single-run/turn execution, checkpoints, effect idempotency, and
+replay; it is the stable fallback baseline.
+
+`evented_v2` is not a simple replacement version of `kernel_v3`. It is the
+multi-agent orchestration runtime above that baseline, adding AgentGraph,
+mailbox, run-local outbox, remote worker/scheduler, worker registry,
+timeline/metrics, and rollout control. For production enablement, start with
+`runtime.eventedV2Rollout.stage="shadow"`, move to `canary`, then switch to
+`default` only after the control-plane metrics are healthy.
+
+When `runtime.eventedV2Rollout.fallbackMode` is `kernel_v3`, evented_v2
+canary/default primary traffic automatically falls back to `kernel_v3` after
+`autoFallback` trips. This is the recommended production-safe configuration.
+
 ## evented_v2 Worker Pool Deployment Plan
 
 Production orchestration systems can generate a stable JSON plan first, then feed it into Kubernetes, systemd, Nomad, or CI templates:
