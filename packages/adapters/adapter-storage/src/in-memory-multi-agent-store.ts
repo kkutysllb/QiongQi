@@ -169,10 +169,10 @@ export class InMemoryMailboxStore implements MailboxStore {
     return delivered
   }
 
-  async complete(messageId: string): Promise<void> {
+  async complete(messageId: string, status: 'completed' | 'failed' | 'aborted' = 'completed'): Promise<void> {
     const current = this.messages.get(messageId)
     if (!current) return
-    this.messages.set(messageId, MailboxMessageSchema.parse({ ...current, status: 'completed', updatedAt: new Date().toISOString() }))
+    this.messages.set(messageId, MailboxMessageSchema.parse({ ...current, status, updatedAt: new Date().toISOString() }))
   }
 
   async listForRun(runId: string): Promise<MailboxMessage[]> {

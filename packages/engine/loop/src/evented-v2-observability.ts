@@ -1,4 +1,4 @@
-import type { AgentRun, MultiAgentEvent, MultiAgentOutboxIntent, MultiAgentRun } from '@qiongqi/contracts'
+import type { AgentRun, MultiAgentEvent, MultiAgentOutboxIntent, MultiAgentRun, PeerArtifact } from '@qiongqi/contracts'
 
 export type EventedV2TimelineEvent = MultiAgentEvent & {
   seq: number
@@ -11,6 +11,7 @@ export type EventedV2TimelineAgentRun = Pick<
   completedAt?: string
   summary?: string
   error?: string
+  peerArtifact?: PeerArtifact
 }
 
 export type EventedV2TimelineOutboxIntent = Pick<
@@ -86,7 +87,8 @@ export function buildEventedV2RunTimeline(run: MultiAgentRun): EventedV2RunTimel
       updatedAt: agentRun.updatedAt,
       ...(agentRun.completedAt !== undefined ? { completedAt: agentRun.completedAt } : {}),
       ...(agentRun.summary !== undefined ? { summary: agentRun.summary } : {}),
-      ...(agentRun.error !== undefined ? { error: agentRun.error } : {})
+      ...(agentRun.error !== undefined ? { error: agentRun.error } : {}),
+      ...(agentRun.peerArtifact !== undefined ? { peerArtifact: agentRun.peerArtifact } : {})
     })),
     outbox: run.outbox.map((intent) => ({
       outboxId: intent.outboxId,

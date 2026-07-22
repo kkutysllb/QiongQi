@@ -19,6 +19,7 @@ import {
   QiongqiCapabilitiesConfig,
   RuntimeCapabilityManifest,
   RuntimeTuningConfigSchema,
+  PeerArtifactSchema,
   TurnSchema,
   buildRuntimeCapabilityManifest,
   emptyUsageSnapshot,
@@ -39,10 +40,12 @@ import {
 describe('contracts', () => {
   it('parses evented v2 outbox reconciler runtime tuning', () => {
     const runtime = RuntimeTuningConfigSchema.parse({
-      eventedV2OutboxReconciler: { enabled: true, intervalMs: 10_000 }
+      eventedV2OutboxReconciler: { enabled: true, intervalMs: 10_000 },
+      eventedV2RemoteAgent: { timeoutMs: 30_000 }
     })
 
     expect(runtime.eventedV2OutboxReconciler).toEqual({ enabled: true, intervalMs: 10_000 })
+    expect(runtime.eventedV2RemoteAgent).toEqual({ timeoutMs: 30_000 })
   })
 
   it('parses a declarative evented v2 agent graph runtime tuning', () => {
@@ -78,6 +81,30 @@ describe('contracts', () => {
         ]
       }
     })).toThrow()
+  })
+
+  it('parses peer artifacts with structured A2A artifacts', () => {
+    const artifact = PeerArtifactSchema.parse({
+      peerCardId: 'peer_researcher',
+      status: 'completed',
+      summary: 'done',
+      artifacts: [{
+        id: 'artifact_1',
+        mimeType: 'text/markdown',
+        label: 'Report',
+        text: '# Report',
+        tags: ['assistant_text']
+      }]
+    })
+
+    expect(artifact.artifacts).toEqual([{
+      id: 'artifact_1',
+      mimeType: 'text/markdown',
+      label: 'Report',
+      text: '# Report',
+      tags: ['assistant_text'],
+      isError: false
+    }])
   })
 
   it('defaults explicit skill activations for legacy turn records', () => {

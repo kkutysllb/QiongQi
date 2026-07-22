@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createQiongqiServeRuntime } from '@qiongqi/http'
-import type { AgentCard } from '@qiongqi/contracts'
+import type { AgentCard, AgentGraph } from '@qiongqi/contracts'
 
 type RuntimeOptions = Parameters<typeof createQiongqiServeRuntime>[0]
 
@@ -224,6 +224,67 @@ describe('runtime factory evented_v2 multi-agent wiring', () => {
     }
   })
 
+  it('passes configured remote agent timeouts into the evented_v2 remote worker', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
+    const runtime = await createQiongqiServeRuntime({
+      host: '127.0.0.1',
+      port: 0,
+      dataDir,
+      runtimeToken: 'tok',
+      apiKey: 'test-key',
+      baseUrl: 'http://localhost',
+      model: 'test-model',
+      approvalPolicy: 'never',
+      sandboxMode: 'danger-full-access',
+      tokenEconomyMode: false,
+      insecure: true,
+      orchestrationMode: 'evented_v2',
+      runtime: {
+        eventedV2AgentGraph: remoteOutcomeGraph(),
+        eventedV2AgentPeers: { specialist: 'peer_specialist' },
+        eventedV2RemoteAgent: { timeoutMs: 1 }
+      }
+    })
+    try {
+      await runtime.peerRegistry?.registerLocal({
+        card: peerCard('peer_specialist'),
+        invoke: async (_task, signal) => new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      })
+      const run = await runtime.multiAgentRuntime?.start({
+        threadId: 'thread_1',
+        turnId: 'turn_1',
+        workspaceKey: 'workspace_1',
+        prompt: 'Use remote specialist.'
+      })
+      expect(run).toBeDefined()
+      await runtime.multiAgentRuntime?.handoff({
+        runId: run!.runId,
+        sourceAgentId: 'Qiongqi',
+        targetAgentId: 'specialist',
+        prompt: 'Handle remotely.'
+      })
+
+      const result = await runtime.multiAgentRemoteWorker?.processNext({ agentId: 'specialist' })
+
+      expect(result).toMatchObject({ processed: true, peerStatus: 'aborted' })
+      await expect(runtime.multiAgentRuntime?.timeline(run!.runId)).resolves.toMatchObject({
+        agentRuns: [
+          expect.objectContaining({ agentId: 'Qiongqi' }),
+          expect.objectContaining({
+            agentId: 'specialist',
+            status: 'aborted',
+            error: 'evented_v2 remote agent task timed out after 1ms'
+          })
+        ]
+      })
+    } finally {
+      await runtime.shutdown?.()
+      await rm(dataDir, { recursive: true, force: true })
+    }
+  })
+
   it('rejects an invalid evented_v2 agent graph from runtime config', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'qiongqi-runtime-evented-v2-'))
     try {
@@ -285,5 +346,26 @@ function peerCard(id: string): AgentCard {
       agentCard: '/.well-known/agent-card.json',
       a2a: '/a2a'
     }
+  }
+}
+
+function remoteOutcomeGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'remote_outcome',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'Qiongqi' },
+      { id: 'handoff_specialist', kind: 'handoff', targetAgentId: 'specialist' },
+      { id: 'specialist', kind: 'agent', agentId: 'specialist' },
+      { id: 'done', kind: 'terminate' }
+    ],
+    edges: [
+      { from: 'manager', to: 'handoff_specialist', condition: 'handoff' },
+      { from: 'handoff_specialist', to: 'specialist', condition: 'accepted' },
+      { from: 'specialist', to: 'done', condition: 'completed' },
+      { from: 'specialist', to: 'done', condition: 'failed' },
+      { from: 'specialist', to: 'done', condition: 'aborted' }
+    ]
   }
 }

@@ -66,6 +66,9 @@
     },
     "eventedV2AgentPeers": {
       "specialist": "peer_specialist"
+    },
+    "eventedV2RemoteAgent": {
+      "timeoutMs": 30000
     }
   },
   "models": {

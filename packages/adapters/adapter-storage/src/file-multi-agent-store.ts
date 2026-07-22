@@ -291,7 +291,7 @@ export class FileMailboxStore implements MailboxStore {
     })
   }
 
-  async complete(messageId: string): Promise<void> {
+  async complete(messageId: string, status: 'completed' | 'failed' | 'aborted' = 'completed'): Promise<void> {
     safeSegment(messageId, 'messageId')
     const all = await this.listAll()
     const current = all.find((message) => message.messageId === messageId)
@@ -302,7 +302,7 @@ export class FileMailboxStore implements MailboxStore {
         throw error
       })
       if (!latest) return
-      await this.write(MailboxMessageSchema.parse({ ...latest, status: 'completed', updatedAt: new Date().toISOString() }))
+      await this.write(MailboxMessageSchema.parse({ ...latest, status, updatedAt: new Date().toISOString() }))
     })
   }
 

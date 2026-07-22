@@ -76,6 +76,9 @@ export type EventedV2RemoteAgentWorkerOptions = {
   runs?: Pick<MultiAgentRunStore, 'load'>
   peerInvoker: EventedV2PeerInvoker
   agentPeers: Record<string, string>
+  timeoutMs?: number
+  setTimeout?: (callback: () => void, ms: number) => unknown
+  clearTimeout?: (timer: unknown) => void
 }
 
 export type EventedV2RemoteAgentWorkerProcessResult = EventedV2AgentWorkerProcessResult & {
@@ -116,20 +119,36 @@ export class EventedV2RemoteAgentWorker {
     const peerCardId = this.options.agentPeers[input.agentId]
     if (!peerCardId) throw new Error(`No peer binding configured for evented_v2 agent: ${input.agentId}`)
     const run = await this.options.runs?.load(message.runId)
-    const signal = input.signal ?? new AbortController().signal
+    const invocation = remoteInvocationSignal({
+      signal: input.signal,
+      timeoutMs: this.options.timeoutMs,
+      setTimeout: this.options.setTimeout,
+      clearTimeout: this.options.clearTimeout
+    })
     const task: PeerTask = {
       prompt: promptFromMailboxMessage(message),
       ...(run?.workspaceKey ? { workspace: run.workspaceKey } : {}),
       label: `evented_v2:${input.agentId}`
     }
-    const artifact = await this.options.peerInvoker.invokePeer(peerCardId, task, signal)
+    let artifact: PeerArtifact
+    try {
+      artifact = await this.options.peerInvoker.invokePeer(peerCardId, task, invocation.signal)
+    } catch (error) {
+      if (!isAbortLikeError(error, invocation.signal)) throw error
+      artifact = abortedPeerArtifact(peerCardId, error, invocation.signal)
+    } finally {
+      invocation.cleanup()
+    }
     await this.options.runtime.completeAgentTask({
       runId: message.runId,
       agentId: input.agentId,
       condition: conditionFromPeerArtifact(artifact),
-      summary: artifact.summary ?? artifact.error
+      status: artifact.status,
+      summary: artifact.summary ?? artifact.error,
+      error: artifact.error,
+      peerArtifact: artifact
     })
-    await this.options.mailbox.complete(message.messageId)
+    await this.options.mailbox.complete(message.messageId, artifact.status)
     return {
       processed: true,
       runId: message.runId,
@@ -444,7 +463,10 @@ export class EventedV2MultiAgentRuntime {
     runId: string
     agentId: string
     condition?: string
+    status?: 'completed' | 'failed' | 'aborted'
     summary?: string
+    error?: string
+    peerArtifact?: PeerArtifact
   }): Promise<MultiAgentRun> {
     return this.withRunLock(input.runId, () => this.withRunMutationLease(input.runId, async (fence) =>
       this.options.runs.update(input.runId, (current) => {
@@ -455,6 +477,7 @@ export class EventedV2MultiAgentRuntime {
       }
       const now = this.options.nowIso()
       const condition = input.condition ?? 'completed'
+      const status = input.status ?? agentRunStatusFromCondition(condition)
       const nextNodeId = nextNodeForCondition(this.graph, activeNode.id, condition)
       if (!nextNodeId) throw new Error(`No ${condition} edge from node: ${activeNode.id}`)
       const agentRunIndex = latestAgentRunIndex(current, input.agentId, activeNode.id)
@@ -464,8 +487,10 @@ export class EventedV2MultiAgentRuntime {
           index === agentRunIndex
             ? {
                 ...agentRun,
-                status: 'completed',
+                status,
                 summary: input.summary ?? agentRun.summary,
+                ...(input.error !== undefined ? { error: input.error } : {}),
+                ...(input.peerArtifact !== undefined ? { peerArtifact: input.peerArtifact } : {}),
                 completedAt: agentRun.completedAt ?? now,
                 updatedAt: now
               }
@@ -476,7 +501,12 @@ export class EventedV2MultiAgentRuntime {
           type: 'node_completed',
           nodeId: activeNode.id,
           agentId: input.agentId,
-          payload: { condition, summary: input.summary },
+          payload: {
+            condition,
+            summary: input.summary,
+            ...(input.error !== undefined ? { error: input.error } : {}),
+            ...(input.peerArtifact !== undefined ? { peerArtifact: input.peerArtifact } : {})
+          },
           timestamp: now
         }],
         updatedAt: now
@@ -747,6 +777,61 @@ function conditionFromPeerArtifact(artifact: PeerArtifact): string {
     failed: 'failed',
     aborted: 'aborted'
   }[artifact.status]
+}
+
+function abortedPeerArtifact(peerCardId: string, error: unknown, signal: AbortSignal): PeerArtifact {
+  return {
+    peerCardId,
+    status: 'aborted',
+    error: errorMessage(signal.reason ?? error)
+  }
+}
+
+function remoteInvocationSignal(input: {
+  signal?: AbortSignal
+  timeoutMs?: number
+  setTimeout?: (callback: () => void, ms: number) => unknown
+  clearTimeout?: (timer: unknown) => void
+}): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController()
+  let timer: unknown
+  const setTimer = input.setTimeout ?? ((callback: () => void, ms: number) => setTimeout(callback, ms))
+  const clearTimer = input.clearTimeout ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>))
+  const abortFromParent = () => {
+    controller.abort(input.signal?.reason ?? new Error('evented_v2 remote agent task aborted'))
+  }
+  if (input.signal?.aborted) {
+    abortFromParent()
+  } else {
+    input.signal?.addEventListener('abort', abortFromParent, { once: true })
+  }
+  if (input.timeoutMs !== undefined && input.timeoutMs > 0 && !controller.signal.aborted) {
+    timer = setTimer(() => {
+      controller.abort(new Error(`evented_v2 remote agent task timed out after ${input.timeoutMs}ms`))
+    }, input.timeoutMs)
+  }
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timer !== undefined) clearTimer(timer)
+      input.signal?.removeEventListener('abort', abortFromParent)
+    }
+  }
+}
+
+function isAbortLikeError(error: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true
+  return error instanceof Error && error.name === 'AbortError'
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function agentRunStatusFromCondition(condition: string): 'completed' | 'failed' | 'aborted' {
+  if (condition === 'failed') return 'failed'
+  if (condition === 'aborted') return 'aborted'
+  return 'completed'
 }
 
 function latestAgentRunIndex(run: MultiAgentRun, agentId: string, nodeId: string): number {

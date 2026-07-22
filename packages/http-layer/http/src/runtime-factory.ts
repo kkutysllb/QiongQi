@@ -1591,7 +1591,10 @@ async function assembleRuntime(input: {
         mailbox: multiAgentMailbox,
         runs: multiAgentRuns,
         peerInvoker: tools.peerRegistry,
-        agentPeers: eventedV2AgentPeerBindings
+        agentPeers: eventedV2AgentPeerBindings,
+        ...(options.runtime?.eventedV2RemoteAgent?.timeoutMs !== undefined
+          ? { timeoutMs: options.runtime.eventedV2RemoteAgent.timeoutMs }
+          : {})
       })
     : undefined
   const eventedV2OutboxReconcilerConfig = options.runtime?.eventedV2OutboxReconciler

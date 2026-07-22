@@ -567,7 +567,19 @@ describe('EventedV2MultiAgentRuntime', () => {
   it('invokes a remote peer for a queued agent task and advances the run', async () => {
     const runs = new InMemoryMultiAgentRunStore()
     const mailbox = new InMemoryMailboxStore()
-    const peer = new RecordingPeerInvoker()
+    const peer = new RecordingPeerInvoker({
+      peerCardId: 'peer_researcher',
+      status: 'completed',
+      summary: 'Remote research complete.',
+      artifacts: [{
+        id: 'artifact_1',
+        mimeType: 'text/markdown',
+        label: 'Research report',
+        text: '# Remote research',
+        tags: ['assistant_text'],
+        isError: false
+      }]
+    })
     const graph = defaultManagerSpecialistGraph({ managerAgentId: 'manager', specialistAgentId: 'researcher' })
     const runtime = new EventedV2MultiAgentRuntime({
       runs,
@@ -612,7 +624,207 @@ describe('EventedV2MultiAgentRuntime', () => {
     expect(saved).toMatchObject({ status: 'completed', activeNodeId: 'done' })
     expect(saved?.agentRuns.find((agentRun) => agentRun.agentId === 'researcher')).toMatchObject({
       status: 'completed',
-      summary: 'Remote research complete.'
+      summary: 'Remote research complete.',
+      peerArtifact: {
+        peerCardId: 'peer_researcher',
+        status: 'completed',
+        artifacts: [{
+          id: 'artifact_1',
+          mimeType: 'text/markdown',
+          label: 'Research report',
+          text: '# Remote research',
+          tags: ['assistant_text'],
+          isError: false
+        }]
+      }
+    })
+    expect(saved?.events.find((event) => event.type === 'node_completed' && event.agentId === 'researcher')).toMatchObject({
+      payload: {
+        condition: 'completed',
+        peerArtifact: {
+          peerCardId: 'peer_researcher',
+          status: 'completed'
+        }
+      }
+    })
+  })
+
+  it('records failed peer artifacts without marking the agent run completed', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const graph = remoteOutcomeGraph()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2RemoteAgentWorker({
+      runtime,
+      mailbox,
+      runs,
+      peerInvoker: new RecordingPeerInvoker({
+        peerCardId: 'peer_researcher',
+        status: 'failed',
+        error: 'remote model failed',
+        artifacts: [{
+          id: 'artifact_error',
+          mimeType: 'text/plain',
+          text: 'remote model failed',
+          isError: true,
+          tags: ['error']
+        }]
+      }),
+      agentPeers: { researcher: 'peer_researcher' }
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    const result = await worker.processNext({ agentId: 'researcher' })
+
+    const saved = await runs.load(run.runId)
+    expect(result).toMatchObject({ processed: true, peerStatus: 'failed' })
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'failed' }])
+    expect(saved).toMatchObject({ status: 'completed', activeNodeId: 'done' })
+    expect(saved?.agentRuns.find((agentRun) => agentRun.agentId === 'researcher')).toMatchObject({
+      status: 'failed',
+      error: 'remote model failed',
+      peerArtifact: {
+        peerCardId: 'peer_researcher',
+        status: 'failed',
+        error: 'remote model failed',
+        artifacts: [{
+          id: 'artifact_error',
+          mimeType: 'text/plain',
+          text: 'remote model failed',
+          isError: true,
+          tags: ['error']
+        }]
+      }
+    })
+  })
+
+  it('converts remote peer cancellation into an aborted agent task', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const graph = remoteOutcomeGraph()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2RemoteAgentWorker({
+      runtime,
+      mailbox,
+      runs,
+      peerInvoker: {
+        invokePeer: async (_cardId, _task, signal) => {
+          expect(signal.aborted).toBe(true)
+          throw abortError('user cancelled remote agent')
+        }
+      },
+      agentPeers: { researcher: 'peer_researcher' }
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+    const controller = new AbortController()
+    controller.abort(new Error('user cancelled remote agent'))
+
+    const result = await worker.processNext({ agentId: 'researcher', signal: controller.signal })
+
+    expect(result).toMatchObject({ processed: true, peerStatus: 'aborted' })
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'aborted' }])
+    expect(await runs.load(run.runId)).toMatchObject({
+      status: 'completed',
+      activeNodeId: 'done',
+      agentRuns: [
+        expect.objectContaining({ agentId: 'manager' }),
+        expect.objectContaining({
+          agentId: 'researcher',
+          status: 'aborted',
+          error: 'user cancelled remote agent',
+          peerArtifact: {
+            peerCardId: 'peer_researcher',
+            status: 'aborted',
+            error: 'user cancelled remote agent'
+          }
+        })
+      ]
+    })
+  })
+
+  it('times out a remote peer invocation and records an aborted agent task', async () => {
+    const runs = new InMemoryMultiAgentRunStore()
+    const mailbox = new InMemoryMailboxStore()
+    const graph = remoteOutcomeGraph()
+    const runtime = new EventedV2MultiAgentRuntime({
+      runs,
+      mailbox,
+      graph,
+      ids: nextId(),
+      nowIso: fixedClock()
+    })
+    const worker = new EventedV2RemoteAgentWorker({
+      runtime,
+      mailbox,
+      runs,
+      timeoutMs: 1,
+      peerInvoker: {
+        invokePeer: async (_cardId, _task, signal) => new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      },
+      agentPeers: { researcher: 'peer_researcher' }
+    })
+    const run = await runtime.start({
+      threadId: 'thread_1',
+      turnId: 'turn_1',
+      workspaceKey: 'workspace_1',
+      prompt: 'Research evented v2.'
+    })
+    await runtime.handoff({
+      runId: run.runId,
+      sourceAgentId: 'manager',
+      targetAgentId: 'researcher',
+      prompt: 'Summarize current loop.'
+    })
+
+    const result = await worker.processNext({ agentId: 'researcher' })
+
+    expect(result).toMatchObject({ processed: true, peerStatus: 'aborted' })
+    expect(await mailbox.listForRun(run.runId)).toMatchObject([{ status: 'aborted' }])
+    expect(await runs.load(run.runId)).toMatchObject({
+      agentRuns: [
+        expect.objectContaining({ agentId: 'manager' }),
+        expect.objectContaining({
+          agentId: 'researcher',
+          status: 'aborted',
+          error: 'evented_v2 remote agent task timed out after 1ms'
+        })
+      ]
     })
   })
 
@@ -882,6 +1094,12 @@ function nextId(): (prefix: string) => string {
   return (prefix) => `${prefix}_${++seq}`
 }
 
+function abortError(message: string): Error {
+  const error = new Error(message)
+  error.name = 'AbortError'
+  return error
+}
+
 function minimalRun(): MultiAgentRun {
   return {
     version: 1,
@@ -990,6 +1208,27 @@ function retryAfterManagerGraph(): AgentGraph {
   }
 }
 
+function remoteOutcomeGraph(): AgentGraph {
+  return {
+    version: 1,
+    graphId: 'remote_outcome',
+    startNodeId: 'manager',
+    nodes: [
+      { id: 'manager', kind: 'agent', agentId: 'manager' },
+      { id: 'handoff_researcher', kind: 'handoff', targetAgentId: 'researcher' },
+      { id: 'researcher', kind: 'agent', agentId: 'researcher' },
+      { id: 'done', kind: 'terminate' }
+    ],
+    edges: [
+      { from: 'manager', to: 'handoff_researcher', condition: 'handoff' },
+      { from: 'handoff_researcher', to: 'researcher', condition: 'accepted' },
+      { from: 'researcher', to: 'done', condition: 'completed' },
+      { from: 'researcher', to: 'done', condition: 'failed' },
+      { from: 'researcher', to: 'done', condition: 'aborted' }
+    ]
+  }
+}
+
 class FailFirstUpdateAfterMutateRunStore extends InMemoryMultiAgentRunStore implements MultiAgentRunStore {
   private updates = 0
 
@@ -1054,12 +1293,14 @@ class FailFirstEnqueueFileMailboxStore extends FileMailboxStore {
 class RecordingPeerInvoker {
   readonly calls: Array<{ cardId: string; task: PeerTask }> = []
 
+  constructor(private readonly artifact: PeerArtifact = {
+    peerCardId: 'peer_researcher',
+    status: 'completed',
+    summary: 'Remote research complete.'
+  }) {}
+
   async invokePeer(cardId: string, task: PeerTask): Promise<PeerArtifact> {
     this.calls.push({ cardId, task })
-    return {
-      peerCardId: cardId,
-      status: 'completed',
-      summary: 'Remote research complete.'
-    }
+    return { ...this.artifact, peerCardId: cardId }
   }
 }

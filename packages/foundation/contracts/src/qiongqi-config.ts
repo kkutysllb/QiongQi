@@ -136,6 +136,9 @@ export const RuntimeTuningConfigSchema = z
     }).strict().optional(),
     eventedV2AgentGraph: AgentGraphSchema.optional(),
     eventedV2AgentPeers: z.record(z.string().min(1), z.string().min(1)).optional(),
+    eventedV2RemoteAgent: z.object({
+      timeoutMs: PositiveInt.optional()
+    }).strict().optional(),
     modelStreamIdleTimeoutMs: PositiveInt.optional(),
     toolStorm: z
       .object({

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { BudgetStateSchema } from './runtime-kernel.js'
+import { PeerArtifactSchema } from './agent-identity.js'
 
 const NonEmptyString = z.string().trim().min(1)
 
@@ -104,7 +105,8 @@ export const AgentRunSchema = z.object({
   updatedAt: NonEmptyString,
   completedAt: NonEmptyString.optional(),
   summary: z.string().optional(),
-  error: z.string().optional()
+  error: z.string().optional(),
+  peerArtifact: PeerArtifactSchema.optional()
 }).strict()
 export type AgentRun = z.infer<typeof AgentRunSchema>
 

@@ -16,7 +16,22 @@ describe('evented v2 observability projections', () => {
         { seq: 2, type: 'node_started', nodeId: 'wait_approval' }
       ],
       agentRuns: [
-        { agentRunId: 'agent_run_1', agentId: 'manager', status: 'completed' }
+        {
+          agentRunId: 'agent_run_1',
+          agentId: 'manager',
+          status: 'completed',
+          peerArtifact: {
+            peerCardId: 'peer_manager',
+            status: 'completed',
+            artifacts: [{
+              id: 'artifact_1',
+              mimeType: 'text/markdown',
+              text: '# Done',
+              tags: ['assistant_text'],
+              isError: false
+            }]
+          }
+        }
       ],
       outbox: [
         { outboxId: 'outbox_1', status: 'pending', messageId: 'msg_1' }
@@ -68,7 +83,19 @@ function sampleRun(): MultiAgentRun {
       startedAt: '2026-07-21T00:00:00.000Z',
       updatedAt: '2026-07-21T00:00:01.000Z',
       completedAt: '2026-07-21T00:00:01.000Z',
-      summary: 'done'
+      summary: 'done',
+      peerArtifact: {
+        peerCardId: 'peer_manager',
+        status: 'completed',
+        summary: 'done',
+        artifacts: [{
+          id: 'artifact_1',
+          mimeType: 'text/markdown',
+          text: '# Done',
+          tags: ['assistant_text'],
+          isError: false
+        }]
+      }
     }],
     events: [
       {

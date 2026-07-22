@@ -31,6 +31,6 @@ export interface MultiAgentRunStore {
 export interface MailboxStore {
   enqueue(message: MailboxMessage): Promise<void>
   claimNext(agentId: string): Promise<MailboxMessage | undefined>
-  complete(messageId: string): Promise<void>
+  complete(messageId: string, status?: 'completed' | 'failed' | 'aborted'): Promise<void>
   listForRun(runId: string): Promise<MailboxMessage[]>
 }
